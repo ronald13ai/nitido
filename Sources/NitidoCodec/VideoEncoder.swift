@@ -12,6 +12,14 @@ public enum CodecError: Error, Equatable {
     case encode(OSStatus)
     case decode(OSStatus)
     case formatDescription(OSStatus)
+    /// VideoToolbox rejected a session property; the string is the property key, such as "DataRateLimits".
+    case property(String, OSStatus)
+    /// `VTCompressionSessionPrepareToEncodeFrames` failed.
+    case prepare(OSStatus)
+    /// VideoToolbox dropped a frame that `encode` had accepted.
+    case frameDropped
+    /// VideoToolbox emitted an encoded frame with no data.
+    case missingData
 }
 
 public struct EncodedFrame: Sendable {
@@ -32,15 +40,35 @@ public struct EncodedFrame: Sendable {
     public var videoFrame: VideoFrame { VideoFrame(seq: seq, captureHostTimeNs: captureHostTimeNs, isKey: isKey, data: data) }
 }
 
-/// Realtime hardware encoder. Thread-safe; `onFrame` is called on a VideoToolbox queue.
+/// Realtime hardware encoder. Thread-safe: every member may be used from any thread, including
+/// `invalidate()` while another thread is inside `encode(_:captureHostTimeNs:)`.
+/// `onFrame` is called on a VideoToolbox queue; `onError` on a VideoToolbox queue, or on the
+/// calling thread for a failure inside `encode` or `setBitrate`.
 public final class VideoEncoder: @unchecked Sendable {
     public let codec: Codec
     public let width: Int
     public let height: Int
-    public var onFrame: (@Sendable (EncodedFrame) -> Void)?
+    public var onFrame: (@Sendable (EncodedFrame) -> Void)? {
+        get { lock.withLock { frameHandler } }
+        set { lock.withLock { frameHandler = newValue } }
+    }
+    /// Every encoder failure that does not throw: a frame `encode` accepted that VideoToolbox then
+    /// failed or dropped, a frame VideoToolbox refused inside `encode`, and a tuning property
+    /// VideoToolbox rejected (in `init` or `setBitrate`). Each one is also logged. The encoder keeps
+    /// running; the caller decides what the UI shows. Failures raised before this is set (a property
+    /// rejected inside `init`) are delivered as soon as it is set. Frames cut short by `invalidate()`
+    /// are not failures and are not reported.
+    public var onError: (@Sendable (CodecError) -> Void)? {
+        get { failures.onError }
+        set { failures.onError = newValue }
+    }
 
-    private var session: VTCompressionSession?
     private let lock = NSLock()
+    private let failures = FailureChannel()
+    // Guarded by `lock`. VideoToolbox is never called while it is held: the output handler can run
+    // on the calling thread and takes the lock itself.
+    private var session: VTCompressionSession?
+    private var frameHandler: (@Sendable (EncodedFrame) -> Void)?
     private var seq: UInt32 = 0
     private var forceKey = true
     private var inFlight = 0
@@ -64,32 +92,69 @@ public final class VideoEncoder: @unchecked Sendable {
         guard status == noErr, let s = created else { throw CodecError.sessionCreate(status) }
         codec = chosen
         session = s
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: chosen == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 120 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanFalse)
-        setBitrate(bitsPerSecond)
-        VTCompressionSessionPrepareToEncodeFrames(s)
+        do {
+            try configure(s, codec: chosen, bitsPerSecond: bitsPerSecond)
+        } catch {
+            invalidate()
+            throw error
+        }
     }
 
+    /// RealTime and no frame reordering are required: without them VideoToolbox may hold frames
+    /// back (lookahead, B-frames), which stalls the two-in-flight cap and breaks in-order decoding,
+    /// so a rejection throws, and so does a failed prepare. The rest are tuning: a rejection leaves
+    /// VideoToolbox's default in place and goes to `onError`.
+    private func configure(_ s: VTCompressionSession, codec: Codec, bitsPerSecond: Int) throws {
+        try require(s, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
+        try require(s, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
+        tune(s, kVTCompressionPropertyKey_ProfileLevel,
+             codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
+        tune(s, kVTCompressionPropertyKey_MaxKeyFrameInterval, 120 as CFNumber)
+        tune(s, kVTCompressionPropertyKey_ExpectedFrameRate, 60 as CFNumber)
+        tune(s, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanFalse)
+        setBitrate(bitsPerSecond)
+        let status = VTCompressionSessionPrepareToEncodeFrames(s)
+        guard status == noErr else {
+            log.error("prepare to encode: \(status)")
+            throw CodecError.prepare(status)
+        }
+    }
+
+    private func require(_ s: VTCompressionSession, _ key: CFString, _ value: CFTypeRef?) throws {
+        let status = VTSessionSetProperty(s, key: key, value: value)
+        guard status == noErr else {
+            log.error("required property \(key as String, privacy: .public) rejected: \(status)")
+            throw CodecError.property(key as String, status)
+        }
+    }
+
+    private func tune(_ s: VTCompressionSession, _ key: CFString, _ value: CFTypeRef?) {
+        let status = VTSessionSetProperty(s, key: key, value: value)
+        guard status != noErr else { return }
+        guard !isInvalidated else {
+            log.debug("property \(key as String, privacy: .public) not set, encoder invalidated: \(status)")
+            return
+        }
+        failures.report(.property(key as String, status), "property \(key as String) rejected")
+    }
+
+    private var isInvalidated: Bool { lock.withLock { session == nil } }
+
     public func setBitrate(_ bitsPerSecond: Int) {
-        guard let session else { return }
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitsPerSecond as CFNumber)
+        guard let session = lock.withLock({ self.session }) else { return }
+        tune(session, kVTCompressionPropertyKey_AverageBitRate, bitsPerSecond as CFNumber)
         let limits = [bitsPerSecond * 3 / 2 / 8, 1] as CFArray   // bytes per one-second window
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
+        tune(session, kVTCompressionPropertyKey_DataRateLimits, limits)
     }
 
     public func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
 
-    /// Returns false when the frame was dropped because two frames are already being encoded.
+    /// Returns false when the frame was dropped because two frames are already being encoded, and
+    /// also when the encoder was invalidated or VideoToolbox refused the frame (reported to `onError`).
     @discardableResult
     public func encode(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) -> Bool {
-        guard let session else { return false }
         lock.lock()
-        guard inFlight < 2 else { lock.unlock(); return false }
+        guard let session, inFlight < 2 else { lock.unlock(); return false }
         inFlight += 1
         let key = forceKey; forceKey = false
         let n = seq; seq &+= 1
@@ -98,15 +163,26 @@ public final class VideoEncoder: @unchecked Sendable {
         let pts = CMTime(value: CMTimeValue(captureHostTimeNs / 1000), timescale: 1_000_000)
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         let status = VTCompressionSessionEncodeFrame(session, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid,
-                                                     frameProperties: props, infoFlagsOut: nil) { [weak self] status, _, sample in
+                                                     frameProperties: props, infoFlagsOut: nil) { [weak self] status, flags, sample in
             guard let self else { return }
-            self.lock.lock(); self.inFlight -= 1; self.lock.unlock()
-            guard status == noErr, let sample else { log.error("encode callback: \(status)"); return }
-            self.emit(sample, seq: n, captureHostTimeNs: captureHostTimeNs)
+            let live = self.lock.withLock { self.inFlight -= 1; return self.session != nil }
+            if status == noErr, let sample {
+                self.emit(sample, seq: n, captureHostTimeNs: captureHostTimeNs)
+            } else if !live {
+                log.debug("frame \(n) ended by invalidate: \(status)")
+            } else if status != noErr {
+                self.failures.report(.encode(status), "encode callback, frame \(n)")
+            } else {
+                self.failures.report(.frameDropped, "encoder dropped frame \(n), flags \(flags.rawValue)")
+            }
         }
         if status != noErr {
-            lock.lock(); inFlight -= 1; lock.unlock()
-            log.error("encode: \(status)")
+            let live = lock.withLock { inFlight -= 1; return self.session != nil }
+            if live {
+                failures.report(.encode(status), "encode frame \(n)")
+            } else {
+                log.debug("frame \(n) refused, encoder invalidated: \(status)")
+            }
             return false
         }
         return true
@@ -118,13 +194,16 @@ public final class VideoEncoder: @unchecked Sendable {
         let isKey = !notSync
         var sets: [Data] = []
         if isKey, let fd = CMSampleBufferGetFormatDescription(sample) { sets = Self.parameterSets(from: fd, codec: codec) }
-        guard let block = CMSampleBufferGetDataBuffer(sample) else { return }
+        guard let block = CMSampleBufferGetDataBuffer(sample) else {
+            failures.report(.missingData, "encoded frame \(seq) has no data buffer")
+            return
+        }
         let length = CMBlockBufferGetDataLength(block)
         var data = Data(count: length)
         let status = data.withUnsafeMutableBytes { raw -> OSStatus in
             CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: raw.baseAddress!)
         }
-        guard status == noErr else { log.error("copy bytes: \(status)"); return }
+        guard status == noErr else { failures.report(.encode(status), "copy bytes of frame \(seq)"); return }
         onFrame?(EncodedFrame(seq: seq, captureHostTimeNs: captureHostTimeNs, isKey: isKey, data: data,
                               parameterSets: sets, codec: codec, width: width, height: height))
     }
@@ -150,11 +229,13 @@ public final class VideoEncoder: @unchecked Sendable {
         return sets
     }
 
+    /// Flushes the frames in flight to `onFrame`, then releases the session. Safe to call while
+    /// another thread is encoding; later calls to `encode` return false.
     public func invalidate() {
-        guard let session else { return }
-        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        VTCompressionSessionInvalidate(session)
-        self.session = nil
+        let taken: VTCompressionSession? = lock.withLock { defer { session = nil }; return session }
+        guard let taken else { return }
+        VTCompressionSessionCompleteFrames(taken, untilPresentationTimeStamp: .invalid)
+        VTCompressionSessionInvalidate(taken)
     }
 
     deinit { invalidate() }

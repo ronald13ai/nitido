@@ -14,9 +14,26 @@ public struct DecodedFrame: @unchecked Sendable {
 }
 
 /// Hardware decoder built from a `VideoConfig`. Rebuild it whenever a new config arrives.
+/// Thread-safe: every member may be used from any thread, including `invalidate()` while another
+/// thread is inside `decode(_:)`.
 public final class VideoDecoder: @unchecked Sendable {
-    public var onFrame: (@Sendable (DecodedFrame) -> Void)?
+    public var onFrame: (@Sendable (DecodedFrame) -> Void)? {
+        get { lock.withLock { frameHandler } }
+        set { lock.withLock { frameHandler = newValue } }
+    }
+    /// Failures `init` and `decode(_:)` do not throw: a tuning property VideoToolbox rejected in
+    /// `init` (RealTime; the decoder still works without it). Each one is also logged. Failures
+    /// raised before this is set are delivered as soon as it is set.
+    public var onError: (@Sendable (CodecError) -> Void)? {
+        get { failures.onError }
+        set { failures.onError = newValue }
+    }
+
+    private let lock = NSLock()
+    private let failures = FailureChannel()
+    // Guarded by `lock`. VideoToolbox is never called while it is held.
     private var session: VTDecompressionSession?
+    private var frameHandler: (@Sendable (DecodedFrame) -> Void)?
     private let format: CMVideoFormatDescription
 
     public init(config: VideoConfig) throws {
@@ -44,13 +61,16 @@ public final class VideoDecoder: @unchecked Sendable {
         let st = VTDecompressionSessionCreate(allocator: nil, formatDescription: fd, decoderSpecification: nil,
                                               imageBufferAttributes: attrs, outputCallback: nil, decompressionSessionOut: &s)
         guard st == noErr, let s else { throw CodecError.sessionCreate(st) }
-        VTSessionSetProperty(s, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         session = s
+        let realTime = VTSessionSetProperty(s, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        if realTime != noErr {
+            failures.report(.property(kVTDecompressionPropertyKey_RealTime as String, realTime), "decoder property RealTime rejected")
+        }
     }
 
     /// Synchronous: `onFrame` fires before this returns. Throws on malformed data.
     public func decode(_ frame: VideoFrame) throws {
-        guard let session else { return }
+        guard let session = lock.withLock({ self.session }) else { return }
         let data = frame.data
         var block: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil,
@@ -76,15 +96,24 @@ public final class VideoDecoder: @unchecked Sendable {
             guard st == noErr, let image, let self else { return }
             self.onFrame?(DecodedFrame(pixelBuffer: image, captureHostTimeNs: t, seq: seq))
         }
-        guard status == noErr else { throw CodecError.decode(status) }
-        let reported = callbackStatus.value
-        guard reported == noErr else { throw CodecError.decode(reported) }
+        let failure = status != noErr ? status : callbackStatus.value
+        guard failure == noErr else {
+            // A decode that raced `invalidate()` is teardown, not bad data: it ends like a decode
+            // after `invalidate()`, without an error.
+            if lock.withLock({ self.session == nil }) {
+                log.debug("frame \(seq) ended by invalidate: \(failure)")
+                return
+            }
+            throw CodecError.decode(failure)
+        }
     }
 
+    /// Releases the session. Safe to call while another thread is decoding; later calls to
+    /// `decode` return without decoding.
     public func invalidate() {
-        guard let session else { return }
-        VTDecompressionSessionInvalidate(session)
-        self.session = nil
+        let taken: VTDecompressionSession? = lock.withLock { defer { session = nil }; return session }
+        guard let taken else { return }
+        VTDecompressionSessionInvalidate(taken)
     }
 
     deinit { invalidate() }
