@@ -23,6 +23,25 @@ public enum CaptureEvent: Sendable, Equatable {
 
 private let log = Logger(subsystem: "ai.ronar.nitido", category: "capture")
 
+/// Runs async main-actor operations one at a time, in the order they were enqueued.
+/// The main actor can re-enter at every `await`; chaining keeps a start, an update and a stop
+/// from interleaving on the same SCStream.
+@MainActor
+final class SerialOperations {
+    private var tail: Task<Void, Never>?
+
+    @discardableResult
+    func enqueue(_ operation: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
+        let previous = tail
+        let task = Task { @MainActor in
+            await previous?.value
+            await operation()
+        }
+        tail = task
+        return task
+    }
+}
+
 /// Wraps the system content picker and an SCStream. One session, one stream at a time.
 @MainActor
 public final class CaptureSession: NSObject {
@@ -32,7 +51,15 @@ public final class CaptureSession: NSObject {
     private let eventOut: AsyncStream<CaptureEvent>.Continuation
     private let output: FrameOutput
     private let queue = DispatchQueue(label: "ai.ronar.nitido.capture", qos: .userInteractive)
+    /// The stream being started or running. Set before `startCapture()` is awaited so a stop can find it.
     private var stream: SCStream?
+    /// Start, update and stop run through here one at a time.
+    private let operations = SerialOperations()
+    /// Bumped by `stop()`. A start enqueued under an older value is dropped, and a start already
+    /// awaiting `startCapture()` stays silent; the stop queued behind it tears that stream down.
+    private var generation: UInt64 = 0
+    /// True between `presentPicker` and `stop()`; picker updates that land after a stop are ignored.
+    private var acceptsPickerUpdates = false
 
     public override init() {
         let (f, fc) = AsyncStream<CapturedFrame>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -50,21 +77,45 @@ public final class CaptureSession: NSObject {
         config.excludedWindowIDs = excludingWindowIDs.map { Int($0) }
         config.allowsChangingSelectedContent = true
         picker.defaultConfiguration = config
+        acceptsPickerUpdates = true
         picker.add(self)
         picker.isActive = true
         picker.present()
     }
 
+    /// Stops capture. Waits for a start that is still in flight and stops that stream too.
     public func stop() async {
+        generation &+= 1
+        acceptsPickerUpdates = false
         SCContentSharingPicker.shared.isActive = false
         SCContentSharingPicker.shared.remove(self)
-        guard let stream else { return }
-        self.stream = nil
-        do { try await stream.stopCapture() } catch { log.error("stopCapture: \(error.localizedDescription)") }
-        eventOut.yield(.stopped)
+        await operations.enqueue { await self.stopStream() }.value
     }
 
-    private func start(with filter: SCContentFilter) async {
+    private func stopStream() async {
+        guard let stream else { return }
+        self.stream = nil
+        do {
+            try await stream.stopCapture()
+            eventOut.yield(.stopped)
+        } catch {
+            log.error("stopCapture: \(error.localizedDescription, privacy: .public)")
+            eventOut.yield(.failed(error.localizedDescription))
+        }
+    }
+
+    private func pickerDidUpdate(with filter: SCContentFilter) {
+        guard acceptsPickerUpdates else {
+            log.info("Ignored a picker update that arrived after stop")
+            return
+        }
+        let enqueuedGeneration = generation
+        operations.enqueue { await self.start(with: filter, generation: enqueuedGeneration) }
+    }
+
+    private func start(with filter: SCContentFilter, generation enqueuedGeneration: UInt64) async {
+        // A stop() arrived after this start was enqueued.
+        guard enqueuedGeneration == generation else { return }
         let scale = CGFloat(filter.pointPixelScale)
         let rect = filter.contentRect
         let config = SCStreamConfiguration()
@@ -81,18 +132,25 @@ public final class CaptureSession: NSObject {
             do {
                 try await stream.updateContentFilter(filter)
                 try await stream.updateConfiguration(config)
+                guard enqueuedGeneration == generation else { return }
                 eventOut.yield(.started(pixelWidth: config.width, pixelHeight: config.height, scale: scale))
-            } catch { eventOut.yield(.failed(error.localizedDescription)) }
+            } catch {
+                log.error("updateStream: \(error.localizedDescription, privacy: .public)")
+                eventOut.yield(.failed(error.localizedDescription))
+            }
             return
         }
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        self.stream = stream
         do {
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: queue)
             try await stream.startCapture()
-            self.stream = stream
+            // A stop() arrived while starting; it runs next and stops this stream.
+            guard enqueuedGeneration == generation else { return }
             eventOut.yield(.started(pixelWidth: config.width, pixelHeight: config.height, scale: scale))
         } catch {
-            log.error("startCapture: \(error.localizedDescription)")
+            if self.stream === stream { self.stream = nil }
+            log.error("startCapture: \(error.localizedDescription, privacy: .public)")
             eventOut.yield(.failed(error.localizedDescription))
         }
     }
@@ -102,21 +160,29 @@ extension CaptureSession: SCContentSharingPickerObserver {
     nonisolated public func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
         // SCContentFilter is not Sendable; the picker hands it over and never touches it again.
         nonisolated(unsafe) let filter = filter
-        Task { @MainActor in await self.start(with: filter) }
+        Task { @MainActor in self.pickerDidUpdate(with: filter) }
     }
     nonisolated public func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
         Task { @MainActor in self.eventOut.yield(.cancelled) }
     }
     nonisolated public func contentSharingPickerStartDidFailWithError(_ error: any Error) {
-        Task { @MainActor in self.eventOut.yield(.failed(error.localizedDescription)) }
+        let message = error.localizedDescription
+        log.error("pickerStart: \(message, privacy: .public)")
+        Task { @MainActor in self.eventOut.yield(.failed(message)) }
     }
 }
 
 extension CaptureSession: SCStreamDelegate {
     nonisolated public func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        let message = error.localizedDescription
+        log.error("streamDidStop: \(message, privacy: .public)")
+        // Only compared by identity on the main actor, never used there.
+        nonisolated(unsafe) let stopped = stream
         Task { @MainActor in
+            // A stream that was already stopped or replaced is only logged; the live one reaches the UI.
+            guard self.stream === stopped else { return }
             self.stream = nil
-            self.eventOut.yield(.failed(error.localizedDescription))
+            self.eventOut.yield(.failed(message))
         }
     }
 }
