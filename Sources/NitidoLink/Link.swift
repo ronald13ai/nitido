@@ -7,39 +7,67 @@ import os
 private let log = Logger(subsystem: "ai.ronar.nitido", category: "link")
 
 /// One encrypted connection. Frames messages, answers pings, measures RTT and clock offset, tracks send backlog.
+///
+/// Threading: everything that changes the link runs on `queue` (Network.framework callbacks, the ping timer,
+/// the connect deadlines and `close()`). The values callers read from other threads (`state`, `peerHello`,
+/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`) and the ping bookkeeping live behind `lock`.
 public final class Link: @unchecked Sendable {
     public enum State: Sendable, Equatable { case connecting, ready, failed(String), cancelled }
 
     public let role: Role
     public let messages: AsyncStream<Message>
     public let states: AsyncStream<State>
-    public private(set) var state: State = .connecting
-    public private(set) var peerHello: Hello?
-    public private(set) var lastRTTMs: Double?
+    public var state: State { lock.withLock { _state } }
+    public var peerHello: Hello? { lock.withLock { _peerHello } }
+    public var lastRTTMs: Double? { lock.withLock { _lastRTTMs } }
     /// Peer clock minus local clock, nanoseconds, estimated from ping/pong (nil until the first pong).
-    public private(set) var clockOffsetNs: Int64?
-    public var backlogBytes: Int { lock.lock(); defer { lock.unlock() }; return backlog }
+    public var clockOffsetNs: Int64? { lock.withLock { _clockOffsetNs } }
+    public var backlogBytes: Int { lock.withLock { backlog } }
 
     private let connection: NWConnection
     private let hello: Hello
+    /// Longest a link may stay `.connecting` in total, whatever Network.framework is doing (a handshake that
+    /// never answers, a Bonjour name that never resolves).
+    private let connectTimeout: Double
+    /// Longest a link may stay `.connecting` after Network.framework first reports `.waiting` for a reason
+    /// other than TLS (connection refused, host unreachable, Local Network denied).
+    private let waitingTimeout: Double
     private let queue = DispatchQueue(label: "ai.ronar.nitido.link", qos: .userInteractive)
+
+    // Behind `lock`.
     private let lock = NSLock()
+    private var _state: State = .connecting
+    private var _peerHello: Hello?
+    private var _lastRTTMs: Double?
+    private var _clockOffsetNs: Int64?
     private var backlog = 0
+    private var nextPing: UInt32 = 0
+    /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
+    private var pingSentAt: [UInt32: UInt64] = [:]
+
+    // Only touched on `queue`.
     private var decoder = Wire.Decoder()
     private var pingTimer: DispatchSourceTimer?
-    private var nextPing: UInt32 = 0
-    private var pingSentAt: [UInt32: Double] = [:]
+    private var waitingDeadlineArmed = false
+
     private let messageOut: AsyncStream<Message>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
 
-    init(connection: NWConnection, role: Role, hello: Hello) {
+    init(connection: NWConnection, role: Role, hello: Hello, connectTimeout: Double = 15, waitingTimeout: Double = 5) {
         self.connection = connection; self.role = role; self.hello = hello
+        self.connectTimeout = connectTimeout; self.waitingTimeout = waitingTimeout
         (messages, messageOut) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
     }
 
     public static func connect(to endpoint: NWEndpoint, code: String, sharerName: String, hello: Hello) -> Link {
-        let link = Link(connection: NWConnection(to: endpoint, using: LinkTLS.parameters(code: code, sharerName: sharerName)), role: .view, hello: hello)
+        connect(to: endpoint, code: code, sharerName: sharerName, hello: hello, connectTimeout: 15, waitingTimeout: 5)
+    }
+
+    static func connect(to endpoint: NWEndpoint, code: String, sharerName: String, hello: Hello,
+                        connectTimeout: Double, waitingTimeout: Double) -> Link {
+        let link = Link(connection: NWConnection(to: endpoint, using: LinkTLS.parameters(code: code, sharerName: sharerName)),
+                        role: .view, hello: hello, connectTimeout: connectTimeout, waitingTimeout: waitingTimeout)
         link.start()
         return link
     }
@@ -49,8 +77,12 @@ public final class Link: @unchecked Sendable {
             guard let self else { return }
             switch s {
             case .ready:
+                // A deadline or close() may already have ended this link while `.ready` was queued.
+                guard state == .connecting else { return }
                 setState(.ready); send(.hello(hello)); receiveLoop(); startPings()
-            case .failed(let e): finish(.failed(e.localizedDescription))
+            case .failed(let e):
+                log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
+                finish(.failed(e.localizedDescription))
             case .cancelled: finish(.cancelled)
             case .waiting(let e):
                 // A failed TLS handshake (wrong code) parks a client connection in .waiting, where
@@ -59,27 +91,53 @@ public final class Link: @unchecked Sendable {
                     log.error("handshake failed: \(e.localizedDescription, privacy: .public)")
                     finish(.failed(e.localizedDescription)); connection.cancel()
                 } else {
-                    log.info("waiting: \(e.localizedDescription)")
+                    // Refused, unreachable or Local Network denied: Network.framework retries on its own, which
+                    // can last forever (a stale Bonjour peer). Give it `waitingTimeout`, then fail.
+                    log.error("waiting: \(e.localizedDescription, privacy: .public)")
+                    guard state == .connecting, !waitingDeadlineArmed else { return }
+                    waitingDeadlineArmed = true
+                    let reason = e.plainDescription
+                    queue.asyncAfter(deadline: .now() + waitingTimeout) { [weak self] in
+                        self?.giveUpConnecting("Could not reach the other Mac: \(reason)")
+                    }
                 }
             default: break
             }
         }
         connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + connectTimeout) { [weak self, connectTimeout] in
+            self?.giveUpConnecting("No answer from the other Mac within \(connectTimeout.formatted()) seconds.")
+        }
     }
 
     public func send(_ m: Message) {
         let data = Wire.encode(m)
-        lock.lock(); backlog += data.count; lock.unlock()
+        lock.withLock { backlog += data.count }
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
-            lock.lock(); backlog -= data.count; lock.unlock()
+            lock.withLock { backlog -= data.count }
             if let error { log.error("send: \(error.localizedDescription)") }
         })
     }
 
+    /// Ends the link. A ready link says `bye` first and is cancelled once that is sent, or after one second if
+    /// the send never completes; a link that never became ready is cancelled at once. Either way `states`
+    /// ends with `.cancelled` (or the failure that got there first).
     public func close() {
-        pingTimer?.cancel(); pingTimer = nil
-        connection.send(content: Wire.encode(.bye(reason: 0)), completion: .contentProcessed { [weak self] _ in self?.connection.cancel() })
+        let connection = connection
+        queue.async { [self] in
+            pingTimer?.cancel(); pingTimer = nil
+            guard state == .ready else { connection.cancel(); return }
+            connection.send(content: Wire.encode(.bye(reason: 0)), completion: .contentProcessed { _ in connection.cancel() })
+            queue.asyncAfter(deadline: .now() + 1) { connection.cancel() }
+        }
+    }
+
+    /// On `queue`: fails a link that is still connecting; does nothing once it is ready or ended.
+    private func giveUpConnecting(_ reason: String) {
+        guard state == .connecting else { return }
+        log.error("\(self.role.logName, privacy: .public) link gave up connecting: \(reason, privacy: .public)")
+        finish(.failed(reason)); connection.cancel()
     }
 
     private func receiveLoop() {
@@ -87,9 +145,15 @@ public final class Link: @unchecked Sendable {
             guard let self else { return }
             if let data, !data.isEmpty {
                 do { for m in try decoder.feed(data) { handle(m) } }
-                catch { finish(.failed("protocol: \(error)")); connection.cancel(); return }
+                catch {
+                    log.error("protocol error from peer: \(String(describing: error), privacy: .public)")
+                    finish(.failed("protocol: \(error)")); connection.cancel(); return
+                }
             }
-            if let error { finish(.failed(error.localizedDescription)); return }
+            if let error {
+                log.error("receive failed: \(error.localizedDescription, privacy: .public)")
+                finish(.failed(error.localizedDescription)); return
+            }
             if complete { finish(.cancelled); return }
             receiveLoop()
         }
@@ -99,17 +163,22 @@ public final class Link: @unchecked Sendable {
         let now = CACurrentMediaTime()
         switch m {
         case .hello(let h):
-            peerHello = h
-            if h.protocolVersion != protocolVersion { send(.bye(reason: 1)); finish(.failed("protocol version \(h.protocolVersion), expected \(protocolVersion)")); connection.cancel(); return }
+            lock.withLock { _peerHello = h }
+            if h.protocolVersion != protocolVersion {
+                log.error("protocol version mismatch: peer speaks \(h.protocolVersion), this side \(protocolVersion)")
+                send(.bye(reason: 1)); finish(.failed("protocol version \(h.protocolVersion), expected \(protocolVersion)")); connection.cancel(); return
+            }
             messageOut.yield(m)
         case .ping(let id, let t):
             send(.pong(id: id, originalTNs: t, replyTNs: UInt64(now * 1e9)))
         case .pong(let id, let original, let reply):
-            lock.lock(); let sent = pingSentAt.removeValue(forKey: id); lock.unlock()
-            guard sent != nil else { return }
-            let t0 = Double(original) / 1e9, t3 = now
-            lastRTTMs = (t3 - t0) * 1000
-            clockOffsetNs = Int64(reply) - Int64(((t0 + t3) / 2) * 1e9)
+            let sent = lock.withLock { pingSentAt.removeValue(forKey: id) }
+            guard let sent else { return }
+            guard let sample = Self.pongSample(sentTNs: sent, originalTNs: original, replyTNs: reply, now: now) else {
+                log.error("dropped pong \(id): echoed time \(original) or reply time \(reply) out of range")
+                return
+            }
+            lock.withLock { _lastRTTMs = sample.rttMs; _clockOffsetNs = sample.offsetNs }
         case .bye:
             finish(.cancelled); connection.cancel()
         default:
@@ -117,24 +186,51 @@ public final class Link: @unchecked Sendable {
         }
     }
 
+    /// RTT and clock offset from one pong, or nil when the peer's fields cannot be right: the echoed time must be
+    /// the exact `tNs` this side sent for that id, and the reply time must fit an `Int64`. Every field of a pong
+    /// comes from the peer, so nothing here may trap on its values.
+    static func pongSample(sentTNs: UInt64, originalTNs: UInt64, replyTNs: UInt64, now: Double) -> (rttMs: Double, offsetNs: Int64)? {
+        guard originalTNs == sentTNs, let replyNs = Int64(exactly: replyTNs) else { return nil }
+        let t0 = Double(originalTNs) / 1e9, t3 = now
+        guard t3 >= t0, let midNs = Int64(exactly: (((t0 + t3) / 2) * 1e9).rounded()) else { return nil }
+        let (offset, overflow) = replyNs.subtractingReportingOverflow(midNs)
+        guard !overflow else { return nil }
+        return ((t3 - t0) * 1000, offset)
+    }
+
     private func startPings() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.1, repeating: 0.5)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            lock.lock(); nextPing &+= 1; let id = nextPing; pingSentAt[id] = CACurrentMediaTime(); pingSentAt = pingSentAt.filter { CACurrentMediaTime() - $0.value < 10 }; lock.unlock()
-            send(.ping(id: id, tNs: UInt64(CACurrentMediaTime() * 1e9)))
+            let tNs = UInt64(CACurrentMediaTime() * 1e9)
+            let id = lock.withLock { () -> UInt32 in
+                nextPing &+= 1; pingSentAt[nextPing] = tNs
+                pingSentAt = pingSentAt.filter { tNs &- $0.value < 10_000_000_000 }
+                return nextPing
+            }
+            send(.ping(id: id, tNs: tNs))
         }
         timer.resume()
         pingTimer = timer
     }
 
-    private func setState(_ s: State) { state = s; stateOut.yield(s) }
+    private func setState(_ s: State) { lock.withLock { _state = s }; stateOut.yield(s) }
 
+    /// On `queue`: moves a connecting or ready link to its final state once and ends both streams.
     private func finish(_ s: State) {
-        guard state == .ready || state == .connecting else { return }
+        let ended = lock.withLock { () -> Bool in
+            guard _state == .ready || _state == .connecting else { return false }
+            _state = s
+            return true
+        }
+        guard ended else { return }
         pingTimer?.cancel(); pingTimer = nil
-        setState(s)
+        stateOut.yield(s)
         messageOut.finish(); stateOut.finish()
     }
+}
+
+private extension Role {
+    var logName: String { self == .share ? "sharer" : "viewer" }
 }
