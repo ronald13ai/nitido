@@ -187,17 +187,31 @@ extension CaptureSession: SCStreamDelegate {
     }
 }
 
+/// Mach absolute time, the clock of `SCStreamFrameInfo.displayTime`, in ticks. `CACurrentMediaTime()` and
+/// `MTLDrawable.presentedTime` read the same clock in seconds, so a capture time converted here can be subtracted
+/// from a presented time to give the capture-to-display latency.
+struct MachClock: Sendable {
+    let numer: UInt64
+    let denom: UInt64
+
+    init() {
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        numer = UInt64(timebase.numer)
+        denom = UInt64(max(timebase.denom, 1))
+    }
+
+    func nanoseconds(fromTicks ticks: UInt64) -> UInt64 { ticks * numer / denom }
+}
+
 /// Receives sample buffers on the capture queue and yields only complete frames.
 private final class FrameOutput: NSObject, SCStreamOutput, @unchecked Sendable {
     private let continuation: AsyncStream<CapturedFrame>.Continuation
-    private let timebaseNumer: UInt64
-    private let timebaseDenom: UInt64
+    private let clock = MachClock()
+    /// Touched only on the serial capture queue.
+    private var reportedMissingDisplayTime = false
     init(continuation: AsyncStream<CapturedFrame>.Continuation) {
         self.continuation = continuation
-        var timebase = mach_timebase_info_data_t()
-        mach_timebase_info(&timebase)
-        timebaseNumer = UInt64(timebase.numer)
-        timebaseDenom = UInt64(max(timebase.denom, 1))
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -211,8 +225,12 @@ private final class FrameOutput: NSObject, SCStreamOutput, @unchecked Sendable {
         // displayTime is mach absolute time (ticks), the same clock CACurrentMediaTime() reads in seconds.
         let hostTimeNs: UInt64
         if let ticks = info[.displayTime] as? UInt64 {
-            hostTimeNs = ticks * timebaseNumer / timebaseDenom
+            hostTimeNs = clock.nanoseconds(fromTicks: ticks)
         } else {
+            if !reportedMissingDisplayTime {
+                reportedMissingDisplayTime = true
+                log.error("Frames carry no display time: latency is measured from when each frame reached Nítido, so it leaves out the capture time")
+            }
             hostTimeNs = UInt64(CACurrentMediaTime() * 1e9)
         }
         continuation.yield(CapturedFrame(pixelBuffer: pixelBuffer, captureHostTimeNs: hostTimeNs, contentRect: rect, scale: scale))

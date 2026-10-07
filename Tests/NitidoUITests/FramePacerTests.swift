@@ -10,14 +10,16 @@ private final class FakeDrawing: FrameDrawing {
     var canShowFrames = true
     var drawableCount = 3
     var renderResult: VideoView.Drop?
-    private(set) var renders: [(kind: FramePacer.Kind, captureHostTimeNs: UInt64)] = []
+    /// The time a render is committed at. The display simulation sets it; unit tests leave it at 0.
+    var clock: () -> Double = { 0 }
+    private(set) var renders: [(kind: FramePacer.Kind, captureHostTimeNs: UInt64, committedAt: Double)] = []
     private(set) var presented: [UInt64] = []
     /// The presented time of each entry of `presented`, for the latency it reports.
     private(set) var presentedAt: [Double] = []
     private(set) var drops: [VideoView.Drop] = []
 
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> VideoView.Drop? {
-        renders.append((kind, frame.captureHostTimeNs))
+        renders.append((kind, frame.captureHostTimeNs, clock()))
         return renderResult
     }
     func framePresented(captureHostTimeNs: UInt64, at presentedAt: Double) {
@@ -26,6 +28,27 @@ private final class FakeDrawing: FrameDrawing {
     }
     func frameDropped(_ drop: VideoView.Drop) { drops.append(drop) }
     var kinds: [FramePacer.Kind] { renders.map(\.kind) }
+}
+
+/// Collects the late draws a pacer schedules, so a unit test fires them by hand.
+@MainActor
+private final class Timers {
+    private(set) var delays: [CFTimeInterval] = []
+    private var actions: [@MainActor @Sendable () -> Void] = []
+    var count: Int { actions.count }
+
+    func install(on pacer: FramePacer) {
+        pacer.schedule = { [unowned self] delay, action in
+            delays.append(delay)
+            actions.append(action)
+        }
+    }
+
+    func fireAll() {
+        let due = actions
+        actions = []
+        due.forEach { $0() }
+    }
 }
 
 private func makeBuffer() throws -> CVPixelBuffer {
@@ -40,68 +63,179 @@ private func frame(_ ns: UInt64) throws -> FramePacer.Frame {
     FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: ns)
 }
 
-/// A FIFO display at 60 Hz driving a pacer: every committed drawable queues, and each vsync presents the oldest
-/// one (its presented handler fires then). A source changing at the display rate captures one frame right after
-/// each vsync. The pool holds 3 drawables, so the pacer keeps at most 2 in flight.
+/// A display and a capture source in simulated time, driving a real FramePacer through the FrameDrawing seam.
+///
+/// - The display refreshes every `period`. A drawable committed before a refresh can be shown `depth` refreshes
+///   later at the earliest (1: at that refresh; 2: a compositor that keeps it one refresh more), oldest first and
+///   one per refresh, as with display sync on. Its presented handler reaches the main actor `handlerDelay` after
+///   the refresh and reports the refresh time.
+/// - The source changes at every `sourceEvery`-th refresh. Each frame carries that refresh as its capture time,
+///   as ScreenCaptureKit's display time does, and reaches the main actor `arrivalPhase` after it.
+/// - Main-actor work (arrivals, presented handlers, the pacer's late draws) waits while the main thread is stalled.
+///   Of the frames that arrive during a stall, the first (already handed to the waiting frames loop) and the newest
+///   (the capture stream keeps one buffered) reach the pacer; the ones between are lost before it sees them.
 @MainActor
-private final class VsyncLoop {
+private final class DisplaySim {
+    struct Config {
+        var period = 1.0 / 60
+        var depth = 1
+        var arrivalPhase = 0.002
+        var handlerDelay = 0.0005
+        var sourceEvery = 1
+    }
+
+    private struct Event {
+        let time: Double
+        let seq: Int
+        let arrival: Bool
+        let action: @MainActor () -> Void
+    }
+
+    let config: Config
     let host = FakeDrawing()
     let pacer = FramePacer()
-    private static let period = 1.0 / 60
-    private var time: Double = 1
-    /// Renders whose drawable the display has already presented.
+    private let buffer: CVPixelBuffer
+    /// Main-actor time.
+    private(set) var clock: Double = 1
+    /// The last refresh run.
+    private(set) var refresh = 0
+    private var sourceStopsAfter = Int.max
+    private var events: [Event] = []
+    private var seq = 0
+    private var stalls: [(start: Double, end: Double)] = []
+    private var stallsWithAFrameThrough: Set<Int> = []
+    /// Renders already shown, in commit order.
     private var shown = 0
-    /// Capture time and arrival order, so frames captured in the same vsync stay distinct.
-    private var arrivals: [UInt64] = []
-    private var presentedBeforeRun = 0
-    private var arrivalsBeforeRun = 0
+    /// Capture times of every frame handed to the pacer, in order.
+    private(set) var delivered: [UInt64] = []
+    /// Frames lost in a stall before they reached the pacer.
+    private(set) var lost = 0
 
-    init() {
+    init(_ config: Config = Config()) throws {
+        self.config = config
+        buffer = try makeBuffer()
         pacer.host = host
-        pacer.now = { [unowned self] in self.time }
+        pacer.now = { [unowned self] in clock }
+        pacer.schedule = { [unowned self] delay, action in add(at: clock + delay, arrival: false, action) }
+        host.clock = { [unowned self] in clock }
         pacer.drawableSize = CGSize(width: 800, height: 600)
     }
 
-    /// A frame captured now.
-    func arrive() throws {
-        let ns = UInt64((time * 1e9).rounded()) + UInt64(arrivals.count)
-        arrivals.append(ns)
-        pacer.present(try frame(ns))
-    }
+    func time(ofRefresh j: Int) -> Double { 1 + Double(j) * config.period }
 
-    /// The next vsync presents the oldest committed drawable.
-    func vsync() {
-        time += Self.period
-        guard shown < host.renders.count else { return }
-        let next = host.renders[shown]
-        shown += 1
-        pacer.drawableReturned(kind: next.kind, captureHostTimeNs: next.captureHostTimeNs, presentedAt: time)
-    }
-
-    func run(vsyncs: Int) throws {
-        presentedBeforeRun = host.presented.count
-        arrivalsBeforeRun = arrivals.count
-        for _ in 0..<vsyncs {
-            vsync()
-            try arrive()
+    /// Runs `count` more refreshes and the main-actor work between them.
+    func run(refreshes count: Int) {
+        let last = refresh + count
+        while true {
+            let nextRefresh = time(ofRefresh: refresh + 1)
+            if let i = nextEventIndex(), effective(events[i].time) < nextRefresh {
+                runEvent(at: i)
+            } else if refresh < last {
+                refresh += 1
+                runRefresh()
+            } else {
+                return
+            }
         }
     }
 
-    var presentedDuringRun: Int { host.presented.count - presentedBeforeRun }
-    var redraws: Int { host.kinds.filter { $0 == .redraw }.count }
-
-    /// The longest capture-to-display time reported, in vsync periods.
-    var maxLatencyVsyncs: Double {
-        zip(host.presented, host.presentedAt).map { ($1 - Double($0) / 1e9) / Self.period }.max() ?? 0
+    /// `count` extra frames reach the pacer right now, as after a hiccup upstream.
+    func burst(_ count: Int) {
+        for i in 1...count { scheduleArrival(at: clock + Double(i) * 0.0001, capturedAt: clock) }
     }
 
-    /// Every captured frame is reported displayed once, in capture order, except the few still queued at the end
-    /// (2 in flight and 1 waiting at most).
-    func assertEveryArrivalIsDisplayedInOrder(file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertEqual(host.presented, Array(arrivals.prefix(host.presented.count)),
-                       "displayed out of order, twice, or with frames missing", file: file, line: line)
-        XCTAssertLessThanOrEqual(arrivals.count - host.presented.count, 3, "frames left undisplayed", file: file, line: line)
-        XCTAssertGreaterThan(arrivals.count, arrivalsBeforeRun, file: file, line: line)
+    /// The main thread is busy for `duration` seconds, starting `delay` from now.
+    func stall(after delay: Double, for duration: Double) {
+        stalls.append((clock + delay, clock + delay + duration))
+    }
+
+    /// The source stops changing after the current refresh.
+    func stopSource() { sourceStopsAfter = refresh }
+
+    /// Capture-to-display latency of every frame shown, in refreshes.
+    var latencies: [(captureNs: UInt64, refreshes: Double)] {
+        zip(host.presented, host.presentedAt).map { ($0, ($1 - Double($0) / 1e9) / config.period) }
+    }
+
+    /// Latencies of the frames captured at or after refresh `j`.
+    func latencies(capturedFromRefresh j: Int) -> [Double] {
+        let from = UInt64((time(ofRefresh: j) * 1e9).rounded()) - 1
+        return latencies.filter { $0.captureNs >= from }.map(\.refreshes)
+    }
+
+    var redraws: Int { host.kinds.filter { $0 == .redraw }.count }
+    var backlogDrops: Int { host.drops.filter { $0 == .backlog }.count }
+    var lastDelivered: UInt64? { delivered.last }
+
+    /// Every frame handed to the pacer is displayed once in capture order, dropped once, or still on its way.
+    func assertAccounting(file: StaticString = #filePath, line: UInt = #line) {
+        let drops = host.drops.filter { $0 != .hidden }.count
+        let notPresented = host.drops.filter { $0 == .notPresented }.count
+        let liveRenders = host.renders.filter { $0.kind == .live }.map(\.captureHostTimeNs)
+        let outstanding = liveRenders.count - host.presented.count - notPresented
+        let waiting = pacer.pending == .live ? 1 : 0
+        XCTAssertEqual(delivered.count, host.presented.count + drops + outstanding + waiting,
+                       "a frame went missing or was counted twice", file: file, line: line)
+        XCTAssertEqual(Set(liveRenders).count, liveRenders.count, "a frame was drawn live twice", file: file, line: line)
+        XCTAssertEqual(host.presented, host.presented.sorted(), "displayed out of capture order", file: file, line: line)
+        XCTAssertTrue(Set(host.presented).isSubset(of: Set(delivered)), file: file, line: line)
+    }
+
+    private func add(at time: Double, arrival: Bool, _ action: @escaping @MainActor () -> Void) {
+        seq += 1
+        events.append(Event(time: time, seq: seq, arrival: arrival, action: action))
+    }
+
+    private func scheduleArrival(at time: Double, capturedAt capture: Double) {
+        add(at: time, arrival: true) { [unowned self] in
+            // Unique and increasing even for frames of one burst, a few nanoseconds apart.
+            let ns = UInt64((capture * 1e9).rounded()) + UInt64(delivered.count)
+            delivered.append(ns)
+            pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+        }
+    }
+
+    /// When main-actor work due at `t` really runs.
+    private func effective(_ t: Double) -> Double {
+        for s in stalls where t >= s.start && t < s.end { return s.end }
+        return t
+    }
+
+    private func nextEventIndex() -> Int? {
+        events.indices.min { a, b in
+            let ta = effective(events[a].time), tb = effective(events[b].time)
+            return ta != tb ? ta < tb : events[a].seq < events[b].seq
+        }
+    }
+
+    private func runEvent(at i: Int) {
+        let event = events.remove(at: i)
+        clock = max(clock, effective(event.time))
+        if event.arrival, lostInStall(event) { lost += 1; return }
+        event.action()
+    }
+
+    private func lostInStall(_ event: Event) -> Bool {
+        guard let s = stalls.firstIndex(where: { event.time >= $0.start && event.time < $0.end }) else { return false }
+        if stallsWithAFrameThrough.insert(s).inserted { return false }
+        return events.contains { $0.arrival && $0.time >= stalls[s].start && $0.time < stalls[s].end }
+    }
+
+    private func runRefresh() {
+        let t = time(ofRefresh: refresh)
+        if shown < host.renders.count {
+            let r = host.renders[shown]
+            let firstRefreshAfterCommit = Int(((r.committedAt - 1) / config.period).rounded(.down)) + 1
+            if refresh >= firstRefreshAfterCommit + config.depth - 1 {
+                shown += 1
+                add(at: t + config.handlerDelay, arrival: false) { [unowned self] in
+                    pacer.drawableReturned(kind: r.kind, captureHostTimeNs: r.captureHostTimeNs, presentedAt: t)
+                }
+            }
+        }
+        if refresh % config.sourceEvery == 0, refresh <= sourceStopsAfter {
+            scheduleArrival(at: t + config.arrivalPhase, capturedAt: t)
+        }
     }
 }
 
@@ -154,6 +288,23 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(host.presented, [1])
     }
 
+    /// One drawable in flight with the usual pool of three: the compositor may still hold the drawable shown before
+    /// the current one, so asking for a second could block the main thread in nextDrawable().
+    @MainActor
+    func testOneDrawableInFlightWithThePoolOfThree() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.now = { 10 }
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        pacer.present(try frame(1))
+        pacer.present(try frame(2))
+        XCTAssertEqual(pacer.cap, 1)
+        XCTAssertEqual(pacer.inFlight, 1)
+        XCTAssertEqual(host.kinds, [.live], "no second drawable while one is in flight")
+        XCTAssertTrue(host.drops.isEmpty, "waiting for a drawable is not a drop")
+    }
+
     /// A redraw never exceeds the frames-in-flight cap: it waits for the next drawable, then runs once.
     @MainActor
     func testRedrawAtTheCapWaitsForTheNextDrawable() throws {
@@ -163,25 +314,23 @@ final class FramePacerTests: XCTestCase {
         pacer.now = { 10 }
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
-        pacer.present(try frame(2))
-        XCTAssertEqual(pacer.inFlight, 2)
+        XCTAssertEqual(pacer.inFlight, 1)
 
         pacer.drawableSize = CGSize(width: 1600, height: 1200)
-        XCTAssertEqual(host.kinds, [.live, .live], "no third drawable while two are in flight")
+        XCTAssertEqual(host.kinds, [.live], "no second drawable while one is in flight")
         XCTAssertTrue(host.drops.isEmpty, "a waiting redraw is not a dropped frame")
 
         pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        XCTAssertEqual(host.kinds, [.live, .live, .redraw])
-        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 2)
-        XCTAssertEqual(pacer.inFlight, 2)
+        XCTAssertEqual(host.kinds, [.live, .redraw])
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 1)
+        XCTAssertEqual(pacer.inFlight, 1)
 
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
-        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 2, presentedAt: 1.2)
-        XCTAssertEqual(host.kinds.count, 3, "the redraw ran once")
-        XCTAssertEqual(host.presented, [1, 2])
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 1, presentedAt: 1.1)
+        XCTAssertEqual(host.kinds.count, 2, "the redraw ran once")
+        XCTAssertEqual(host.presented, [1])
     }
 
-    /// A live frame drawn after a redraw was queued already shows the new size: the queued redraw is dropped.
+    /// A live frame that arrives while a redraw waits takes its place: it is drawn at the new size anyway.
     @MainActor
     func testLiveFrameSupersedesAQueuedRedraw() throws {
         let host = FakeDrawing()
@@ -190,17 +339,18 @@ final class FramePacerTests: XCTestCase {
         pacer.now = { 10 }
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
+        pacer.drawableSize = CGSize(width: 1600, height: 1200)   // the redraw waits: one in flight
         pacer.present(try frame(2))
-        pacer.drawableSize = CGSize(width: 1600, height: 1200)   // queued: two in flight
-        host.drawableCount = 4                                   // room for one more live frame
-        pacer.present(try frame(3))
-        XCTAssertEqual(host.kinds, [.live, .live, .live])
+        XCTAssertEqual(pacer.pending, .live)
         pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        XCTAssertEqual(host.kinds, [.live, .live, .live], "frame 3 already drew at the new size")
+        XCTAssertEqual(host.kinds, [.live, .live], "frame 2 is drawn live at the new size; the redraw never runs")
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
+        XCTAssertEqual(host.kinds.count, 2)
+        XCTAssertEqual(host.presented, [1, 2])
     }
 
-    /// A live frame is dropped as backlog only when a newer one replaces it while it waits at the cap, and a
-    /// discarded live drawable is a drop, never a display; a discarded redraw is neither.
+    /// A live frame is dropped as backlog only when a newer one replaces it while it waits, and a discarded live
+    /// drawable is a drop, never a display; a discarded redraw is neither.
     @MainActor
     func testLiveFramesKeepTheirDropAccounting() throws {
         let host = FakeDrawing()
@@ -209,104 +359,150 @@ final class FramePacerTests: XCTestCase {
         pacer.now = { 10 }
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
-        pacer.present(try frame(2))
-        pacer.present(try frame(3))                              // waits at the cap
+        pacer.present(try frame(2))                              // waits behind frame 1
         XCTAssertTrue(host.drops.isEmpty, "a frame waiting for a drawable is not dropped")
-        pacer.present(try frame(4))                              // replaces frame 3 before it was drawn
+        pacer.present(try frame(3))                              // replaces frame 2 before it was drawn
         XCTAssertEqual(host.drops, [.backlog])
         pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 0)
         XCTAssertEqual(host.drops, [.backlog, .notPresented])
         XCTAssertTrue(host.presented.isEmpty)
-        XCTAssertEqual(host.renders.map(\.captureHostTimeNs), [1, 2, 4], "frame 3 is never drawn")
+        XCTAssertEqual(host.renders.map(\.captureHostTimeNs), [1, 3], "frame 2 is never drawn")
 
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
-        pacer.drawableSize = CGSize(width: 1600, height: 1200)  // a redraw of frame 4
-        XCTAssertEqual(host.kinds, [.live, .live, .live, .redraw])
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 4, presentedAt: 1.2)
-        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 4, presentedAt: 0)
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 3, presentedAt: 1.1)
+        pacer.drawableSize = CGSize(width: 1600, height: 1200)  // a redraw of frame 3
+        XCTAssertEqual(host.kinds, [.live, .live, .redraw])
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 3, presentedAt: 0)
         XCTAssertEqual(host.drops, [.backlog, .notPresented], "a discarded redraw is not a dropped frame")
-        XCTAssertEqual(host.presented, [2, 4])
+        XCTAssertEqual(host.presented, [3])
         XCTAssertEqual(pacer.inFlight, 0)
     }
 
-    /// The last frame of a burst arrives while two drawables are in flight, then the source goes still (it only
-    /// sends changed frames). The frame waits as a live frame and is drawn when the next drawable comes back: it
-    /// is a display with its real latency, wait included, and never a drop.
+    /// The frame waited only because the presented handler of the drawable ahead reached the main actor after it:
+    /// that drawable was already on screen when the frame arrived. The frame is drawn at once, as live, counted as
+    /// displayed with its real latency, and never dropped.
     @MainActor
-    func testLiveFrameAtTheCapWaitsAndIsDrawnLiveWhenTheNextDrawableReturns() throws {
+    func testFrameThatWaitedForALateHandlerIsDrawnAtOnce() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
-        pacer.now = { 10 }
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
+        clock = 10.020
         pacer.present(try frame(2))
-        pacer.present(try frame(3))
-        XCTAssertEqual(host.kinds, [.live, .live], "no third drawable while two are in flight")
-        XCTAssertTrue(host.drops.isEmpty, "waiting for a drawable is not a drop")
+        XCTAssertEqual(host.kinds, [.live])
 
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        XCTAssertEqual(host.kinds, [.live, .live, .live], "drawn as the live frame it is, not as a redraw")
-        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 3, "the newest frame reaches the screen")
+        clock = 10.021
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 10.0167)
+        XCTAssertEqual(host.kinds, [.live, .live], "drawn as the live frame it is, at once")
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 2)
+        XCTAssertEqual(timers.count, 0, "nothing held back")
 
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 3, presentedAt: 1.2)
-        XCTAssertEqual(host.kinds.count, 3, "drawn once")
-        XCTAssertEqual(host.presented, [1, 2, 3], "counted as displayed")
-        XCTAssertEqual(host.presentedAt.last, 1.2, "its latency is measured at the time it was really shown")
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 10.0333)
+        XCTAssertEqual(host.presented, [1, 2], "counted as displayed")
+        XCTAssertEqual(host.presentedAt.last, 10.0333, "its latency is measured at the time it was really shown")
         XCTAssertTrue(host.drops.isEmpty)
         XCTAssertEqual(pacer.inFlight, 0)
     }
 
-    /// Two frames arrive while two drawables are in flight: the first waits, the second replaces it. Only the
-    /// replaced one is a drop, once, and the newer one is drawn live when the next drawable comes back.
+    /// The frame waited through a refresh: the drawable ahead was shown after it arrived, so the queue is one refresh
+    /// deeper than it needs to be. The frame is held back with the drawable free; the next frame replaces it (one
+    /// backlog drop) and is drawn at once into the empty queue, and the scheduled late draw then does nothing.
     @MainActor
-    func testANewerFrameReplacesTheWaitingFrameWhichIsDroppedOnce() throws {
+    func testLateFrameIsHeldBackAndTheNextFrameTakesItsPlace() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
-        pacer.now = { 10 }
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
+        clock = 10.005
         pacer.present(try frame(2))
+
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 10.0167)
+        XCTAssertEqual(host.kinds, [.live], "held back, not drawn behind a refresh of delay")
+        XCTAssertEqual(pacer.inFlight, 0, "the drawable is free for the next frame")
+        XCTAssertEqual(timers.delays, [FramePacer.lateFrameGrace])
+        XCTAssertTrue(host.drops.isEmpty)
+
+        clock = 10.019
         pacer.present(try frame(3))
-        pacer.present(try frame(4))
-        XCTAssertEqual(host.drops, [.backlog])
-        XCTAssertEqual(host.kinds, [.live, .live])
+        XCTAssertEqual(host.drops, [.backlog], "the late frame is dropped once")
+        XCTAssertEqual(host.renders.map(\.captureHostTimeNs), [1, 3], "the newer frame is drawn at once")
+        timers.fireAll()
+        XCTAssertEqual(host.kinds.count, 2, "the scheduled late draw does nothing")
 
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        XCTAssertEqual(host.kinds, [.live, .live, .live])
-        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 4)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 4, presentedAt: 1.2)
-        XCTAssertEqual(host.presented, [1, 2, 4])
-        XCTAssertEqual(host.drops, [.backlog], "the replaced frame is dropped once, the newer one is not")
-        XCTAssertEqual(host.kinds.count, 3)
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 3, presentedAt: 10.0333)
+        XCTAssertEqual(host.presented, [1, 3])
+        XCTAssertEqual(pacer.inFlight, 0)
     }
 
-    /// A newer live frame that finds a free drawable replaces the waiting one: the waiting one is dropped and no
-    /// late draw follows, since the newest picture is already on its way to the screen.
+    /// The same late frame when the source then goes still: no newer frame comes, so the late frame is drawn when
+    /// the grace runs out, as live, and counted as displayed. The newest picture always reaches the screen.
     @MainActor
-    func testLiveFrameDrawnWhileAnotherWaitsDropsTheWaitingOneAndNothingFollows() throws {
+    func testLateFrameIsDrawnWhenNoNewerFrameComes() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
-        pacer.now = { 10 }
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
+        clock = 10.005
         pacer.present(try frame(2))
-        pacer.present(try frame(3))                              // waits at the cap
-        host.drawableCount = 4                                   // room for one more live frame
-        pacer.present(try frame(4))
-        XCTAssertEqual(host.kinds, [.live, .live, .live])
-        XCTAssertEqual(host.drops, [.backlog])
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        XCTAssertEqual(host.kinds, [.live, .live, .live], "frame 4 is already the newest on screen")
-        XCTAssertEqual(host.presented, [1])
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 10.0167)
+        XCTAssertEqual(host.kinds, [.live])
+
+        clock = 10.034
+        timers.fireAll()
+        XCTAssertEqual(host.kinds, [.live, .live])
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 2)
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 10.05)
+        XCTAssertEqual(host.presented, [1, 2])
+        XCTAssertTrue(host.drops.isEmpty)
+        XCTAssertNil(pacer.pending)
     }
 
-    /// The drawable changes size while a live frame waits at the cap. The frame stays live: when the next
-    /// drawable comes back it is drawn once, at the new size, and counted as displayed; no redraw takes its slot.
+    /// A resize or a reveal while a late frame is held back draws it at once, as live, once; the scheduled late draw
+    /// then does nothing and the next drawable return draws nothing more.
+    @MainActor
+    func testRedrawWhileALateFrameIsHeldBackDrawsItLiveOnce() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        pacer.present(try frame(1))
+        clock = 10.005
+        pacer.present(try frame(2))
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 10.0167)
+
+        pacer.drawableSize = CGSize(width: 1600, height: 1200)
+        XCTAssertEqual(host.kinds, [.live, .live], "drawn live at the new size, not as an uncounted redraw")
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 2)
+        timers.fireAll()
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 10.0333)
+        XCTAssertEqual(host.kinds.count, 2, "drawn once")
+        XCTAssertEqual(host.presented, [1, 2])
+        XCTAssertTrue(host.drops.isEmpty)
+    }
+
+    /// The drawable changes size while a live frame waits behind the one in flight. The frame stays live: it is
+    /// drawn once, at the new size, and counted as displayed; no redraw takes its slot.
     @MainActor
     func testResizeWhileALiveFrameWaitsKeepsItLive() throws {
         let host = FakeDrawing()
@@ -316,91 +512,62 @@ final class FramePacerTests: XCTestCase {
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
         pacer.present(try frame(2))
-        pacer.present(try frame(3))
         pacer.drawableSize = CGSize(width: 1600, height: 1200)
+        XCTAssertEqual(host.kinds, [.live])
+
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
         XCTAssertEqual(host.kinds, [.live, .live])
-
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        XCTAssertEqual(host.kinds, [.live, .live, .live])
-        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 3)
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 2)
         pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 3, presentedAt: 1.2)
-        XCTAssertEqual(host.kinds.count, 3, "nothing else drawn")
-        XCTAssertEqual(host.presented, [1, 2, 3])
+        XCTAssertEqual(host.kinds.count, 2, "nothing else drawn")
+        XCTAssertEqual(host.presented, [1, 2])
         XCTAssertTrue(host.drops.isEmpty)
     }
 
-    /// A live frame waits at the cap, then a drawable is free before any returns (the pool grew) and the window
-    /// shows again. The reveal draws the waiting frame as the live frame it is, once: no uncounted redraw now
-    /// and no second draw when the next drawable comes back.
+    /// Frames that keep starving at one drawable in flight (each waits through a refresh, or is replaced while it
+    /// waits) mean the display keeps every drawable longer than a refresh: the cap rises by one. Waits caused only
+    /// by a presented handler that reaches the main actor after the next frame never raise it, and the cap never
+    /// goes past the pool minus one.
     @MainActor
-    func testRevealWithAFreeDrawableDrawsTheWaitingFrameLiveOnce() throws {
-        let host = FakeDrawing()
-        let pacer = FramePacer()
-        pacer.host = host
-        pacer.now = { 10 }
-        pacer.drawableSize = CGSize(width: 800, height: 600)
-        pacer.present(try frame(1))
-        pacer.present(try frame(2))
-        pacer.present(try frame(3))                              // waits at the cap
-        host.drawableCount = 4
-        pacer.redraw()
-        XCTAssertEqual(host.kinds, [.live, .live, .live])
-        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 3)
+    func testCapRisesOnlyWhenFramesKeepStarving() throws {
+        for pool in [3, 2] {
+            let host = FakeDrawing()
+            host.drawableCount = pool
+            let pacer = FramePacer()
+            pacer.host = host
+            var clock = 10.0
+            pacer.now = { clock }
+            let timers = Timers()
+            timers.install(on: pacer)
+            pacer.drawableSize = CGSize(width: 800, height: 600)
+            var ns: UInt64 = 1
+            pacer.present(try frame(ns))
+            var shownNs = ns
 
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 3, presentedAt: 1.2)
-        XCTAssertEqual(host.kinds.count, 3, "drawn once")
-        XCTAssertEqual(host.presented, [1, 2, 3])
-        XCTAssertTrue(host.drops.isEmpty)
-    }
+            for _ in 0..<20 {
+                clock += 0.010
+                ns += 1
+                pacer.present(try frame(ns))                       // waits behind the one in flight
+                pacer.drawableReturned(kind: .live, captureHostTimeNs: shownNs, presentedAt: clock - 0.005)
+                shownNs = ns                                       // drawn at once
+            }
+            XCTAssertEqual(pacer.cap, 1, "handler lag alone is not starvation (pool \(pool))")
+            XCTAssertTrue(host.drops.isEmpty)
 
-    /// The reviewer's loop: a FIFO display at 60 Hz and a source changing at the display rate, one frame per
-    /// vsync. Undisturbed, every frame is displayed one vsync after capture.
-    @MainActor
-    func testVsyncLoopSteadyArrivalsAreAllDisplayed() throws {
-        let loop = VsyncLoop()
-        try loop.arrive()
-        try loop.run(vsyncs: 60)
-        XCTAssertEqual(loop.presentedDuringRun, 60)
-        XCTAssertTrue(loop.host.drops.isEmpty)
-        XCTAssertEqual(loop.redraws, 0)
-        XCTAssertEqual(loop.maxLatencyVsyncs, 1, accuracy: 0.001)
-        loop.assertEveryArrivalIsDisplayedInOrder()
-    }
-
-    /// Same loop after a 3-frame burst (the third meets the cap). Before the fix, every later frame met the cap
-    /// too, was counted as dropped and drawn as an uncounted redraw: presented 2, dropped 61, redraws 60.
-    /// Every frame must count as displayed, none as dropped, and the latency must include the extra wait.
-    @MainActor
-    func testVsyncLoopAfterABurstCountsEveryFrameAsDisplayed() throws {
-        let loop = VsyncLoop()
-        try loop.arrive()
-        try loop.arrive()
-        try loop.arrive()
-        try loop.run(vsyncs: 60)
-        XCTAssertEqual(loop.presentedDuringRun, 60, "one live frame shown per vsync")
-        XCTAssertTrue(loop.host.drops.isEmpty, "\(loop.host.drops.count) frames counted as dropped")
-        XCTAssertEqual(loop.redraws, 0)
-        XCTAssertLessThanOrEqual(loop.maxLatencyVsyncs, 3.001, "two drawables queued ahead plus the wait")
-        loop.assertEveryArrivalIsDisplayedInOrder()
-    }
-
-    /// Same loop after a 2-frame burst and one resize redraw (the window fitted to the pick while the shared
-    /// window changes). The redraw takes one vsync; every captured frame is still displayed and none dropped.
-    @MainActor
-    func testVsyncLoopAfterABurstAndAResizeCountsEveryFrameAsDisplayed() throws {
-        let loop = VsyncLoop()
-        try loop.arrive()
-        try loop.arrive()
-        loop.pacer.drawableSize = CGSize(width: 1600, height: 1200)
-        try loop.run(vsyncs: 60)
-        XCTAssertEqual(loop.presentedDuringRun, 59, "every vsync shows a live frame except the one showing the redraw")
-        XCTAssertTrue(loop.host.drops.isEmpty, "\(loop.host.drops.count) frames counted as dropped")
-        XCTAssertEqual(loop.redraws, 1, "the resize redraw only")
-        XCTAssertLessThanOrEqual(loop.maxLatencyVsyncs, 3.001)
-        loop.assertEveryArrivalIsDisplayedInOrder()
+            for _ in 0..<FramePacer.starvedReturnsBeforeRaise {
+                clock += 0.002
+                ns += 1
+                pacer.present(try frame(ns))                       // waits behind the one in flight
+                clock += 0.015
+                pacer.drawableReturned(kind: .live, captureHostTimeNs: shownNs, presentedAt: clock - 0.0005)
+                clock += 0.002
+                ns += 1
+                pacer.present(try frame(ns))                       // replaces the held-back late frame
+                shownNs = ns
+            }
+            XCTAssertEqual(pacer.cap, min(2, pool - 1), "pool \(pool)")
+            XCTAssertEqual(host.drops.count, FramePacer.starvedReturnsBeforeRaise, "one late frame dropped per return")
+        }
     }
 
     /// No drawable back for over a second: the count resets and drawing resumes (a lost presented handler).
@@ -416,7 +583,8 @@ final class FramePacerTests: XCTestCase {
         pacer.present(try frame(2))
         clock = 11.5
         pacer.present(try frame(3))
-        XCTAssertEqual(host.kinds, [.live, .live, .live])
+        XCTAssertEqual(host.renders.map(\.captureHostTimeNs), [1, 3])
+        XCTAssertEqual(host.drops, [.backlog], "frame 2 never reached the screen")
         XCTAssertEqual(pacer.inFlight, 1)
     }
 
@@ -439,19 +607,184 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(pacer.inFlight, 0, "nothing was committed")
     }
 
-    /// Releasing the held frame (the share stopped) leaves nothing to redraw.
+    /// Releasing the held frame (the share stopped) leaves nothing to redraw, and cancels a late draw.
     @MainActor
     func testReleaseLeavesNothingToRedraw() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
         pacer.drawableSize = CGSize(width: 800, height: 600)
         pacer.present(try frame(1))
+        clock = 10.005
+        pacer.present(try frame(2))
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 10.0167)  // frame 2 held back
         pacer.releaseHeldFrame()
         XCTAssertNil(pacer.held)
+        XCTAssertNil(pacer.pending)
+        timers.fireAll()
         pacer.drawableSize = CGSize(width: 1600, height: 1200)
         pacer.redraw()
         XCTAssertEqual(host.kinds, [.live])
+    }
+}
+
+/// The pacer against a simulated display (see `DisplaySim`). Latency is in refreshes: the capture time is the
+/// refresh at which the source showed the frame, the presented time the refresh at which the view showed it.
+final class FramePacerDisplayTests: XCTestCase {
+    /// Undisturbed, a source changing at the display rate is shown one refresh after capture, every frame.
+    @MainActor
+    func testSteadySourceIsShownOneRefreshAfterCapture() throws {
+        let sim = try DisplaySim()
+        sim.run(refreshes: 120)
+        XCTAssertGreaterThanOrEqual(sim.host.presented.count, 118)
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        XCTAssertEqual(sim.redraws, 0)
+        for l in sim.latencies.map(\.refreshes) { XCTAssertEqual(l, 1, accuracy: 0.001) }
+        XCTAssertEqual(sim.pacer.cap, 1)
+        sim.assertAccounting()
+    }
+
+    /// The presented handler reaches the main actor after the next frame (it hops there through a Task). Frames
+    /// then wait for bookkeeping only: each is drawn as soon as the handler lands, still one refresh after capture.
+    @MainActor
+    func testHandlerLandingAfterTheNextFrameCostsNothing() throws {
+        let sim = try DisplaySim(.init(arrivalPhase: 0.002, handlerDelay: 0.004))
+        sim.run(refreshes: 120)
+        XCTAssertGreaterThanOrEqual(sim.host.presented.count, 118)
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        for l in sim.latencies.map(\.refreshes) { XCTAssertEqual(l, 1, accuracy: 0.001) }
+        XCTAssertEqual(sim.pacer.cap, 1)
+        sim.assertAccounting()
+    }
+
+    /// Round 4's plateau: three extra frames at once. The old rule kept two drawables queued plus one waiting for as
+    /// long as the source changed every refresh (three refreshes, 50 ms at 60 Hz). Now the burst costs three
+    /// dropped frames and latency is back to one refresh from the next captured frame on.
+    @MainActor
+    func testBurstDrainsBackToOneRefresh() throws {
+        let sim = try DisplaySim()
+        sim.run(refreshes: 60)
+        let burstAt = sim.refresh
+        sim.burst(3)
+        sim.run(refreshes: 60)
+        XCTAssertEqual(sim.backlogDrops, 3, "each burst frame is replaced by a newer one before it is drawn")
+        XCTAssertEqual(sim.host.drops.count, 3)
+        let after = sim.latencies(capturedFromRefresh: burstAt + 1)
+        XCTAssertGreaterThanOrEqual(after.count, 58)
+        XCTAssertEqual(after.max() ?? 0, 1, accuracy: 0.001, "no plateau after the burst")
+        XCTAssertEqual(sim.pacer.cap, 1)
+        sim.assertAccounting()
+    }
+
+    /// A resize redraw while the source changes every refresh (the window fitted to the pick): the redraw takes one
+    /// refresh, the frame that waited behind it is late and replaced, and latency is back to one refresh.
+    @MainActor
+    func testResizeRedrawDrainsBackToOneRefresh() throws {
+        let sim = try DisplaySim()
+        sim.run(refreshes: 60)
+        let resizeAt = sim.refresh
+        sim.pacer.drawableSize = CGSize(width: 1600, height: 1200)
+        sim.run(refreshes: 60)
+        XCTAssertEqual(sim.redraws, 1, "the resize redraw only")
+        XCTAssertEqual(sim.backlogDrops, 1, "the frame that waited behind the redraw")
+        let after = sim.latencies(capturedFromRefresh: resizeAt + 2)
+        XCTAssertGreaterThanOrEqual(after.count, 57)
+        XCTAssertEqual(after.max() ?? 0, 1, accuracy: 0.001)
+        sim.assertAccounting()
+    }
+
+    /// A 50 ms main-thread stall: the frames loop then hands over a stale frame and the newest one back to back.
+    /// The old rule queued both and stayed at two refreshes of latency; now latency is back to one refresh for every
+    /// frame captured after the first refresh that follows the stall.
+    @MainActor
+    func testMainThreadStallRecoversAtTheNextRefresh() throws {
+        let sim = try DisplaySim()
+        sim.run(refreshes: 60)
+        sim.stall(after: 0.001, for: 0.050)
+        let stallRefresh = sim.refresh
+        sim.run(refreshes: 60)
+        XCTAssertEqual(sim.lost, 1, "the frame between the first and the newest never reaches the pacer")
+        // The stall ends just after refresh stallRefresh + 3; the frame captured at the next refresh is on time.
+        let after = sim.latencies(capturedFromRefresh: stallRefresh + 4)
+        XCTAssertGreaterThanOrEqual(after.count, 55)
+        XCTAssertEqual(after.max() ?? 0, 1, accuracy: 0.001, "no plateau after the stall")
+        XCTAssertLessThanOrEqual(sim.host.drops.count, 1)
+        sim.assertAccounting()
+    }
+
+    /// The source goes still right after a burst: its last frame is late, held back, and drawn when no newer frame
+    /// comes. It reaches the screen, counted as displayed once, and nothing is left waiting.
+    @MainActor
+    func testSourceGoingStillAfterABurstShowsItsLastFrame() throws {
+        let sim = try DisplaySim()
+        sim.run(refreshes: 60)
+        sim.burst(2)
+        sim.stopSource()
+        sim.run(refreshes: 10)
+        XCTAssertEqual(sim.host.presented.last, sim.lastDelivered, "the newest captured frame is on screen")
+        XCTAssertEqual(sim.pacer.held?.captureHostTimeNs, sim.lastDelivered)
+        XCTAssertNil(sim.pacer.pending)
+        XCTAssertEqual(sim.pacer.inFlight, 0)
+        XCTAssertEqual(sim.host.drops, [.backlog], "only the burst frame its successor replaced")
+        sim.assertAccounting()
+    }
+
+    /// A compositor that keeps every drawable one refresh more (each is shown two refreshes after its commit). At
+    /// one drawable in flight only every other frame could be shown, so after a few starved returns the cap rises
+    /// to two; from then on every frame is shown, two refreshes after capture, and none is dropped.
+    @MainActor
+    func testDeepCompositorRaisesTheCapAndShowsEveryFrame() throws {
+        for handlerDelay in [0.0005, 0.004] {
+            let sim = try DisplaySim(.init(depth: 2, handlerDelay: handlerDelay))
+            sim.run(refreshes: 40)
+            XCTAssertEqual(sim.pacer.cap, 2, "handler delay \(handlerDelay)")
+            let warmUpDrops = sim.host.drops.count
+            XCTAssertLessThanOrEqual(warmUpDrops, FramePacer.starvedReturnsBeforeRaise + 1)
+            let steadyFrom = sim.refresh
+            sim.run(refreshes: 120)
+            XCTAssertEqual(sim.host.drops.count, warmUpDrops, "no drop once the cap fits the compositor")
+            let steady = sim.latencies(capturedFromRefresh: steadyFrom)
+            XCTAssertGreaterThanOrEqual(steady.count, 117)
+            for l in steady { XCTAssertEqual(l, 2, accuracy: 0.001) }
+            sim.assertAccounting()
+        }
+    }
+
+    /// The deep compositor after a burst: back to two refreshes, the compositor's own delay, not three.
+    @MainActor
+    func testDeepCompositorBurstDrainsBackToTwoRefreshes() throws {
+        let sim = try DisplaySim(.init(depth: 2))
+        sim.run(refreshes: 60)
+        XCTAssertEqual(sim.pacer.cap, 2)
+        let dropsBefore = sim.host.drops.count
+        let burstAt = sim.refresh
+        sim.burst(2)
+        sim.run(refreshes: 60)
+        XCTAssertLessThanOrEqual(sim.host.drops.count - dropsBefore, 2)
+        let after = sim.latencies(capturedFromRefresh: burstAt + 1)
+        XCTAssertGreaterThanOrEqual(after.count, 58)
+        XCTAssertEqual(after.max() ?? 0, 2, accuracy: 0.001, "no plateau after the burst")
+        sim.assertAccounting()
+    }
+
+    /// A 120 Hz panel with the capture at 60 fps (a new frame every other refresh): nothing waits, nothing drops,
+    /// and latency is the compositor's own delay in 120 Hz refreshes, with one drawable in flight.
+    @MainActor
+    func testFastPanelWithASixtyFpsSourceNeedsNoQueue() throws {
+        for depth in [1, 2] {
+            let sim = try DisplaySim(.init(period: 1.0 / 120, depth: depth, sourceEvery: 2))
+            sim.run(refreshes: 240)
+            XCTAssertGreaterThanOrEqual(sim.host.presented.count, 118, "depth \(depth)")
+            XCTAssertTrue(sim.host.drops.isEmpty, "depth \(depth)")
+            for l in sim.latencies.map(\.refreshes) { XCTAssertEqual(l, Double(depth), accuracy: 0.001) }
+            XCTAssertEqual(sim.pacer.cap, 1)
+            sim.assertAccounting()
+        }
     }
 }
 

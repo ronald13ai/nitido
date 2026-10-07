@@ -3,6 +3,9 @@ import AppKit
 import QuartzCore
 import NitidoCore
 import NitidoCapture
+import os
+
+private let log = Logger(subsystem: "ai.ronar.nitido", category: "share")
 
 /// What `ShareModel` needs from a capture session. `CaptureSession` is the real one; tests use a fake.
 @MainActor
@@ -43,6 +46,8 @@ public final class ShareModel {
     private var capture: (any CaptureSource)?
     private var excludedWindowIDs: [CGWindowID] = []
     private var telemetry = Telemetry(now: CACurrentMediaTime())
+    /// A negative or huge latency was logged once already for this model.
+    @ObservationIgnored private var reportedClockMismatch = false
     private var tasks: [Task<Void, Never>] = []
     /// Bumped by every start and stop, so a start that waited for an earlier stop knows when it was superseded.
     private var attempt: UInt64 = 0
@@ -59,8 +64,14 @@ public final class ShareModel {
         self.screenRecordingGranted = screenRecordingGranted
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }
+            let latencyMs = (presentedAt - Double(captureNs) / 1e9) * 1000
             telemetry.recordDisplay(at: presentedAt)
-            telemetry.recordLatency(ms: (presentedAt - Double(captureNs) / 1e9) * 1000, at: presentedAt)
+            telemetry.recordLatency(ms: latencyMs, at: presentedAt)
+            if latencyMs < 0 || latencyMs > 5_000, !reportedClockMismatch {
+                // The strip shows the figure as it is; the log says what it means.
+                reportedClockMismatch = true
+                log.error("Capture and display clocks disagree: a frame shows \(latencyMs, format: .fixed(precision: 1), privacy: .public) ms after its capture time")
+            }
             if renderFailure != nil { renderFailure = nil }
         }
         sink.onDropped = { [weak self] drop in

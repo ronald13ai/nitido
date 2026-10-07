@@ -15,7 +15,8 @@ public final class VideoView: NSView {
         /// The window is minimized, fully covered, hidden or not laid out yet; no drawable was requested.
         case hidden
         /// The frame waited for a drawable (the compositor still held the earlier ones, and asking for another
-        /// would block the main thread) and a newer frame replaced it before it could be drawn.
+        /// would block the main thread), or was held back because it waited through a refresh, and a newer frame
+        /// replaced it before it could be drawn.
         case backlog
         /// `nextDrawable()` returned nil after its timeout.
         case noDrawable
@@ -42,6 +43,11 @@ public final class VideoView: NSView {
     /// Drops not logged yet, by reason. Logged at most once a second so a long stall does not flood the log.
     private var unloggedDrops: [Drop: Int] = [:]
     private var lastDropLog: CFTimeInterval = 0
+    /// nextDrawable() calls that blocked the main thread since the last log line, and the longest of them.
+    private var slowDrawableWaits = 0
+    private var longestDrawableWait: CFTimeInterval = 0
+    /// A wait inside nextDrawable() longer than this blocked the main thread noticeably (a quarter of a 60 Hz frame).
+    private static let slowDrawableWait: CFTimeInterval = 0.004
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
@@ -100,10 +106,15 @@ public final class VideoView: NSView {
     }
 
     private func flushDropLog(force: Bool) {
-        guard !unloggedDrops.isEmpty else { return }
+        guard !unloggedDrops.isEmpty || slowDrawableWaits > 0 else { return }
         let now = CACurrentMediaTime()
         guard force || now - lastDropLog >= 1 else { return }
         lastDropLog = now
+        if slowDrawableWaits > 0 {
+            log.error("nextDrawable() blocked the main thread \(self.slowDrawableWaits, privacy: .public) times, the longest for \(self.longestDrawableWait * 1000, format: .fixed(precision: 1), privacy: .public) ms")
+            slowDrawableWaits = 0
+            longestDrawableWait = 0
+        }
         for (drop, count) in unloggedDrops {
             switch drop {
             case .hidden:
@@ -159,7 +170,17 @@ extension VideoView: FrameDrawing {
 
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> Drop? {
         let target = metalLayer.drawableSize
-        guard let drawable = metalLayer.nextDrawable() else { return .noDrawable }
+        let signpost = videoSignposter.beginInterval("nextDrawable")
+        let asked = CACurrentMediaTime()
+        let next = metalLayer.nextDrawable()
+        let waited = CACurrentMediaTime() - asked
+        videoSignposter.endInterval("nextDrawable", signpost)
+        log.debug("Draw \(kind == .live ? "live" : "redraw", privacy: .public) \(frame.captureHostTimeNs, privacy: .public): waited \(waited * 1000, format: .fixed(precision: 2), privacy: .public) ms for a drawable")
+        if waited > Self.slowDrawableWait {
+            slowDrawableWaits += 1
+            longestDrawableWait = max(longestDrawableWait, waited)
+        }
+        guard let drawable = next else { return .noDrawable }
         guard let command = commandQueue.makeCommandBuffer() else { return .failed("Metal could not create a command buffer.") }
 
         let content = CGSize(width: CVPixelBufferGetWidth(frame.pixelBuffer), height: CVPixelBufferGetHeight(frame.pixelBuffer))
