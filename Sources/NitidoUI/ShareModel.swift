@@ -42,8 +42,8 @@ public final class ShareModel {
 
     public var loopback = false { didSet { if loopback != oldValue { loopbackDidChange() } } }
     public var qualityMbps: Double = 20 { didSet { encoder?.setBitrate(Int(qualityMbps * 1_000_000)) } }
-    /// Where the comparison splits (0...1). A move redraws the picture at once: a still source sends no new frame
-    /// to carry it.
+    /// Where the comparison splits (0...1). Every decoded frame carries it (`handleDecoded`); a move also reaches the
+    /// frame the view keeps, which is drawn again only when the source is still (`FramePacer.moveDivider`).
     public var dividerPosition: Double = 0.5 { didSet { if dividerPosition != oldValue { sink.moveDivider(to: dividerPosition) } } }
     public private(set) var codecMs: Double?
     public private(set) var codecLabel = "raw"

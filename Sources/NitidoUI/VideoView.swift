@@ -99,7 +99,8 @@ public final class VideoView: NSView {
     /// Lets go of the frame kept for redraws, so its buffer returns to the capture pool (the share stopped).
     public func releaseHeldFrame() { pacer.releaseHeldFrame() }
 
-    /// Loopback: the comparison on the frame kept for redraws splits at `divider` (0...1) from now on, drawn at once.
+    /// Loopback: the comparison on the frame kept for redraws splits at `divider` (0...1) from now on. The source's
+    /// next frame shows it; a still source's held frame is drawn again once that frame is overdue.
     public func moveDivider(to divider: CGFloat) { pacer.moveDivider(to: divider) }
 
     /// Loopback off: `pixelBuffer` (the newest raw frame) is shown alone in place of the comparison, drawn at once.
@@ -262,7 +263,7 @@ public final class FrameSink {
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }
     /// Moves the divider of the comparison on screen. A still source sends no new frame to carry the move, so the
-    /// view draws the frame it keeps again; nothing when that frame shows no comparison.
+    /// view draws the frame it keeps again once a frame is overdue; nothing when that frame shows no comparison.
     public func moveDivider(to divider: CGFloat) { view?.moveDivider(to: divider) }
     /// Ends the comparison on screen: `raw` is shown alone at once, without waiting for the source to change.
     public func endComparison(showing raw: CVPixelBuffer, captureHostTimeNs: UInt64) {

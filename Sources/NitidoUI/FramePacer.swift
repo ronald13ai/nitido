@@ -94,6 +94,12 @@ final class FramePacer {
     private var starvedReturns = 0
     /// Presented time of the last drawable shown, for the spacing in the debug log.
     private var lastPresentedAt: Double = 0
+    /// When the newest frame reached `present`: a divider move waits for the frame after it (`moveDivider`).
+    private var lastArrival: CFTimeInterval = 0
+    /// A divider move waits for a redraw (`moveDivider`); a new frame, any redraw or a release makes it moot.
+    private var dividerRedrawScheduled = false
+    /// Bumped whenever the scheduled divider redraw becomes moot, so it then does nothing.
+    private var dividerRedrawToken: UInt64 = 0
 
     /// The drawable's pixel size. A real change draws the held frame again at the new size.
     var drawableSize: CGSize = .zero {
@@ -113,13 +119,16 @@ final class FramePacer {
         }
         held = frame
         waitingSince = arrival
+        lastArrival = arrival
         waitingHeldBack = false
         lateDrawToken &+= 1
+        cancelDividerRedraw()   // this frame carries the current divider
         submit(frame, kind: .live)
     }
 
     /// Draws the held frame again, for example when the window shows after being minimized, covered or hidden.
     func redraw() {
+        cancelDividerRedraw()   // the held frame drawn now, or when it can be, carries the newest divider
         guard let held else { return }
         if pending == .live {
             // Not on screen yet: it is still a captured frame, drawn now if a drawable is free (also when it was
@@ -131,13 +140,41 @@ final class FramePacer {
         }
     }
 
-    /// Moves the held frame's comparison divider and draws it again, the way a resize does: a still source sends no
-    /// new frame to carry the move. Nothing when the held frame shows no comparison or already splits there.
+    /// Moves the held frame's comparison divider. Nothing when the held frame shows no comparison or already splits
+    /// there. A moving source shows the move with its next frame (the model pushes every decoded frame with the current
+    /// divider), and a frame or redraw already waiting for a drawable is drawn with it, so neither needs a redraw: one
+    /// would take the drawable from the next frame, which would wait behind it, be late and be dropped, a frame lost
+    /// per move while the divider is dragged. Only a still source needs the held frame drawn again, so the redraw
+    /// waits until the next frame is overdue (`dividerRedrawDelay`) and does nothing if a frame came first. Moves
+    /// until then ride on that one redraw.
     func moveDivider(to divider: CGFloat) {
         guard var frame = held, frame.compareWith != nil, frame.divider != divider else { return }
         frame.divider = divider
         held = frame
-        redraw()
+        guard pending == nil, !dividerRedrawScheduled else { return }
+        dividerRedrawScheduled = true
+        let token = dividerRedrawToken
+        schedule(dividerRedrawDelay()) { [weak self] in
+            guard let self, token == dividerRedrawToken else { return }
+            redraw()
+        }
+    }
+
+    /// How long a divider move waits for a frame to carry it: until the middle of a capture interval after the newest
+    /// frame, the second interval at the earliest. A source that changes every interval has sent its next frame by
+    /// then with half an interval to spare, so a frame a little late still carries the move. A slower one sends its
+    /// frames whole intervals apart on a 60 Hz display, so the redraw lands half an interval clear of them and never
+    /// takes the drawable one of them needs. On a still source the move is drawn within one interval.
+    private func dividerRedrawDelay() -> CFTimeInterval {
+        let interval = Self.lateFrameGrace
+        let elapsed = now() - lastArrival
+        let intervals = max(1, (elapsed / interval - 0.5).rounded(.up))
+        return max(0, (intervals + 0.5) * interval - elapsed)
+    }
+
+    private func cancelDividerRedraw() {
+        dividerRedrawScheduled = false
+        dividerRedrawToken &+= 1
     }
 
     /// Puts `frame` in place of the held one and draws it again, the way a resize does: the codec loop was turned
@@ -185,6 +222,7 @@ final class FramePacer {
         pending = nil
         waitingHeldBack = false
         lateDrawToken &+= 1
+        cancelDividerRedraw()
     }
 
     /// The waiting frame waited through a refresh, so the drawable queue is a refresh deeper than it needs to be,

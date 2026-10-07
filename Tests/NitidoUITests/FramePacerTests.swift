@@ -75,9 +75,12 @@ private func frame(_ ns: UInt64) throws -> FramePacer.Frame {
 ///   the refresh and reports the refresh time.
 /// - The source changes at every `sourceEvery`-th refresh. Each frame carries that refresh as its capture time,
 ///   as ScreenCaptureKit's display time does, and reaches the main actor `arrivalPhase` after it.
-/// - Main-actor work (arrivals, presented handlers, the pacer's late draws) waits while the main thread is stalled.
-///   Of the frames that arrive during a stall, the first (already handed to the waiting frames loop) and the newest
-///   (the capture stream keeps one buffered) reach the pacer; the ones between are lost before it sees them.
+/// - Main-actor work (arrivals, presented handlers, the pacer's late draws, divider moves) waits while the main
+///   thread is stalled. Of the frames that arrive during a stall, the first (already handed to the waiting frames
+///   loop) and the newest (the capture stream keeps one buffered) reach the pacer; the ones between are lost before
+///   it sees them.
+/// - With `compare`, every frame carries a raw frame to compare against, split at the divider current when it
+///   arrives, as the codec loop's decoded frames do (`ShareModel.handleDecoded` pushes each with `dividerPosition`).
 @MainActor
 private final class DisplaySim {
     struct Config {
@@ -86,6 +89,9 @@ private final class DisplaySim {
         var arrivalPhase = 0.002
         var handlerDelay = 0.0005
         var sourceEvery = 1
+        var compare = false
+        /// Added to `arrivalPhase` frame by frame, in turn: frames that reach the main actor a little late.
+        var arrivalJitter: [Double] = [0]
     }
 
     private struct Event {
@@ -99,6 +105,11 @@ private final class DisplaySim {
     let host = FakeDrawing()
     let pacer = FramePacer()
     private let buffer: CVPixelBuffer
+    private let raw: CVPixelBuffer
+    /// The divider the next frame carries; `drag` moves it.
+    private(set) var divider: CGFloat = 0.5
+    /// Frames the source has sent, for `arrivalJitter`.
+    private var sourceFrames = 0
     /// Main-actor time.
     private(set) var clock: Double = 1
     /// The last refresh run.
@@ -118,6 +129,7 @@ private final class DisplaySim {
     init(_ config: Config = Config()) throws {
         self.config = config
         buffer = try makeBuffer()
+        raw = try makeBuffer()
         pacer.host = host
         pacer.now = { [unowned self] in clock }
         pacer.schedule = { [unowned self] delay, action in add(at: clock + delay, arrival: false, action) }
@@ -155,6 +167,18 @@ private final class DisplaySim {
 
     /// The source stops changing after the current refresh.
     func stopSource() { sourceStopsAfter = refresh }
+
+    /// The divider is dragged: `count` moves `interval` apart, the first `delay` from now, each to a new position.
+    /// A move is main-actor work (the gesture sets `ShareModel.dividerPosition`, which moves the view's divider).
+    func drag(moves count: Int, every interval: Double, after delay: Double = 0.003) {
+        let start = clock + delay
+        for i in 0..<count {
+            add(at: start + Double(i) * interval, arrival: false) { [unowned self] in
+                divider = 0.2 + 0.6 * CGFloat(i + 1) / CGFloat(count)
+                pacer.moveDivider(to: divider)
+            }
+        }
+    }
 
     /// Capture-to-display latency of every frame shown, in refreshes.
     var latencies: [(captureNs: UInt64, refreshes: Double)] {
@@ -195,7 +219,8 @@ private final class DisplaySim {
             // Unique and increasing even for frames of one burst, a few nanoseconds apart.
             let ns = UInt64((capture * 1e9).rounded()) + UInt64(delivered.count)
             delivered.append(ns)
-            pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+            pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns,
+                                           compareWith: config.compare ? raw : nil, divider: divider))
         }
     }
 
@@ -238,7 +263,9 @@ private final class DisplaySim {
             }
         }
         if refresh % config.sourceEvery == 0, refresh <= sourceStopsAfter {
-            scheduleArrival(at: t + config.arrivalPhase, capturedAt: t)
+            let jitter = config.arrivalJitter[sourceFrames % config.arrivalJitter.count]
+            sourceFrames += 1
+            scheduleArrival(at: t + config.arrivalPhase + jitter, capturedAt: t)
         }
     }
 }
@@ -288,48 +315,135 @@ final class FramePacerTests: XCTestCase {
         }
     }
 
-    /// A still source sends no frame to carry a divider move: the held comparison is drawn again at once with the new
-    /// divider, as a redraw (not a displayed frame). The same divider, or a frame without a comparison, draws nothing.
+    /// A still source sends no frame to carry a divider move, so the held comparison is drawn again with the new
+    /// divider, as a redraw (not a displayed frame), once the next frame is overdue: half a capture interval after it
+    /// was due. Moves until then ride on that one redraw. The same divider, or a frame without a comparison, schedules
+    /// nothing.
     @MainActor
-    func testMovingTheDividerRedrawsTheHeldComparison() throws {
+    func testMovingTheDividerRedrawsTheHeldComparisonOnceNoFrameCarriesIt() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
+        let interval = FramePacer.lateFrameGrace
         pacer.drawableSize = CGSize(width: 1440, height: 900)
         let raw = try makeBuffer()
         pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: raw, divider: 0.5))
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 10.0167)
+        clock = 10.020
+        pacer.moveDivider(to: 0.3)
+        clock = 10.022
         pacer.moveDivider(to: 0.2)
+        XCTAssertEqual(host.kinds, [.live], "nothing drawn while the next frame may still carry the move")
+        XCTAssertEqual(pacer.held?.divider, 0.2, "the held frame splits at the newest divider at once")
+        XCTAssertEqual(timers.count, 1, "moves until the redraw ride on one")
+        XCTAssertEqual(timers.delays.last ?? 0, 10.000 + 1.5 * interval - 10.020, accuracy: 1e-9,
+                       "half a capture interval after the next frame was due")
+
+        clock = 10.025
+        timers.fireAll()
         XCTAssertEqual(host.kinds, [.live, .redraw])
         XCTAssertTrue(host.frames.last?.compareWith === raw)
         XCTAssertEqual(host.frames.last?.divider, 0.2)
-        XCTAssertEqual(pacer.held?.divider, 0.2, "later redraws keep the new divider")
-        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 100, presentedAt: 2.0)
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 100, presentedAt: 10.0333)
         XCTAssertEqual(host.presented, [100], "a divider move is not a displayed frame")
-        pacer.moveDivider(to: 0.2)
-        XCTAssertEqual(host.kinds, [.live, .redraw], "the same divider draws nothing")
 
+        clock = 10.040
+        pacer.moveDivider(to: 0.2)
+        XCTAssertEqual(timers.count, 0, "the same divider schedules nothing")
+        pacer.moveDivider(to: 0.4)
+        XCTAssertEqual(timers.count, 1)
+        XCTAssertEqual(timers.delays.last ?? 0, 10.000 + 2.5 * interval - 10.040, accuracy: 1e-9,
+                       "the middle of the next capture interval in which no frame came")
+        clock = 10.042
+        timers.fireAll()
+        XCTAssertEqual(host.kinds, [.live, .redraw, .redraw])
+        XCTAssertEqual(host.frames.last?.divider, 0.4)
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 100, presentedAt: 10.05)
+
+        clock = 10.060
         pacer.present(try frame(200))
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 200, presentedAt: 3.0)
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 200, presentedAt: 10.0667)
         pacer.moveDivider(to: 0.7)
-        XCTAssertEqual(host.kinds, [.live, .redraw, .live], "a frame without a comparison is not drawn again")
+        XCTAssertEqual(timers.count, 0, "a frame without a comparison is not drawn again")
         XCTAssertNil(pacer.held?.compareWith)
+        XCTAssertTrue(host.drops.isEmpty)
     }
 
-    /// Divider moves while a drawable is in flight wait at the cap and are drawn once, with the last divider.
+    /// A moving source carries a divider move on its next frame (the model pushes every decoded frame with the current
+    /// divider), so the scheduled redraw does nothing once that frame came; a frame already waiting for a drawable is
+    /// drawn with the new divider and nothing is scheduled. A redraw there would take the drawable from the next frame,
+    /// which would wait behind it, be late and be dropped: a frame lost per move.
+    @MainActor
+    func testDividerMovesRideOnTheNextFrameOrTheOneWaiting() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
+        pacer.drawableSize = CGSize(width: 1440, height: 900)
+        let raw = try makeBuffer()
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: raw, divider: 0.5))
+        clock = 10.003
+        pacer.moveDivider(to: 0.4)
+        XCTAssertEqual(timers.count, 1)
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 10.0167)
+        clock = 10.018
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 116, compareWith: raw, divider: 0.4))
+        timers.fireAll()
+        XCTAssertEqual(host.kinds, [.live, .live], "the new frame carried the move: no redraw")
+        XCTAssertEqual(host.frames.last?.divider, 0.4)
+
+        clock = 10.034
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 133, compareWith: raw, divider: 0.4))
+        XCTAssertEqual(pacer.pending, .live, "waits for the drawable of frame 116")
+        pacer.moveDivider(to: 0.6)
+        XCTAssertEqual(timers.count, 0, "the waiting frame carries the move: nothing scheduled")
+        clock = 10.0345
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 116, presentedAt: 10.0333)
+        XCTAssertEqual(host.kinds, [.live, .live, .live], "no redraw at all")
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 133)
+        XCTAssertEqual(host.frames.last?.divider, 0.6)
+        XCTAssertTrue(host.drops.isEmpty)
+    }
+
+    /// On a still source, moves made while the redraw waits at the frames-in-flight cap ride on it: it is drawn once,
+    /// with the last divider, when the drawable comes back.
     @MainActor
     func testDividerMovesAtTheCapAreDrawnOnceWithTheLastDivider() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
         pacer.drawableSize = CGSize(width: 1440, height: 900)
         pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: try makeBuffer(), divider: 0.5))
+        clock = 10.003
         pacer.moveDivider(to: 0.4)
         pacer.moveDivider(to: 0.6)
-        XCTAssertEqual(host.kinds, [.live], "one drawable in flight: the moves wait")
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        XCTAssertEqual(timers.count, 1)
+        clock = 10.025
+        timers.fireAll()
+        XCTAssertEqual(host.kinds, [.live], "one drawable in flight: the redraw waits")
+        XCTAssertEqual(pacer.pending, .redraw)
+        pacer.moveDivider(to: 0.7)
+        XCTAssertEqual(timers.count, 0, "the waiting redraw carries the move")
+        clock = 10.034
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 10.0333)
         XCTAssertEqual(host.kinds, [.live, .redraw])
-        XCTAssertEqual(host.frames.last?.divider, 0.6)
+        XCTAssertEqual(host.frames.last?.divider, 0.7)
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 100, presentedAt: 10.05)
+        timers.fireAll()
+        XCTAssertEqual(host.kinds.count, 2, "drawn once")
     }
 
     /// The loop turned off: the raw frame takes the held comparison's place and is drawn at once, alone, as a redraw;
@@ -885,6 +999,105 @@ final class FramePacerDisplayTests: XCTestCase {
             XCTAssertEqual(sim.pacer.cap, 1)
             sim.assertAccounting()
         }
+    }
+
+    /// The gold divider dragged for a second over a source that changes every capture interval. Each frame carries the
+    /// divider current when it arrives (the model pushes every decoded frame with it), so no move needs a redraw: one
+    /// would take the drawable from the next frame, which would then be late and dropped, a frame lost per move (about
+    /// 30 a second, the comparison at half rate and the dropped figure lit by the UI itself). Whatever the drag's rate
+    /// and phase, with frames that come a little late, a late presented handler, a deep compositor or a 120 Hz panel:
+    /// no frame dropped, no redraw, latency unchanged, and the last divider on screen.
+    @MainActor
+    func testDraggingTheDividerOverAMovingSourceCostsNoFrame() throws {
+        let sources: [(name: String, config: DisplaySim.Config)] = [
+            ("60 Hz", .init(compare: true)),
+            ("late presented handler", .init(handlerDelay: 0.004, compare: true)),
+            ("deep compositor", .init(depth: 2, compare: true)),
+            ("120 Hz panel", .init(period: 1.0 / 120, sourceEvery: 2, compare: true)),
+            ("every other frame 4 ms late", .init(compare: true, arrivalJitter: [0, 0.004])),
+            ("frames up to 6 ms late", .init(compare: true, arrivalJitter: [0, 0.006, 0.002])),
+        ]
+        for source in sources {
+            for drag in Self.drags {
+                try assertDragCostsNoFrame(source.config, rate: drag.rate, after: drag.after, label: source.name, redrawsAllowed: false)
+            }
+        }
+    }
+
+    /// The same drags over a source slower than the capture rate (30 fps), on a 60 Hz and a 120 Hz panel. Between two
+    /// of its frames a move is drawn by a redraw, which lands while no frame is due, so it still costs no frame and no
+    /// latency, and the last divider ends on screen.
+    @MainActor
+    func testDraggingTheDividerOverASlowerSourceCostsNoFrame() throws {
+        let sources: [(name: String, config: DisplaySim.Config)] = [
+            ("30 fps on 60 Hz", .init(sourceEvery: 2, compare: true)),
+            ("30 fps on 60 Hz, late presented handler", .init(handlerDelay: 0.004, sourceEvery: 2, compare: true)),
+            ("30 fps on 120 Hz", .init(period: 1.0 / 120, sourceEvery: 4, compare: true)),
+        ]
+        for source in sources {
+            for drag in Self.drags + [(rate: 30, after: 0.015)] {
+                try assertDragCostsNoFrame(source.config, rate: drag.rate, after: drag.after, label: source.name, redrawsAllowed: true)
+            }
+        }
+    }
+
+    /// The source goes still halfway through a drag: from then on no frame carries the moves, so the held comparison
+    /// is drawn again with the newest divider, at most once per capture interval (not once per move), and the last
+    /// divider ends on screen. Nothing is dropped, and nothing was redrawn while the source moved.
+    @MainActor
+    func testDividerDraggedAsTheSourceGoesStillIsRedrawnWithTheNewestDivider() throws {
+        let sim = try DisplaySim(.init(compare: true))
+        sim.run(refreshes: 60)
+        sim.drag(moves: 120, every: 1.0 / 120)
+        sim.run(refreshes: 30)
+        XCTAssertEqual(sim.redraws, 0, "a moving source carries every move")
+        sim.stopSource()
+        sim.run(refreshes: 40)
+        // About 30 capture intervals of dragging over the still source, 60 moves.
+        XCTAssertGreaterThanOrEqual(sim.redraws, 20, "the moves are drawn while the drag goes on")
+        XCTAssertLessThanOrEqual(sim.redraws, 31, "at most one redraw per capture interval")
+        XCTAssertEqual(sim.host.renders.last?.kind, .redraw)
+        XCTAssertEqual(sim.host.frames.last?.divider, sim.divider, "the last divider is on screen")
+        XCTAssertEqual(sim.divider, 0.8, accuracy: 1e-9)
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        XCTAssertNil(sim.pacer.pending)
+        XCTAssertEqual(sim.pacer.inFlight, 0)
+        sim.assertAccounting()
+    }
+
+    /// Drag rates and the phase of the first move after the last main-actor event (`DisplaySim.drag`): 120 Hz (a
+    /// trackpad), the display rate, half of it, 100 Hz (its moves drift across the frame interval), and 120 Hz starting
+    /// right after a frame.
+    private static let drags: [(rate: Double, after: Double)] = [(120, 0.003), (60, 0.003), (30, 0.003), (100, 0.003), (120, 0.0001)]
+
+    /// A second of `config`'s source, then a second of dragging at `rate` and a fifth more: no frame dropped during the
+    /// drag, every frame shown at the source's usual latency, and the last divider on screen.
+    @MainActor
+    private func assertDragCostsNoFrame(_ config: DisplaySim.Config, rate: Double, after delay: Double, label: String,
+                                        redrawsAllowed: Bool, file: StaticString = #filePath, line: UInt = #line) throws {
+        let what = "\(label), drag at \(Int(rate)) Hz from \(delay * 1000) ms"
+        let sim = try DisplaySim(config)
+        let second = Int((1 / config.period).rounded())
+        sim.run(refreshes: second)
+        let dropsBefore = sim.host.drops.count
+        let redrawsBefore = sim.redraws
+        let dragFrom = sim.refresh
+        sim.drag(moves: Int(rate), every: 1 / rate, after: delay)
+        sim.run(refreshes: second + second / 5)
+        let drops = Array(sim.host.drops.dropFirst(dropsBefore))
+        let shown = sim.latencies(capturedFromRefresh: dragFrom + 1).count
+        XCTAssertEqual(drops.count, 0, "\(what): \(drops.filter { $0 == .backlog }.count) backlog drops, \(sim.redraws - redrawsBefore) redraws, \(shown) frames shown",
+                       file: file, line: line)
+        if !redrawsAllowed {
+            XCTAssertEqual(sim.redraws - redrawsBefore, 0, "every move rides on the next frame: \(what)", file: file, line: line)
+        }
+        let after = sim.latencies(capturedFromRefresh: dragFrom + 1)
+        XCTAssertGreaterThanOrEqual(after.count, (second + second / 5) / config.sourceEvery - 3, what, file: file, line: line)
+        XCTAssertEqual(after.max() ?? 0, Double(config.depth), accuracy: 0.001, what, file: file, line: line)
+        XCTAssertEqual(after.min() ?? 0, Double(config.depth), accuracy: 0.001, what, file: file, line: line)
+        XCTAssertEqual(sim.host.frames.last?.divider, sim.divider, "the last divider is on screen: \(what)", file: file, line: line)
+        XCTAssertEqual(sim.divider, 0.8, accuracy: 1e-9, what, file: file, line: line)
+        sim.assertAccounting(file: file, line: line)
     }
 }
 
