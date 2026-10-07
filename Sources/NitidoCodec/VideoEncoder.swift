@@ -149,6 +149,8 @@ public final class VideoEncoder: @unchecked Sendable {
 
     public func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
 
+    public var nextSeq: UInt32 { lock.lock(); defer { lock.unlock() }; return seq }
+
     /// Returns false when the frame was dropped because two frames are already being encoded, and
     /// also when the encoder was invalidated or VideoToolbox refused the frame (reported to `onError`).
     @discardableResult

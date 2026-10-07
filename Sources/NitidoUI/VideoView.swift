@@ -89,9 +89,10 @@ public final class VideoView: NSView {
         return CGSize(width: px.width / s, height: px.height / s)
     }
 
-    public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) {
+    /// `compareWith` is the raw frame shown left of `dividerAt` (0...1); the main buffer is shown on the right.
+    public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
         contentPixelSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-        pacer.present(FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs))
+        pacer.present(FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw, divider: divider))
         flushDropLog(force: false)
     }
 
@@ -185,6 +186,14 @@ extension VideoView: FrameDrawing {
 
         let content = CGSize(width: CVPixelBufferGetWidth(frame.pixelBuffer), height: CVPixelBufferGetHeight(frame.pixelBuffer))
         var image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+        if let raw = frame.compareWith {
+            let rawImage = CIImage(cvPixelBuffer: raw)
+            let cut = (rawImage.extent.width * frame.divider).rounded()
+            let left = rawImage.cropped(to: CGRect(x: 0, y: 0, width: cut, height: rawImage.extent.height))
+            let line = CIImage(color: CIColor(red: 201 / 255, green: 168 / 255, blue: 106 / 255))
+                .cropped(to: CGRect(x: cut - 1, y: 0, width: 2, height: rawImage.extent.height))
+            image = line.composited(over: left.composited(over: image))
+        }
         let fit = min(target.width / content.width, target.height / content.height)
         if fit < 1, let lanczos = CIFilter(name: "CILanczosScaleTransform") {
             lanczos.setValue(image, forKey: kCIInputImageKey)
@@ -235,11 +244,11 @@ public final class FrameSink {
     public var onPresented: (@MainActor @Sendable (UInt64, Double) -> Void)?
     public var onDropped: (@MainActor @Sendable (VideoView.Drop) -> Void)?
     public init() {}
-    public func push(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) {
+    public func push(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
         guard let view else { onDropped?(.hidden); return }
         view.onPresented = onPresented
         view.onDropped = onDropped
-        view.present(pixelBuffer, captureHostTimeNs: captureHostTimeNs)
+        view.present(pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw, dividerAt: divider)
     }
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }

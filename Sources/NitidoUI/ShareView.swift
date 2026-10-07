@@ -17,17 +17,30 @@ public struct ShareView: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 VideoSurface(sink: model.sink).frame(width: pointSize.width, height: pointSize.height)
+                // Covers the whole picture, so it sits below everything that takes a click: the failure's buttons
+                // and both panels.
+                if model.loopback { DividerHandle(position: $model.dividerPosition).frame(width: pointSize.width, height: pointSize.height) }
                 if model.state == .picking { placeholder("Choose a window or a display in the picker.", note: screenRecordingNote) }
                 if case .failed(let message) = model.state { failure(message) }
-                if model.state == .capturing, let reason = model.renderFailure { renderNotice(reason) }
+                if model.state == .capturing, model.renderFailure != nil || model.codecNotice != nil {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let reason = model.renderFailure { notice("The picture cannot be drawn: \(reason)") }
+                        if let text = model.codecNotice { notice(text) }
+                    }
+                    .padding(14)
+                    .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
+                    .allowsHitTesting(false)
+                }
                 PairingPanel(name: model.name, code: model.code).padding(14)
+                LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
             // a tiny picture spills left and down and never moves the picture off the window's top left corner.
             .frame(width: pointSize.width, height: pointSize.height, alignment: .topTrailing)
             .frame(width: areaSize.width, height: areaSize.height, alignment: .topLeading)
             if model.showTelemetry {
-                TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: "raw", latencyLabel: "capture→display")
+                TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: model.codecLabel,
+                               latencyLabel: "capture→display", codecMs: model.codecMs)
             }
         }
         // As wide as the picture (to the whole point), so `.windowResizability(.contentSize)` fixes the window's
@@ -70,14 +83,12 @@ public struct ShareView: View {
                            actions: [("Open System Settings", openScreenRecordingSettings), ("Retry", model.retry)])
     }
 
-    /// Frames keep arriving but cannot be drawn: say so over the last picture instead of freezing silently.
-    private func renderNotice(_ reason: String) -> some View {
-        Text("The picture cannot be drawn: \(reason)")
+    /// Said over the last picture instead of failing silently: a frame that cannot be drawn, a codec setting refused.
+    private func notice(_ text: String) -> some View {
+        Text(text)
             .font(.system(size: 12)).foregroundStyle(Theme.Colors.text)
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(Theme.Colors.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: Theme.controlRadius))
-            .padding(14)
-            .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
     }
 
     private func openScreenRecordingSettings() {
@@ -96,5 +107,35 @@ struct PairingPanel: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Theme.Colors.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
         .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).stroke(Theme.Colors.hairline, lineWidth: 1))
+    }
+}
+
+struct LoopbackPanel: View {
+    @Bindable var model: ShareModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $model.loopback) { Text("Codec loop").font(.system(size: 12, weight: .medium)) }
+                .toggleStyle(.switch).tint(Theme.Colors.gold)
+            if model.loopback {
+                Text("QUALITY · \(Int(model.qualityMbps)) MBPS").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.muted).tracking(1.5)
+                Slider(value: $model.qualityMbps, in: 1...60, step: 1).tint(Theme.Colors.gold).frame(width: 180)
+                Text("Raw on the left of the line, decoded on the right. Drag the line.").font(.system(size: 10)).foregroundStyle(Theme.Colors.muted)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(Theme.Colors.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).stroke(Theme.Colors.hairline, lineWidth: 1))
+    }
+}
+
+struct DividerHandle: View {
+    @Binding var position: Double
+    var body: some View {
+        GeometryReader { geo in
+            Color.clear.contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { v in position = min(1, max(0, v.location.x / geo.size.width)) })
+            Circle().fill(Theme.Colors.gold).frame(width: 10, height: 10)
+                .position(x: geo.size.width * position, y: geo.size.height - 18)
+        }
     }
 }

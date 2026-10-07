@@ -24,6 +24,8 @@ public final class AppModel {
 
     public func toggleTelemetry() { share?.showTelemetry.toggle() }
 
+    public func toggleLoopback() { share?.loopback.toggle() }
+
     /// Back to Welcome. The share is detached before the await, so a Share that lands while the old one is
     /// still stopping gets a model of its own instead of being cleared when this stop resumes.
     public func stop() async {

@@ -115,6 +115,22 @@ final class CodecSafetyTests: XCTestCase {
         encoder.invalidate()
     }
 
+    /// `nextSeq` moves only when the encoder takes a frame. The share model counts a frame `encode` turned away
+    /// (two in flight, or invalidated) as dropped only when it did not move: a frame refused after it was taken
+    /// reaches `onError` and is counted there.
+    func testNextSeqMovesOnlyWhenTheEncoderTakesAFrame() throws {
+        let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+        let got = expectation(description: "frame")
+        encoder.onFrame = { _ in got.fulfill() }
+        XCTAssertEqual(encoder.nextSeq, 0)
+        XCTAssertTrue(encoder.encode(solidFrame(), captureHostTimeNs: 0))
+        XCTAssertEqual(encoder.nextSeq, 1)
+        wait(for: [got], timeout: 5)
+        encoder.invalidate()
+        XCTAssertFalse(encoder.encode(solidFrame(), captureHostTimeNs: 1))
+        XCTAssertEqual(encoder.nextSeq, 1, "a frame turned away takes no sequence number")
+    }
+
     func testFailureChannelHoldsUntilAHandlerIsSet() {
         let channel = FailureChannel()
         for i in 0..<(FailureChannel.capacity + 4) { channel.report(.encode(OSStatus(-i)), "test \(i)") }

@@ -8,9 +8,11 @@ public struct TelemetryStrip: View {
     public let resolution: String
     public let codec: String
     public let latencyLabel: String
+    public let codecMs: Double?
 
-    public init(snapshot: Snapshot, resolution: String, codec: String, latencyLabel: String) {
+    public init(snapshot: Snapshot, resolution: String, codec: String, latencyLabel: String, codecMs: Double? = nil) {
         self.snapshot = snapshot; self.resolution = resolution; self.codec = codec; self.latencyLabel = latencyLabel
+        self.codecMs = codecMs
     }
 
     private var latencyHigh: Bool { (snapshot.latencyMs ?? 0) > 100 }
@@ -23,6 +25,7 @@ public struct TelemetryStrip: View {
             Figure("capture", value: fps(snapshot.captureFPS), unit: "fps")
             Figure("display", value: fps(snapshot.displayFPS), unit: "fps")
             Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", highlight: latencyHigh)
+            Figure("codec", value: ms(codecMs), unit: "ms")
             Figure("rtt", value: ms(snapshot.rttMs), unit: "ms")
             Figure("bitrate", value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps")
             Figure("dropped", value: "\(snapshot.droppedLastSecond)", unit: "/s", highlight: dropping)

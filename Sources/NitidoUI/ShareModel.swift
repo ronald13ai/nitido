@@ -3,6 +3,8 @@ import AppKit
 import QuartzCore
 import NitidoCore
 import NitidoCapture
+import NitidoCodec
+import CoreVideo
 import os
 
 private let log = Logger(subsystem: "ai.ronar.nitido", category: "share")
@@ -37,6 +39,22 @@ public final class ShareModel {
     /// True when Screen Recording was not granted as the picker opened, so the picker screen explains the
     /// system prompt that may follow the pick before macOS shows it.
     public private(set) var mayAskForScreenRecording = false
+
+    public var loopback = false { didSet { if loopback != oldValue { loopbackDidChange() } } }
+    public var qualityMbps: Double = 20 { didSet { encoder?.setBitrate(Int(qualityMbps * 1_000_000)) } }
+    public var dividerPosition: Double = 0.5
+    public private(set) var codecMs: Double?
+    public private(set) var codecLabel = "raw"
+    private var encoder: VideoEncoder?
+    private var decoder: VideoDecoder?
+    private var decoderConfig: VideoConfig?
+    private var latestRaw: CapturedFrame?
+    private var encodeStarts: [UInt32: Double] = [:]
+    private var codecWindow = RollingWindow(seconds: 1)
+    /// A codec setting VideoToolbox rejected (`CodecError.property` through `onError`), shown over the picture.
+    public private(set) var codecNotice: String?
+    /// Frames the encoder failed, dropped or emitted empty in a row; ten fail the share (`handleCodecError`).
+    private var encodeFailures = 0
 
     private let makeSource: @MainActor () -> any CaptureSource
     /// `CGPreflightScreenCaptureAccess` in the app; tests pass a fixed answer.
@@ -160,8 +178,7 @@ public final class ShareModel {
             Task { [weak self] in
                 for await frame in session.frames {
                     guard let self else { return }
-                    telemetry.recordCapture(at: Double(frame.captureHostTimeNs) / 1e9)
-                    sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
+                    ingest(frame)
                 }
             },
             Task { [weak self] in
@@ -169,6 +186,7 @@ public final class ShareModel {
                     try? await Task.sleep(for: .milliseconds(250))
                     guard let self else { return }
                     snapshot = telemetry.snapshot(now: CACurrentMediaTime())
+                    codecMs = loopback ? codecWindow.stats(now: CACurrentMediaTime())?.p50 : nil
                 }
             },
         ]
@@ -179,6 +197,7 @@ public final class ShareModel {
     private func retireSession() {
         tasks.forEach { $0.cancel() }
         tasks = []
+        loopback = false
         // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain.
         sink.releaseHeldFrame()
         guard let old = capture else { return }
@@ -187,6 +206,92 @@ public final class ShareModel {
         Self.retiring = Task { @MainActor in
             await earlier?.value
             await old.stop()
+        }
+    }
+
+    private func ingest(_ frame: CapturedFrame) {
+        telemetry.recordCapture(at: Double(frame.captureHostTimeNs) / 1e9)
+        // Encode only while capturing: after a failure (the encoder's included) the raw picture goes on until Retry,
+        // and no encoder is made again for every frame.
+        guard loopback, state == .capturing else { sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs); return }
+        latestRaw = frame
+        if encoder == nil || encoder?.width != frame.pixelWidth || encoder?.height != frame.pixelHeight { makeEncoder(for: frame) }
+        guard let encoder else { return }
+        let n = encoder.nextSeq
+        encodeStarts[n] = CACurrentMediaTime()
+        if !encoder.encode(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs) {
+            encodeStarts.removeValue(forKey: n)
+            // `nextSeq` moves only once the encoder has taken the frame. A refusal after that went to `onError`, which
+            // counts it; a frame turned away at the two-in-flight cap, or by an invalidated encoder, is counted here.
+            if encoder.nextSeq == n { telemetry.recordDrop(at: CACurrentMediaTime()) }
+        }
+    }
+
+    private func makeEncoder(for frame: CapturedFrame) {
+        encoder?.invalidate(); decoder?.invalidate(); decoder = nil; decoderConfig = nil
+        codecNotice = nil; encodeFailures = 0
+        do {
+            let e = try VideoEncoder(width: frame.pixelWidth, height: frame.pixelHeight, preferred: .hevc, bitsPerSecond: Int(qualityMbps * 1_000_000))
+            e.onFrame = { [weak self] f in Task { @MainActor in self?.handleEncoded(f) } }
+            // Set before the first encode. It runs on a VideoToolbox queue, or on this thread inside `encode` and
+            // `setBitrate`, and a setting rejected inside `init` arrives the moment it is set: so it hops to the main actor.
+            e.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err) } }
+            encoder = e
+            codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
+        } catch {
+            state = .failed("Hardware video encoder unavailable: \(error)")
+        }
+    }
+
+    private func handleEncoded(_ f: EncodedFrame) {
+        let now = CACurrentMediaTime()
+        encodeFailures = 0
+        telemetry.recordBytes(f.data.count, at: now)
+        if let cfg = f.videoConfig, cfg != decoderConfig {
+            do { decoder = try VideoDecoder(config: cfg); decoderConfig = cfg } catch { state = .failed("Decoder: \(error)"); return }
+            decoder?.onFrame = { [weak self] d in Task { @MainActor in self?.handleDecoded(d) } }
+            decoder?.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
+        }
+        guard let decoder else { return }
+        do { try decoder.decode(f.videoFrame) } catch { telemetry.recordDrop(at: now); decoder.invalidate(); self.decoder = nil; decoderConfig = nil; encoder?.requestKeyframe() }
+    }
+
+    /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed,
+    /// dropped or emitted empty counts in the strip's dropped figure, and ten in a row fail the share with Retry, like
+    /// the viewer's ten-failure rule for decoding (Task 14). A rejected setting is said in a notice over the picture.
+    private func handleCodecError(_ error: CodecError, from part: String = "encoder") {
+        switch error {
+        case .encode, .frameDropped, .missingData:
+            let now = CACurrentMediaTime()
+            telemetry.recordDrop(at: now)
+            encodeStarts = encodeStarts.filter { now - $0.value < 1 }   // a failed frame never decodes; drop its start
+            encodeFailures += 1
+            if encodeFailures >= 10 { failEncoding() }
+        case .property(let key, let status):
+            codecNotice = "The video \(part) rejected its \(key) setting (\(status)); the picture goes on without it."
+        case .sessionCreate, .decode, .formatDescription, .prepare:
+            codecNotice = "Video \(part): \(error)"   // Task 9 throws these instead; shown all the same if one ever arrives
+        }
+    }
+
+    /// The encoder is not coming back by itself: stop it, keep the raw picture, offer Retry (a fresh session and encoder).
+    private func failEncoding() {
+        log.error("the video encoder failed 10 frames in a row")
+        encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
+        encodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll()
+        state = .failed("Video encoding keeps failing.")
+    }
+
+    private func handleDecoded(_ d: DecodedFrame) {
+        if let start = encodeStarts.removeValue(forKey: d.seq) { codecWindow.add((CACurrentMediaTime() - start) * 1000, at: CACurrentMediaTime()) }
+        if encodeStarts.count > 120 { encodeStarts.removeAll() }
+        sink.push(d.pixelBuffer, captureHostTimeNs: d.captureHostTimeNs, compareWith: latestRaw?.pixelBuffer, dividerAt: dividerPosition)
+    }
+
+    private func loopbackDidChange() {
+        if !loopback {
+            encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
+            codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0
         }
     }
 

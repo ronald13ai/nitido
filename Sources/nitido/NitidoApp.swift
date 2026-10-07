@@ -30,6 +30,7 @@ struct NitidoApp: App {
             CommandMenu("Nítido") {
                 Button("Share…") { app.startShare() }.keyboardShortcut("n")
                 Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
+                Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
                 // Listed for discoverability; while the window is key, Esc is handled inside it (RootView).
                 Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
             }

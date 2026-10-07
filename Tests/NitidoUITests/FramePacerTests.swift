@@ -18,8 +18,12 @@ private final class FakeDrawing: FrameDrawing {
     private(set) var presentedAt: [Double] = []
     private(set) var drops: [VideoView.Drop] = []
 
+    /// Every frame handed to `render`, with the comparison it carries.
+    private(set) var frames: [FramePacer.Frame] = []
+
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> VideoView.Drop? {
         renders.append((kind, frame.captureHostTimeNs, clock()))
+        frames.append(frame)
         return renderResult
     }
     func framePresented(captureHostTimeNs: UInt64, at presentedAt: Double) {
@@ -263,6 +267,25 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(host.presented, [100], "a redraw is not a display or a latency sample")
         XCTAssertTrue(host.drops.isEmpty)
         XCTAssertEqual(pacer.inFlight, 0)
+    }
+
+    /// Codec loop: the comparison rides on the held frame, so a redraw after a resize shows the same raw frame and
+    /// divider as the live draw did, not the decoded picture alone.
+    @MainActor
+    func testRedrawShowsTheSameComparison() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.drawableSize = CGSize(width: 1440, height: 900)
+        let raw = try makeBuffer()
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: raw, divider: 0.3))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        pacer.drawableSize = CGSize(width: 3200, height: 2400)
+        XCTAssertEqual(host.kinds, [.live, .redraw])
+        for drawn in host.frames {
+            XCTAssertTrue(drawn.compareWith === raw, "every draw compares against the same raw frame")
+            XCTAssertEqual(drawn.divider, 0.3)
+        }
     }
 
     /// A frame that arrives while the window is minimized, covered or hidden is kept and drawn when it shows.
@@ -820,6 +843,20 @@ final class VideoViewHeldFrameTests: XCTestCase {
         XCTAssertEqual(view.pacer.held?.captureHostTimeNs, 9)
         await model.stop()
         XCTAssertNil(view.pacer.held)
+    }
+
+    /// The sink hands the comparison to the view with the frame, so the frame kept for redraws keeps it too.
+    @MainActor
+    func testSinkHandsTheComparisonToTheView() throws {
+        let sink = FrameSink()
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        sink.view = view
+        let raw = try makeBuffer()
+        sink.push(try makeBuffer(), captureHostTimeNs: 7, compareWith: raw, dividerAt: 0.25)
+        XCTAssertTrue(view.pacer.held?.compareWith === raw)
+        XCTAssertEqual(view.pacer.held?.divider, 0.25)
+        sink.push(try makeBuffer(), captureHostTimeNs: 8)
+        XCTAssertNil(view.pacer.held?.compareWith, "a frame pushed without a raw frame is shown alone")
     }
 }
 

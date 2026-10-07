@@ -42,6 +42,10 @@ final class FramePacer {
     struct Frame {
         let pixelBuffer: CVPixelBuffer
         let captureHostTimeNs: UInt64
+        /// Loopback: the raw frame shown left of `divider` (0...1), the main buffer on the right. Nil shows the main
+        /// buffer alone. The held frame keeps it too, so a redraw shows the same comparison.
+        var compareWith: CVPixelBuffer? = nil
+        var divider: CGFloat = 0.5
     }
 
     enum Kind: Sendable, Equatable {

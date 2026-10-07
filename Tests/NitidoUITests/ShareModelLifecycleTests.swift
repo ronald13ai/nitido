@@ -1,5 +1,7 @@
 import XCTest
-import NitidoCapture
+import CoreVideo
+import QuartzCore
+@testable import NitidoCapture
 @testable import NitidoUI
 
 /// A main-actor latch the test opens by hand, so a stop can be held suspended mid-await.
@@ -23,13 +25,14 @@ private final class Journal {
     var lines: [String] = []
 }
 
-/// Stands in for CaptureSession: records picker and stop calls, emits events on demand.
+/// Stands in for CaptureSession: records picker and stop calls, emits events and frames on demand.
 @MainActor
 private final class FakeSource: CaptureSource {
     let id: String
     let frames: AsyncStream<CapturedFrame>
     let events: AsyncStream<CaptureEvent>
     private let eventOut: AsyncStream<CaptureEvent>.Continuation
+    private let frameOut: AsyncStream<CapturedFrame>.Continuation
     private let journal: Journal
     private let stopGate: Gate?
 
@@ -37,7 +40,7 @@ private final class FakeSource: CaptureSource {
         self.id = id
         self.journal = journal
         self.stopGate = stopGate
-        frames = AsyncStream { _ in }
+        (frames, frameOut) = AsyncStream<CapturedFrame>.makeStream()
         (events, eventOut) = AsyncStream<CaptureEvent>.makeStream()
     }
 
@@ -50,6 +53,30 @@ private final class FakeSource: CaptureSource {
     }
 
     func emit(_ event: CaptureEvent) { eventOut.yield(event) }
+
+    func emit(frame: CapturedFrame) { frameOut.yield(frame) }
+}
+
+/// A captured frame stamped now, in a BGRA buffer the hardware encoder takes (IOSurface backed), with a pattern
+/// that changes with `index` so every frame encodes to real data.
+private func capturedFrame(index: Int, width: Int = 320, height: Int = 180) throws -> CapturedFrame {
+    var buffer: CVPixelBuffer?
+    let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
+    let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &buffer)
+    guard status == kCVReturnSuccess, let buffer else { throw XCTSkip("CVPixelBufferCreate failed: \(status)") }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+    let stride = CVPixelBufferGetBytesPerRow(buffer)
+    for y in 0..<height {
+        for x in 0..<width {
+            let on = (x + y + index * 7) % 32 < 16
+            let p = base + y * stride + x * 4
+            p[0] = on ? 0x6a : 0x0c; p[1] = on ? 0xa8 : 0x09; p[2] = on ? 0xc9 : 0x08; p[3] = 0xff
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    return CapturedFrame(pixelBuffer: buffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9),
+                         contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
 }
 
 @MainActor
@@ -276,6 +303,67 @@ final class ShareModelLifecycleTests: XCTestCase {
         await drain()
         XCTAssertTrue(model.failureNeedsPermission)
         await model.stop()
+    }
+
+    /// Codec loop on while capturing: frames go through the hardware encoder and decoder, the decoded frame reaches
+    /// the view with the raw frame and the divider to compare against, the strip names the codec and measures it,
+    /// turning the loop off shows the raw frame alone, and Stop turns the loop off with the session.
+    @MainActor
+    func testCodecLoopEncodesDecodesAndComparesUntilTurnedOffOrStopped() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "n")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        XCTAssertEqual(model.state, .capturing)
+        XCTAssertEqual(model.codecLabel, "raw")
+
+        model.dividerPosition = 0.3
+        model.loopback = true
+        var raws: [CVPixelBuffer] = []
+        for i in 0..<30 {
+            let frame = try capturedFrame(index: i)
+            raws.append(frame.pixelBuffer)
+            source.emit(frame: frame)
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        // The snapshot loop publishes the codec figure every 250 ms.
+        var waits = 0
+        while model.codecMs == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        XCTAssertTrue(["HEVC", "H.264"].contains(model.codecLabel), "codec label \(model.codecLabel)")
+        let codecMs = try XCTUnwrap(model.codecMs, "no codec time measured")
+        XCTAssertGreaterThan(codecMs, 0)
+        XCTAssertGreaterThan(model.snapshot.bitrateMbps, 0, "encoded bytes count in the bitrate")
+        XCTAssertNil(model.codecNotice)
+        XCTAssertEqual(model.state, .capturing)
+        let held = try XCTUnwrap(view.pacer.held)
+        let compared = try XCTUnwrap(held.compareWith, "the decoded frame is shown against a raw frame")
+        XCTAssertTrue(raws.contains { $0 === compared }, "the comparison is a captured frame")
+        XCTAssertFalse(raws.contains { $0 === held.pixelBuffer }, "the main picture is the decoded frame")
+        XCTAssertEqual(held.divider, 0.3)
+
+        model.loopback = false
+        XCTAssertEqual(model.codecLabel, "raw")
+        XCTAssertNil(model.codecMs)
+        let plain = try capturedFrame(index: 99)
+        source.emit(frame: plain)
+        await drain()
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === plain.pixelBuffer, "the loop off shows the captured frame")
+        XCTAssertNil(view.pacer.held?.compareWith)
+
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 100))
+        await drain()
+        XCTAssertNotEqual(model.codecLabel, "raw")
+        await model.stop()
+        XCTAssertFalse(model.loopback, "Stop turns the codec loop off")
+        XCTAssertEqual(model.codecLabel, "raw")
+        XCTAssertNil(model.codecMs)
     }
 
     /// A new model's picker waits until the previous model's session has fully stopped (one shared system picker).
