@@ -17,6 +17,9 @@ public struct ShareView: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 VideoSurface(sink: model.sink).frame(width: pointSize.width, height: pointSize.height)
+                // Above the video, below the divider handle: while the codec loop is on the handle takes the drags, so
+                // the ink is drawn with the loop off.
+                InkOverlay(controller: model.ink).frame(width: pointSize.width, height: pointSize.height)
                 // Covers the whole picture, so it sits below everything that takes a click: the failure's buttons
                 // and both panels.
                 if model.loopback { DividerHandle(position: $model.dividerPosition).frame(width: pointSize.width, height: pointSize.height) }

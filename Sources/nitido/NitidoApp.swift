@@ -27,10 +27,14 @@ struct NitidoApp: App {
                 Button("Hide Others") { NSApp.hideOtherApplications(nil) }.keyboardShortcut("h", modifiers: [.command, .option])
                 Button("Show All") { NSApp.unhideAllApplications(nil) }
             }
+            // The standard Undo owns ⌘Z, and SwiftUI then drops ⌘Z from Undo Stroke, so ⌘Z would do nothing.
+            CommandGroup(replacing: .undoRedo) {}
             CommandMenu("Nítido") {
                 Button("Share…") { app.startShare() }.keyboardShortcut("n")
                 Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
                 Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
+                Button("Undo Stroke") { app.undo() }.keyboardShortcut("z")
+                Button("Clear Ink") { app.clearInk() }.keyboardShortcut(.delete)
                 // Listed for discoverability; while the window is key, Esc is handled inside it (RootView).
                 Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
             }

@@ -26,6 +26,10 @@ public final class AppModel {
 
     public func toggleLoopback() { share?.loopback.toggle() }
 
+    public func undo() { share?.ink.undoLocal() }
+
+    public func clearInk() { share?.ink.clearLocal() }
+
     /// Back to Welcome. The share is detached before the await, so a Share that lands while the old one is
     /// still stopping gets a model of its own instead of being cleared when this stop resumes.
     public func stop() async {

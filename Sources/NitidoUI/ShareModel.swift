@@ -30,6 +30,7 @@ public final class ShareModel {
     public private(set) var scale: CGFloat = 2
     public var showTelemetry = true
     public let sink = FrameSink()
+    public let ink = InkController(role: .share)
     public let code = Pairing.makeCode()
     public let name = Host.current().localizedName ?? "Mac"
     /// True when the current failure most likely comes from a missing Screen Recording grant, so System Settings is the fix.
