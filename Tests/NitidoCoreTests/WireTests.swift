@@ -86,4 +86,26 @@ final class WireTests: XCTestCase {
         guard case .hello(let h) = out[0] else { return XCTFail() }
         XCTAssertEqual(h.name.count, 255)
     }
+
+    func testNonASCIIStringLongerThan255BytesIsCutAtScalarBoundary() throws {
+        // 200 x "\u{00E9}" is 400 UTF-8 bytes; a raw 255-byte cut would split a character.
+        let long = String(repeating: "\u{00E9}", count: 200)
+        var d = Wire.Decoder()
+        let out = try d.feed(Wire.encode(.hello(Hello(protocolVersion: 1, role: .view, name: long, pixelWidth: 1, pixelHeight: 1, scale: 1))))
+        guard case .hello(let h) = out[0] else { return XCTFail() }
+        XCTAssertLessThanOrEqual(h.name.utf8.count, 255)
+        XCTAssertEqual(h.name.utf8.count, 254)
+        XCTAssertEqual(h.name, String(repeating: "\u{00E9}", count: 127))
+    }
+
+    func testFourByteScalarsAreNotSplit() throws {
+        // 70 x U+1F600 is 280 UTF-8 bytes; 63 scalars (252 bytes) fit.
+        let long = String(repeating: "\u{1F600}", count: 70)
+        var w = ByteWriter(); w.string8(long)
+        var r = ByteReader(w.data)
+        let back = try r.string8()
+        XCTAssertTrue(r.isAtEnd)
+        XCTAssertEqual(back.utf8.count, 252)
+        XCTAssertEqual(back, String(repeating: "\u{1F600}", count: 63))
+    }
 }

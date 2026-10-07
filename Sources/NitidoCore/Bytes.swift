@@ -14,9 +14,14 @@ public struct ByteWriter: Sendable {
     }
     public mutating func f32(_ v: Float) { u32(v.bitPattern) }
     public mutating func bytes(_ d: Data) { data.append(d) }
-    /// UTF-8 with a one-byte length prefix; longer strings are cut to 255 bytes.
+    /// UTF-8 with a one-byte length prefix. Longer strings are cut to at most 255 bytes,
+    /// backing off to the last whole Unicode scalar so the bytes stay valid UTF-8.
     public mutating func string8(_ s: String) {
-        let d = Data(s.utf8.prefix(255))
+        var d = Data()
+        for scalar in s.unicodeScalars {
+            guard d.count + scalar.utf8.count <= 255 else { break }
+            d.append(contentsOf: scalar.utf8)
+        }
         u8(UInt8(d.count)); data.append(d)
     }
 }
