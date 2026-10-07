@@ -14,7 +14,8 @@ public final class VideoView: NSView {
     public enum Drop: Sendable, Hashable {
         /// The window is minimized, fully covered, hidden or not laid out yet; no drawable was requested.
         case hidden
-        /// The compositor still holds the earlier drawables; asking for another would block the main thread.
+        /// The frame waited for a drawable (the compositor still held the earlier ones, and asking for another
+        /// would block the main thread) and a newer frame replaced it before it could be drawn.
         case backlog
         /// `nextDrawable()` returned nil after its timeout.
         case noDrawable
@@ -108,7 +109,7 @@ public final class VideoView: NSView {
             case .hidden:
                 log.info("Window not visible: skipped \(count, privacy: .public) frames without drawing")
             case .backlog:
-                log.error("Dropped \(count, privacy: .public) frames: the compositor still held the earlier drawables")
+                log.error("Dropped \(count, privacy: .public) frames: replaced by a newer frame while waiting for a drawable")
             case .noDrawable:
                 log.error("Dropped \(count, privacy: .public) frames: no drawable became available")
             case .notPresented:

@@ -21,7 +21,9 @@ protocol FrameDrawing: AnyObject {
 /// Decides when the video view draws. It keeps exactly one frame, the newest, so the picture can be drawn
 /// again when the drawable changes size or the window shows again: ScreenCaptureKit only sends changed frames,
 /// so a still source would otherwise stay stretched or stale. Redraws respect the frames-in-flight cap and are
-/// never reported as presented, so they add nothing to display fps or latency.
+/// never reported as presented, so they add nothing to display fps or latency. A captured frame that meets the
+/// cap waits for the next drawable as a live frame, so it still counts as displayed, with its real latency; it
+/// is a dropped frame only when a newer one replaces it before it was drawn.
 @MainActor
 final class FramePacer {
     struct Frame {
@@ -45,9 +47,10 @@ final class FramePacer {
     private(set) var inFlight = 0
     /// Last commit or drawable return; a backlog with no movement for a second means a lost handler.
     private var lastActivity: CFTimeInterval = 0
-    /// The held frame met the cap (a redraw, or a live frame dropped as backlog); it is drawn when the next
-    /// drawable comes back, unless a live frame is committed first.
-    private var redrawPending = false
+    /// The held frame met the cap and is drawn as this kind when the next drawable comes back, unless a live
+    /// frame is committed first. `.live`: a captured frame not drawn yet, counted as displayed once it is shown,
+    /// or as dropped if a newer frame replaces it first. `.redraw`: the held frame drawn again (resize, reveal).
+    private var pending: Kind?
 
     /// The drawable's pixel size. A real change draws the held frame again at the new size.
     var drawableSize: CGSize = .zero {
@@ -56,6 +59,11 @@ final class FramePacer {
 
     /// A new captured frame: becomes the held frame (also when it cannot be drawn now) and is drawn if possible.
     func present(_ frame: Frame) {
+        if pending == .live {
+            // The frame waiting for a drawable never reached the screen, and this newer one replaces it.
+            pending = nil
+            host?.frameDropped(.backlog)
+        }
         held = frame
         submit(frame, kind: .live)
     }
@@ -63,7 +71,13 @@ final class FramePacer {
     /// Draws the held frame again, for example when the window shows after being minimized, covered or hidden.
     func redraw() {
         guard let held else { return }
-        submit(held, kind: .redraw)
+        if pending == .live {
+            // Not on screen yet: it is still a captured frame, drawn now if a drawable is free, else it keeps waiting.
+            pending = nil
+            submit(held, kind: .live)
+        } else {
+            submit(held, kind: .redraw)
+        }
     }
 
     /// The presented handler of a committed drawable. `presentedAt` is 0 when the drawable was discarded.
@@ -78,16 +92,16 @@ final class FramePacer {
                 host?.frameDropped(.notPresented)
             }
         }
-        if redrawPending {
-            redrawPending = false
-            redraw()
+        if let kind = pending {
+            pending = nil
+            if let held { submit(held, kind: kind) }
         }
     }
 
     /// Lets go of the held frame so its buffer goes back to the capture pool.
     func releaseHeldFrame() {
         held = nil
-        redrawPending = false
+        pending = nil
     }
 
     private func submit(_ frame: Frame, kind: Kind) {
@@ -101,10 +115,12 @@ final class FramePacer {
         // so nextDrawable() returns at once instead of blocking the main thread.
         if inFlight >= max(1, host.drawableCount - 1) {
             if now() - lastActivity <= 1 {
-                if kind == .live { host.frameDropped(.backlog) }
-                // A live frame dropped here is the held one, the newest: it must still reach the screen when the
-                // next drawable returns, since a still source sends nothing more after it.
-                redrawPending = true
+                // Wait for the next drawable. A live frame waits as live (it is the held one, the newest): it is drawn
+                // when a drawable comes back and counted as displayed then, with the wait in its latency. Reporting
+                // it dropped and drawing it as an uncounted redraw would take that drawable from the next live
+                // frame, which then meets the cap too. A redraw never lands here over a waiting live frame:
+                // `redraw()` submits that frame as live.
+                pending = kind
                 return
             }
             log.error("No drawable came back for 1 s with \(self.inFlight, privacy: .public) frames in flight; resetting the count")
@@ -120,7 +136,7 @@ final class FramePacer {
             }
             return
         }
-        if kind == .live { redrawPending = false }
+        if kind == .live { pending = nil }
         inFlight += 1
         lastActivity = now()
     }
