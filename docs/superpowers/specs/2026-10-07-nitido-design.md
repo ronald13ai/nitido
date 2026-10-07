@@ -129,7 +129,7 @@ Errors: shown inline in the window where they happen, in plain language, with th
 
 ## 10. Telemetry strip
 
-A single row under the picture, SF Mono figures, updated 4 times per second from 1-second rolling windows: capture fps · display fps · capture→display ms (exact in loopback, estimated across Macs) · RTT ms · bitrate Mbps · resolution and scale · codec. A 2-second sparkline of latency sits at the right end. Values that cross a threshold (latency over 100 ms, dropped frames) turn gold for one second, never red; the strip informs, it does not alarm. ⌘H hides it instantly, without animation.
+A single row under the picture (when the picture is narrower than that row, the figures wrap onto further rows rather than widen the window past the picture), SF Mono figures, updated 4 times per second from 1-second rolling windows: capture fps · display fps · capture→display ms (exact in loopback, estimated across Macs) · RTT ms · bitrate Mbps · resolution and scale · codec. A 2-second sparkline of latency sits at the right end. Values that cross a threshold (latency over 100 ms, dropped frames) turn gold for one second, never red; the strip informs, it does not alarm. ⌘H hides it instantly, without animation.
 
 ## 11. Visual direction
 

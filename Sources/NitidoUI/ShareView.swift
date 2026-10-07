@@ -8,8 +8,13 @@ public struct ShareView: View {
     /// 1:1 when the content fits the screen, scaled down otherwise, never up.
     private var pointSize: CGSize { model.fittedPointSize }
 
+    /// The picture area in whole points. A 1:1 picture with an odd pixel size is a half point wide or tall; a
+    /// window cannot be, and rounding it down would cut the picture's last pixel column. So the window gets the
+    /// next whole point and the picture keeps its exact size at the top left (1 px of background at most).
+    private var areaSize: CGSize { CGSize(width: pointSize.width.rounded(.up), height: pointSize.height.rounded(.up)) }
+
     public var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 VideoSurface(sink: model.sink).frame(width: pointSize.width, height: pointSize.height)
                 if model.state == .picking { placeholder("Choose a window or a display in the picker.", note: screenRecordingNote) }
@@ -17,10 +22,18 @@ public struct ShareView: View {
                 if model.state == .capturing, let reason = model.renderFailure { renderNotice(reason) }
                 PairingPanel(name: model.name, code: model.code).padding(14)
             }
+            // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
+            // a tiny picture spills left and down and never moves the picture off the window's top left corner.
+            .frame(width: pointSize.width, height: pointSize.height, alignment: .topTrailing)
+            .frame(width: areaSize.width, height: areaSize.height, alignment: .topLeading)
             if model.showTelemetry {
                 TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: "raw", latencyLabel: "capture→display")
             }
         }
+        // As wide as the picture (to the whole point), so `.windowResizability(.contentSize)` fixes the window's
+        // width to every pick, narrower ones included, the way it fixes the height; the strip wraps instead of
+        // widening it.
+        .frame(width: areaSize.width)
         .background(Theme.Colors.background)
     }
 

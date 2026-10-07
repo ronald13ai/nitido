@@ -45,7 +45,8 @@ final class FramePacer {
     private(set) var inFlight = 0
     /// Last commit or drawable return; a backlog with no movement for a second means a lost handler.
     private var lastActivity: CFTimeInterval = 0
-    /// A redraw that met the cap; it runs when the next drawable comes back.
+    /// The held frame met the cap (a redraw, or a live frame dropped as backlog); it is drawn when the next
+    /// drawable comes back, unless a live frame is committed first.
     private var redrawPending = false
 
     /// The drawable's pixel size. A real change draws the held frame again at the new size.
@@ -100,7 +101,10 @@ final class FramePacer {
         // so nextDrawable() returns at once instead of blocking the main thread.
         if inFlight >= max(1, host.drawableCount - 1) {
             if now() - lastActivity <= 1 {
-                if kind == .live { host.frameDropped(.backlog) } else { redrawPending = true }
+                if kind == .live { host.frameDropped(.backlog) }
+                // A live frame dropped here is the held one, the newest: it must still reach the screen when the
+                // next drawable returns, since a still source sends nothing more after it.
+                redrawPending = true
                 return
             }
             log.error("No drawable came back for 1 s with \(self.inFlight, privacy: .public) frames in flight; resetting the count")

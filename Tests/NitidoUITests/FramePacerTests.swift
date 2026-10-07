@@ -148,6 +148,52 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(host.drops, [.backlog, .notPresented], "a discarded redraw is not a dropped frame")
     }
 
+    /// The last frame of a burst arrives while two drawables are in flight, then the source goes still (it only
+    /// sends changed frames). The frame is counted as dropped once and is drawn when the next drawable comes back,
+    /// instead of leaving the frame before it on screen until the source changes.
+    @MainActor
+    func testLiveFrameDroppedAtTheCapIsDrawnWhenTheNextDrawableReturns() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.now = { 10 }
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        pacer.present(try frame(1))
+        pacer.present(try frame(2))
+        pacer.present(try frame(3))
+        XCTAssertEqual(host.drops, [.backlog])
+        XCTAssertEqual(host.kinds, [.live, .live], "no third drawable while two are in flight")
+
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
+        XCTAssertEqual(host.kinds, [.live, .live, .redraw])
+        XCTAssertEqual(host.renders.last?.captureHostTimeNs, 3, "the newest frame reaches the screen")
+        XCTAssertEqual(host.drops, [.backlog], "counted as dropped once, not again")
+
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 1.1)
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 3, presentedAt: 1.2)
+        XCTAssertEqual(host.kinds.count, 3, "drawn once")
+        XCTAssertEqual(host.presented, [1, 2], "the late draw of a dropped frame is not a display")
+        XCTAssertEqual(pacer.inFlight, 0)
+    }
+
+    /// A newer live frame drawn after a backlog drop already shows the newest picture: no late draw follows.
+    @MainActor
+    func testLiveFrameDrawnAfterABacklogDropCancelsTheLateDraw() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.now = { 10 }
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        pacer.present(try frame(1))
+        pacer.present(try frame(2))
+        pacer.present(try frame(3))                              // dropped at the cap
+        host.drawableCount = 4                                   // room for one more live frame
+        pacer.present(try frame(4))
+        XCTAssertEqual(host.kinds, [.live, .live, .live])
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 1, presentedAt: 1.0)
+        XCTAssertEqual(host.kinds, [.live, .live, .live], "frame 4 is already the newest on screen")
+    }
+
     /// No drawable back for over a second: the count resets and drawing resumes (a lost presented handler).
     @MainActor
     func testStalledBacklogResetsAfterOneSecond() throws {
