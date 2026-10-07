@@ -31,7 +31,7 @@ struct NitidoApp: App {
                 Button("Share…") { app.startShare() }.keyboardShortcut("n")
                 Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
                 // Listed for discoverability; while the window is key, Esc is handled inside it (RootView).
-                Button("Stop") { Task { await app.stop() } }.keyboardShortcut(.escape, modifiers: [])
+                Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
             }
         }
     }

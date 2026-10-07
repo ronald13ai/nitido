@@ -12,7 +12,7 @@ public struct ShareView: View {
         VStack(spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 VideoSurface(sink: model.sink).frame(width: pointSize.width, height: pointSize.height)
-                if model.state == .picking { placeholder("Choose a window or a display in the picker.") }
+                if model.state == .picking { placeholder("Choose a window or a display in the picker.", note: screenRecordingNote) }
                 if case .failed(let message) = model.state { failure(message) }
                 if model.state == .capturing, let reason = model.renderFailure { renderNotice(reason) }
                 PairingPanel(name: model.name, code: model.code).padding(14)
@@ -24,9 +24,19 @@ public struct ShareView: View {
         .background(Theme.Colors.background)
     }
 
-    private func placeholder(_ text: String, actions: [(String, () -> Void)] = []) -> some View {
+    /// Said before the system prompt (spec 12): only when Screen Recording is not granted yet.
+    private var screenRecordingNote: String? {
+        model.mayAskForScreenRecording
+            ? "After you pick, macOS may ask for Screen Recording. Nítido needs it to read the picture you chose and show it here."
+            : nil
+    }
+
+    private func placeholder(_ text: String, note: String? = nil, actions: [(String, () -> Void)] = []) -> some View {
         VStack(spacing: 12) {
             Text(text).font(.system(size: 13)).foregroundStyle(Theme.Colors.text).multilineTextAlignment(.center)
+            if let note {
+                Text(note).font(.system(size: 12)).foregroundStyle(Theme.Colors.text).multilineTextAlignment(.center)
+            }
             if !actions.isEmpty {
                 HStack(spacing: 10) {
                     ForEach(actions.indices, id: \.self) { i in Button(actions[i].0, action: actions[i].1) }

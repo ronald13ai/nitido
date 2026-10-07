@@ -31,8 +31,13 @@ public final class ShareModel {
     public private(set) var failureNeedsPermission = false
     /// The last reason a frame could not be rendered; cleared by the next frame that reaches the screen.
     public private(set) var renderFailure: String?
+    /// True when Screen Recording was not granted as the picker opened, so the picker screen explains the
+    /// system prompt that may follow the pick before macOS shows it.
+    public private(set) var mayAskForScreenRecording = false
 
     private let makeSource: @MainActor () -> any CaptureSource
+    /// `CGPreflightScreenCaptureAccess` in the app; tests pass a fixed answer.
+    private let screenRecordingGranted: @MainActor () -> Bool
     /// The session of the current attempt. Each attempt gets a fresh one: a session's streams end for good
     /// once a task iterating them is cancelled, so a retired session is never reused.
     private var capture: (any CaptureSource)?
@@ -48,8 +53,10 @@ public final class ShareModel {
 
     public convenience init() { self.init(makeSource: { CaptureSession() }) }
 
-    init(makeSource: @escaping @MainActor () -> any CaptureSource) {
+    init(makeSource: @escaping @MainActor () -> any CaptureSource,
+         screenRecordingGranted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() }) {
         self.makeSource = makeSource
+        self.screenRecordingGranted = screenRecordingGranted
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }
             telemetry.recordDisplay(at: presentedAt)
@@ -108,6 +115,7 @@ public final class ShareModel {
         excludedWindowIDs = excludingWindowIDs
         failureNeedsPermission = false
         renderFailure = nil
+        mayAskForScreenRecording = !screenRecordingGranted()
         state = .picking
         attempt &+= 1
         let current = attempt
@@ -160,6 +168,8 @@ public final class ShareModel {
     private func retireSession() {
         tasks.forEach { $0.cancel() }
         tasks = []
+        // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain.
+        sink.releaseHeldFrame()
         guard let old = capture else { return }
         capture = nil
         let earlier = Self.retiring
@@ -179,7 +189,7 @@ public final class ShareModel {
             state = .idle
         case .failed(let message):
             // Before the first frame, a missing Screen Recording grant is the likely cause.
-            failureNeedsPermission = state != .capturing && !CGPreflightScreenCaptureAccess()
+            failureNeedsPermission = state != .capturing && !screenRecordingGranted()
             state = .failed(message)
         }
     }

@@ -34,10 +34,10 @@ public final class VideoView: NSView {
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private lazy var ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false, .workingColorSpace: colorSpace])
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
-    /// Frames committed whose drawable has not been presented or discarded yet.
-    private var inFlight = 0
-    /// Last commit or drawable return; a backlog with no movement for a second means a lost handler.
-    private var lastDrawableActivity: CFTimeInterval = 0
+    /// Holds the newest frame, caps frames in flight and redraws after a resize or when the window shows again.
+    let pacer = FramePacer()
+    /// The window whose occlusion and deminiaturize notifications this view observes.
+    private weak var observedWindow: NSWindow?
     /// Drops not logged yet, by reason. Logged at most once a second so a long stall does not flood the log.
     private var unloggedDrops: [Drop: Int] = [:]
     private var lastDropLog: CFTimeInterval = 0
@@ -46,6 +46,7 @@ public final class VideoView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layerContentsRedrawPolicy = .never
+        pacer.host = self
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -65,10 +66,14 @@ public final class VideoView: NSView {
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); updateDrawableSize() }
     public override func layout() { super.layout(); updateDrawableSize() }
 
+    /// Sizes the drawable to the view in pixels. A real change makes the pacer draw the held frame again, since
+    /// the layer would otherwise stretch the last drawable to the new bounds until the source changes.
     private func updateDrawableSize() {
         let scale = window?.backingScaleFactor ?? 2
         metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
+        let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
+        if metalLayer.drawableSize != size { metalLayer.drawableSize = size }
+        pacer.drawableSize = size
     }
 
     /// The point size at which `pixelSize` shows 1:1 on this view's screen.
@@ -77,77 +82,14 @@ public final class VideoView: NSView {
         return CGSize(width: px.width / s, height: px.height / s)
     }
 
-    /// True while the window can actually show the picture. A minimized or fully covered window gets no
-    /// drawables back from the compositor, and `nextDrawable()` would then stall the main thread.
-    private var isVisibleOnScreen: Bool {
-        guard let window, window.isVisible, !window.isMiniaturized else { return false }
-        return window.occlusionState.contains(.visible)
-    }
-
     public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) {
         contentPixelSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-        let target = metalLayer.drawableSize
-        guard target.width > 0, target.height > 0, isVisibleOnScreen else { dropped(.hidden); return }
-        // One drawable is on screen and one may be queued; only ask for another when a third is free,
-        // so nextDrawable() returns at once instead of blocking the main thread.
-        if inFlight >= max(1, metalLayer.maximumDrawableCount - 1) {
-            guard CACurrentMediaTime() - lastDrawableActivity > 1 else { dropped(.backlog); return }
-            log.error("No drawable came back for 1 s with \(self.inFlight, privacy: .public) frames in flight; resetting the count")
-            inFlight = 0
-        }
-        guard let drawable = metalLayer.nextDrawable() else { dropped(.noDrawable); return }
-        guard let command = commandQueue.makeCommandBuffer() else {
-            dropped(.failed("Metal could not create a command buffer."))
-            return
-        }
-
-        var image = CIImage(cvPixelBuffer: pixelBuffer)
-        let fit = min(target.width / contentPixelSize.width, target.height / contentPixelSize.height)
-        if fit < 1, let lanczos = CIFilter(name: "CILanczosScaleTransform") {
-            lanczos.setValue(image, forKey: kCIInputImageKey)
-            lanczos.setValue(fit, forKey: kCIInputScaleKey)
-            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
-            image = lanczos.outputImage ?? image
-        }
-        let shown = image.extent.size
-        image = image.transformed(by: CGAffineTransform(translationX: ((target.width - shown.width) / 2).rounded(),
-                                                         y: ((target.height - shown.height) / 2).rounded()))
-        let bounds = CGRect(origin: .zero, size: target)
-        let background = CIImage(color: CIColor(red: 8 / 255, green: 9 / 255, blue: 12 / 255)).cropped(to: bounds)
-        let destination = CIRenderDestination(mtlTexture: drawable.texture, commandBuffer: command)
-        destination.colorSpace = colorSpace
-        do {
-            try ciContext.startTask(toRender: image.composited(over: background), from: bounds, to: destination, at: .zero)
-        } catch {
-            dropped(.failed(error.localizedDescription))
-            return
-        }
-        let callback = onPresented
-        drawable.addPresentedHandler { [weak self] presented in
-            let at = presented.presentedTime
-            Task { @MainActor in
-                guard let self else { return }
-                self.drawableReturned()
-                // A discarded drawable reports 0: count it as dropped, never as a display at time zero.
-                if at > 0 { callback?(captureHostTimeNs, at) } else { self.dropped(.notPresented) }
-            }
-        }
-        command.addCompletedHandler { [weak self] buffer in
-            guard let error = buffer.error else { return }
-            let reason = error.localizedDescription
-            Task { @MainActor in self?.dropped(.failed(reason)) }
-        }
-        command.present(drawable)
-        command.commit()
-        inFlight += 1
-        lastDrawableActivity = CACurrentMediaTime()
+        pacer.present(FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs))
         flushDropLog(force: false)
     }
 
-    private func drawableReturned() {
-        inFlight = max(0, inFlight - 1)
-        lastDrawableActivity = CACurrentMediaTime()
-    }
+    /// Lets go of the frame kept for redraws, so its buffer returns to the capture pool (the share stopped).
+    public func releaseHeldFrame() { pacer.releaseHeldFrame() }
 
     /// Reports a frame that was not drawn and logs it (rate limited, with counts).
     private func dropped(_ drop: Drop) {
@@ -180,8 +122,88 @@ public final class VideoView: NSView {
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { flushDropLog(force: true) }
+        let center = NotificationCenter.default
+        if let observedWindow {
+            center.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: observedWindow)
+            center.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: observedWindow)
+        }
+        observedWindow = window
+        guard let window else {
+            // Out of the window: hand the held buffer back to the capture pool and write out pending drop counts.
+            pacer.releaseHeldFrame()
+            flushDropLog(force: true)
+            return
+        }
+        center.addObserver(self, selector: #selector(windowMayHaveBecomeVisible(_:)),
+                           name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        center.addObserver(self, selector: #selector(windowMayHaveBecomeVisible(_:)),
+                           name: NSWindow.didDeminiaturizeNotification, object: window)
     }
+
+    /// Frames that arrived while the window was minimized, covered or hidden were kept, not drawn: show the newest.
+    @objc private func windowMayHaveBecomeVisible(_ note: Notification) {
+        if canShowFrames { pacer.redraw() }
+    }
+}
+
+extension VideoView: FrameDrawing {
+    /// True while the window can actually show the picture. A minimized or fully covered window gets no
+    /// drawables back from the compositor, and `nextDrawable()` would then stall the main thread.
+    var canShowFrames: Bool {
+        guard let window, window.isVisible, !window.isMiniaturized else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    var drawableCount: Int { metalLayer.maximumDrawableCount }
+
+    func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> Drop? {
+        let target = metalLayer.drawableSize
+        guard let drawable = metalLayer.nextDrawable() else { return .noDrawable }
+        guard let command = commandQueue.makeCommandBuffer() else { return .failed("Metal could not create a command buffer.") }
+
+        let content = CGSize(width: CVPixelBufferGetWidth(frame.pixelBuffer), height: CVPixelBufferGetHeight(frame.pixelBuffer))
+        var image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+        let fit = min(target.width / content.width, target.height / content.height)
+        if fit < 1, let lanczos = CIFilter(name: "CILanczosScaleTransform") {
+            lanczos.setValue(image, forKey: kCIInputImageKey)
+            lanczos.setValue(fit, forKey: kCIInputScaleKey)
+            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
+            image = lanczos.outputImage ?? image
+        }
+        let shown = image.extent.size
+        image = image.transformed(by: CGAffineTransform(translationX: ((target.width - shown.width) / 2).rounded(),
+                                                         y: ((target.height - shown.height) / 2).rounded()))
+        let bounds = CGRect(origin: .zero, size: target)
+        let background = CIImage(color: CIColor(red: 8 / 255, green: 9 / 255, blue: 12 / 255)).cropped(to: bounds)
+        let destination = CIRenderDestination(mtlTexture: drawable.texture, commandBuffer: command)
+        destination.colorSpace = colorSpace
+        do {
+            try ciContext.startTask(toRender: image.composited(over: background), from: bounds, to: destination, at: .zero)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        let captureNs = frame.captureHostTimeNs
+        drawable.addPresentedHandler { [weak self] presented in
+            let at = presented.presentedTime
+            Task { @MainActor in
+                self?.pacer.drawableReturned(kind: kind, captureHostTimeNs: captureNs, presentedAt: at)
+            }
+        }
+        command.addCompletedHandler { [weak self] buffer in
+            guard let error = buffer.error else { return }
+            let reason = error.localizedDescription
+            Task { @MainActor in self?.dropped(.failed(reason)) }
+        }
+        command.present(drawable)
+        command.commit()
+        return nil
+    }
+
+    func framePresented(captureHostTimeNs: UInt64, at presentedAt: Double) {
+        onPresented?(captureHostTimeNs, presentedAt)
+    }
+
+    func frameDropped(_ drop: Drop) { dropped(drop) }
 }
 
 /// Lets a model push frames straight to the view, bypassing SwiftUI's update cycle.
@@ -197,6 +219,8 @@ public final class FrameSink {
         view.onDropped = onDropped
         view.present(pixelBuffer, captureHostTimeNs: captureHostTimeNs)
     }
+    /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
+    public func releaseHeldFrame() { view?.releaseHeldFrame() }
 }
 
 public struct VideoSurface: NSViewRepresentable {

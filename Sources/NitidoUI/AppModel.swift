@@ -32,6 +32,11 @@ public final class AppModel {
         screen = .welcome
         await model?.stop()
     }
+
+    /// The one entry point for Esc: the invisible in-window button on the Share and View screens and the Stop
+    /// menu item both call it. It stops at once for now; Task 15 makes it call `requestStop()`, so Esc asks
+    /// "Stop sharing?" or "Disconnect?" first whether or not the window is key.
+    public func escape() { Task { await stop() } }
 }
 
 public struct RootView: View {
@@ -43,11 +48,11 @@ public struct RootView: View {
             case .welcome: WelcomeView(onShare: { app.startShare() }, onView: {})
             case .share:
                 if let share = app.share {
-                    ShareView(model: share).background(EscapeStops { Task { await app.stop() } })
+                    ShareView(model: share).background(EscapeStops { app.escape() })
                 }
             case .view:
                 Text("View").foregroundStyle(Theme.Colors.text)   // Task 13
-                    .background(EscapeStops { Task { await app.stop() } })
+                    .background(EscapeStops { app.escape() })
             }
         }
         .background(KeepWindowOnScreen())
@@ -55,7 +60,8 @@ public struct RootView: View {
 }
 
 /// Esc inside the window. A menu item's Esc shortcut never fires while a window is key, so the Share and
-/// View screens carry this invisible button; Welcome does not, so Esc there does nothing.
+/// View screens carry this invisible button; Welcome does not, so Esc there does nothing. It must call
+/// `app.escape()`, never `app.stop()` directly, so the confirmation Task 15 adds also covers it.
 private struct EscapeStops: View {
     let action: () -> Void
     var body: some View {

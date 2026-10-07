@@ -246,6 +246,38 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// Without the Screen Recording grant, the picker screen says macOS may ask after the pick (spec 12).
+    @MainActor
+    func testPickerExplainsScreenRecordingOnlyWhenNotGranted() async {
+        let journal = Journal()
+        let denied = ShareModel(makeSource: Factory(journal: journal, prefix: "k").make, screenRecordingGranted: { false })
+        XCTAssertFalse(denied.mayAskForScreenRecording)
+        denied.start(excludingWindowIDs: [])
+        XCTAssertEqual(denied.state, .picking)
+        XCTAssertTrue(denied.mayAskForScreenRecording)
+        await denied.stop()
+
+        let granted = ShareModel(makeSource: Factory(journal: journal, prefix: "l").make, screenRecordingGranted: { true })
+        granted.start(excludingWindowIDs: [])
+        XCTAssertEqual(granted.state, .picking)
+        XCTAssertFalse(granted.mayAskForScreenRecording)
+        await granted.stop()
+    }
+
+    /// A failure before capture started, without the grant, offers System Settings.
+    @MainActor
+    func testFailureBeforeCaptureWithoutTheGrantAsksForPermission() async {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "m")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { false })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.failed("The user declined TCCs for application, window, display capture"))
+        await drain()
+        XCTAssertTrue(model.failureNeedsPermission)
+        await model.stop()
+    }
+
     /// A new model's picker waits until the previous model's session has fully stopped (one shared system picker).
     @MainActor
     func testNextModelWaitsForThePreviousModelsStop() async {
