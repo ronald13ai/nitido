@@ -51,12 +51,12 @@ nitido (app)  ->  NitidoUI  ->  NitidoCapture, NitidoCodec, NitidoLink  ->  Niti
 - Handles picker cancel, stream stop by the system, display reconfiguration (resolution change restarts the stream and emits a new `videoConfig`).
 
 ### NitidoCodec (VideoToolbox)
-- `VideoEncoder`: HEVC Main (H.264 High if HEVC hardware encode is unavailable), realtime, no frame reordering, keyframe every 120 frames or on request, `expectedFrameRate` 60, `averageBitRate` set from `BitrateController`. Emits `EncodedFrame { data (Annex B), isKey, parameterSets?, captureHostTime, seq }`.
+- `VideoEncoder`: HEVC Main (H.264 High if HEVC hardware encode is unavailable), realtime, no frame reordering, keyframe every 120 frames or on request, `expectedFrameRate` 60, `averageBitRate` set from `BitrateController`. Emits `EncodedFrame { data (NAL units with 4-byte length prefixes, as VideoToolbox produces them), isKey, parameterSets?, captureHostTime, seq }`.
 - `VideoDecoder`: builds the format description from parameter sets, decodes to `CVPixelBuffer`, emits `DecodedFrame { pixelBuffer, captureHostTime, seq }`. Flushes and rebuilds on a new `videoConfig`.
 - Both drop work rather than queue it: the encoder always takes the newest captured frame; the decoder decodes whatever arrives and the renderer shows the newest.
 
 ### NitidoLink (Network.framework)
-- `Advertiser` (sharer): `NWListener` over TCP with TLS 1.3 PSK, Bonjour service `_nitido._tcp`, TXT record with display name and protocol version.
+- `Advertiser` (sharer): `NWListener` over TCP with TLS PSK, Bonjour service `_nitido._tcp`, TXT record with display name and protocol version.
 - `Browser` (viewer): `NWBrowser` for `_nitido._tcp`; list of sharers updated live.
 - `Link`: one connection, both directions, `send(Message)` and an `AsyncStream<Message>`. Measures send backlog (bytes accepted by `send` whose completion has not fired). Ping every 500 ms. Reconnects with exponential backoff (0.5 s, 1 s, 2 s, max 5 s) while the user keeps the session open.
 
@@ -87,7 +87,7 @@ Byte order big-endian. Every message: `u32 length` (payload bytes, excluding the
 |---|---|---|
 | 1 | hello | u16 protocolVersion · u8 role (1 share, 2 view) · utf8 name (u8 length prefix) · u16 pixelWidth · u16 pixelHeight · f32 scale |
 | 2 | videoConfig | u8 codec (1 hevc, 2 h264) · u16 width · u16 height · parameter sets (u8 count, each u16 length + bytes) |
-| 3 | videoFrame | u32 seq · u64 captureHostTimeNs · u8 isKey · bytes (Annex B) |
+| 3 | videoFrame | u32 seq · u64 captureHostTimeNs · u8 isKey · bytes (length-prefixed NAL units) |
 | 4 | stroke | u32 strokeId · u8 phase (1 begin, 2 append, 3 end) · u8 r,g,b · f32 baseWidth · u16 pointCount · points (f32 x, f32 y normalized 0..1, f32 pressure, u32 tMs) |
 | 5 | cursor | f32 x · f32 y normalized · u8 visible |
 | 6 | ping | u32 id · u64 tNs |
@@ -170,7 +170,7 @@ Every failure is visible in the UI and logged with `os.Logger` under subsystem `
 
 ## 13. Security
 
-TLS 1.3 with a pre-shared key derived with HKDF-SHA256 from the 4-digit code and the sharer's Bonjour name; the viewer must type the code shown on the sharer's screen. A wrong code fails the handshake. Three failed handshakes regenerate the code. The listener binds to the local network only. Frames never touch disk.
+TLS with a pre-shared key (the TLS 1.2 PSK ciphersuite that Network.framework supports) derived with HKDF-SHA256 from the 4-digit code and the sharer's Bonjour name; the viewer must type the code shown on the sharer's screen. A wrong code fails the handshake. Three failed handshakes regenerate the code. The listener binds to the local network only. Frames never touch disk.
 
 ## 14. Testing
 
