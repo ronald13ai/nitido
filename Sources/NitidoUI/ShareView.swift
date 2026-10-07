@@ -134,8 +134,10 @@ struct DividerHandle: View {
         GeometryReader { geo in
             Color.clear.contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { v in position = min(1, max(0, v.location.x / geo.size.width)) })
+            // The dot is where a user grabs the line, so it must not take the drag from the handle under it.
             Circle().fill(Theme.Colors.gold).frame(width: 10, height: 10)
                 .position(x: geo.size.width * position, y: geo.size.height - 18)
+                .allowsHitTesting(false)
         }
     }
 }

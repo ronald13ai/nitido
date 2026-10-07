@@ -41,7 +41,7 @@ public final class ShareModel {
     public private(set) var mayAskForScreenRecording = false
 
     public var loopback = false { didSet { if loopback != oldValue { loopbackDidChange() } } }
-    public var qualityMbps: Double = 20 { didSet { encoder?.setBitrate(Int(qualityMbps * 1_000_000)) } }
+    public var qualityMbps: Double = 20 { didSet { qualityDidChange() } }
     /// Where the comparison splits (0...1). Every decoded frame carries it (`handleDecoded`); a move also reaches the
     /// frame the view keeps, which is drawn again only when the source is still (`FramePacer.moveDivider`).
     public var dividerPosition: Double = 0.5 { didSet { if dividerPosition != oldValue { sink.moveDivider(to: dividerPosition) } } }
@@ -50,7 +50,14 @@ public final class ShareModel {
     private var encoder: VideoEncoder?
     private var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
+    /// The newest captured frame, raw: the left of the comparison while the loop is on. While it is off it is the frame
+    /// the view holds (it was pushed raw), so it pins no buffer of its own; turning the loop on encodes it at once,
+    /// since a still source sends no frame to start with (`encodeNewestAgain`). Cleared with the session.
     private var latestRaw: CapturedFrame?
+    /// When the newest frame came (`CACurrentMediaTime`): a still source sends none.
+    @ObservationIgnored private var lastCaptureAt: CFTimeInterval = 0
+    /// Bumped by every quality change, loop off and retire, so a pending `qualityRested` for an earlier one does nothing.
+    @ObservationIgnored private var qualityRestToken: UInt64 = 0
     private var encodeStarts: [UInt32: Double] = [:]
     private var codecWindow = RollingWindow(seconds: 1)
     /// A codec setting VideoToolbox rejected (`CodecError.property` through `onError`), shown over the picture.
@@ -202,8 +209,11 @@ public final class ShareModel {
         tasks.forEach { $0.cancel() }
         tasks = []
         loopback = false
-        // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain.
+        qualityRestToken &+= 1
+        // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain. The model
+        // lets go of the same frame, and a new session never encodes the old one.
         sink.releaseHeldFrame()
+        latestRaw = nil
         guard let old = capture else { return }
         capture = nil
         let earlier = Self.retiring
@@ -215,15 +225,31 @@ public final class ShareModel {
 
     private func ingest(_ frame: CapturedFrame) {
         telemetry.recordCapture(at: Double(frame.captureHostTimeNs) / 1e9)
+        lastCaptureAt = CACurrentMediaTime()
+        latestRaw = frame
         // Encode only while capturing: after a failure (the encoder's included) the raw picture goes on until Retry,
         // and no encoder is made again for every frame.
         guard loopback, state == .capturing else { sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs); return }
-        latestRaw = frame
-        if encoder == nil || encoder?.width != frame.pixelWidth || encoder?.height != frame.pixelHeight { makeEncoder(for: frame) }
+        encode(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
+    }
+
+    /// A still source sends no frame (`CaptureSession` forwards only changed ones), so the loop would show nothing
+    /// until the content changed: the newest raw frame is encoded again. It is stamped now, as it reaches the encoder,
+    /// so the capture→display figure counts the codec and the display, not how long the source has been still (which
+    /// could be seconds, and over five would be logged as the clocks disagreeing). It is not a new capture.
+    private func encodeNewestAgain() {
+        guard loopback, state == .capturing, let raw = latestRaw else { return }
+        encode(raw.pixelBuffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9))
+    }
+
+    /// Hands a frame to the encoder, made (again) for its size; `handleDecoded` shows the result against `latestRaw`.
+    private func encode(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) {
+        let width = CVPixelBufferGetWidth(pixelBuffer), height = CVPixelBufferGetHeight(pixelBuffer)
+        if encoder == nil || encoder?.width != width || encoder?.height != height { makeEncoder(width: width, height: height) }
         guard let encoder else { return }
         let n = encoder.nextSeq
         encodeStarts[n] = CACurrentMediaTime()
-        if !encoder.encode(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs) {
+        if !encoder.encode(pixelBuffer, captureHostTimeNs: captureHostTimeNs) {
             encodeStarts.removeValue(forKey: n)
             // `nextSeq` moves only once the encoder has taken the frame. A refusal after that went to `onError`, which
             // counts it; a frame turned away at the two-in-flight cap, or by an invalidated encoder, is counted here.
@@ -231,11 +257,11 @@ public final class ShareModel {
         }
     }
 
-    private func makeEncoder(for frame: CapturedFrame) {
+    private func makeEncoder(width: Int, height: Int) {
         encoder?.invalidate(); decoder?.invalidate(); decoder = nil; decoderConfig = nil
         codecNotice = nil; encodeFailures = 0; decodeFailures = 0
         do {
-            let e = try VideoEncoder(width: frame.pixelWidth, height: frame.pixelHeight, preferred: .hevc, bitsPerSecond: Int(qualityMbps * 1_000_000))
+            let e = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: Int(qualityMbps * 1_000_000))
             e.onFrame = { [weak self] f in Task { @MainActor in self?.handleEncoded(f) } }
             // Set before the first encode. It runs on a VideoToolbox queue, or on this thread inside `encode` and
             // `setBitrate`, and a setting rejected inside `init` arrives the moment it is set: so it hops to the main actor.
@@ -317,14 +343,48 @@ public final class ShareModel {
     }
 
     private func loopbackDidChange() {
-        if !loopback {
-            encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
-            codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0; decodeFailures = 0
-            // Back to raw at once: a still source sends no new frame to replace the comparison on screen. The view
-            // keeps the raw frame for redraws, so the model lets go of it.
-            if let raw = latestRaw { sink.endComparison(showing: raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs) }
-            latestRaw = nil
+        guard !loopback else {
+            // On at once: a still source sends no frame to start the loop with, so the one on screen is encoded now.
+            encodeNewestAgain()
+            return
         }
+        qualityRestToken &+= 1
+        encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
+        codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0; decodeFailures = 0
+        // Back to raw at once: a still source sends no new frame to replace the comparison on screen. The view keeps
+        // the raw frame for redraws, the same one `latestRaw` holds, so turning the loop on again can encode it.
+        if let raw = latestRaw { sink.endComparison(showing: raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs) }
+    }
+
+    /// How long the quality slider rests before a still picture is encoded again at the new quality (`qualityRested`).
+    static let qualityRest: Duration = .milliseconds(150)
+    /// No frame for this long means the source is still, or too slow to show a quality change soon.
+    static let stillAfter: CFTimeInterval = 0.05
+
+    /// The encoder takes the new rate at once (a rate it rejects comes back through `onError` as a notice), and a
+    /// moving source's next frames show it. A still source sends none, so once the slider rests `qualityRested` does.
+    private func qualityDidChange() {
+        guard let encoder else { return }
+        encoder.setBitrate(Int(qualityMbps * 1_000_000))
+        qualityRestToken &+= 1
+        let token = qualityRestToken
+        Task { [weak self] in
+            do { try await Task.sleep(for: Self.qualityRest) } catch { return }
+            guard let self, token == qualityRestToken else { return }
+            qualityRested()
+        }
+    }
+
+    /// A still source sends no frame to show a quality change, so its newest frame is encoded again, as a keyframe
+    /// from an encoder made at the new rate: that is the picture a viewer joining at this quality gets. A keyframe from
+    /// the running encoder would barely change: its rate control carries the old rate's quality over and moves away
+    /// from it only over many frames (60 then 2 Mbps gave a 2 Mbps keyframe as sharp as the 60 Mbps one). Once per
+    /// rest, not once per slider step.
+    private func qualityRested() {
+        guard loopback, state == .capturing, encoder != nil, let raw = latestRaw,
+              CACurrentMediaTime() - lastCaptureAt >= Self.stillAfter else { return }
+        makeEncoder(width: CVPixelBufferGetWidth(raw.pixelBuffer), height: CVPixelBufferGetHeight(raw.pixelBuffer))
+        encodeNewestAgain()
     }
 
     private func handle(_ event: CaptureEvent) {

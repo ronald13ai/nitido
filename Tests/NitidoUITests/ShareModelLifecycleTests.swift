@@ -1,6 +1,7 @@
 import XCTest
 import CoreVideo
 import QuartzCore
+import CoreText
 @testable import NitidoCapture
 @testable import NitidoCodec
 @testable import NitidoUI
@@ -78,6 +79,65 @@ private func capturedFrame(index: Int, width: Int = 320, height: Int = 180) thro
     CVPixelBufferUnlockBaseAddress(buffer, [])
     return CapturedFrame(pixelBuffer: buffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9),
                          contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
+}
+
+/// A still window of small text, black on white, like the TextEdit window of the hand check: a low quality smears
+/// it, a high one keeps it close. Stamped now, like `capturedFrame`.
+private func textFrame(width: Int = 1280, height: Int = 720) throws -> CapturedFrame {
+    var buffer: CVPixelBuffer?
+    let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
+    let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &buffer)
+    guard status == kCVReturnSuccess, let buffer else { throw XCTSkip("CVPixelBufferCreate failed: \(status)") }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+    guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height, bitsPerComponent: 8,
+                                  bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+    else { throw XCTSkip("CGContext over the pixel buffer failed") }
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    let font = CTFontCreateWithName("Helvetica" as CFString, 11, nil)
+    var line = 0
+    for y in stride(from: 8, to: height, by: 13) {
+        let text = "Line \(line): The quick brown fox jumps over the lazy dog 0123456789, sphinx of black quartz judge my vow"
+        let string = NSAttributedString(string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font])
+        context.textPosition = CGPoint(x: 6, y: y)
+        CTLineDraw(CTLineCreateWithAttributedString(string), context)
+        line += 1
+    }
+    return CapturedFrame(pixelBuffer: buffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9),
+                         contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
+}
+
+/// Mean absolute difference per colour channel between two BGRA buffers of the same size (0...255).
+private func meanError(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double {
+    let width = min(CVPixelBufferGetWidth(a), CVPixelBufferGetWidth(b))
+    let height = min(CVPixelBufferGetHeight(a), CVPixelBufferGetHeight(b))
+    CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(a, .readOnly); CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+    let pa = CVPixelBufferGetBaseAddress(a)!.assumingMemoryBound(to: UInt8.self)
+    let pb = CVPixelBufferGetBaseAddress(b)!.assumingMemoryBound(to: UInt8.self)
+    let sa = CVPixelBufferGetBytesPerRow(a), sb = CVPixelBufferGetBytesPerRow(b)
+    var total = 0
+    for y in 0..<height {
+        for x in 0..<width {
+            for c in 0..<3 { total += abs(Int(pa[y * sa + x * 4 + c]) - Int(pb[y * sb + x * 4 + c])) }
+        }
+    }
+    return Double(total) / Double(width * height * 3)
+}
+
+/// Counts the frames the model hands to the view: a view outside a window reports each one as hidden.
+@MainActor
+private final class PushCounter {
+    var count = 0
+    init(_ sink: FrameSink) {
+        let report = sink.onDropped
+        sink.onDropped = { [unowned self] drop in
+            if drop == .hidden { count += 1 }
+            report?(drop)
+        }
+    }
 }
 
 /// A keyframe from the hardware encoder, so a test can give the model a decoder that works.
@@ -423,6 +483,128 @@ final class ShareModelLifecycleTests: XCTestCase {
         await drain()
         XCTAssertTrue(view.pacer.held?.pixelBuffer === raws.last, "no late decoded frame brings the comparison back")
         XCTAssertNil(view.pacer.held?.compareWith)
+        await model.stop()
+    }
+
+    /// A still source sends no frame (ScreenCaptureKit forwards only changed ones), so turning the codec loop on
+    /// encodes the frame on screen at once: the strip names the codec, measures it and counts its bytes, the decoded
+    /// frame is shown against that raw frame (so the divider moves too), stamped when it was encoded again rather
+    /// than when the still picture was captured, and not counted as a second capture. Turning the loop off and on
+    /// again does the same with the same frame; after Stop, a new share never encodes the old share's frame.
+    @MainActor
+    func testCodecLoopTurnedOnOverAStillSourceShowsTheComparisonAtOnce() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "q")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        let raw = try capturedFrame(index: 0)
+        source.emit(frame: raw)
+        await drain()
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === raw.pixelBuffer, "the raw frame is on screen")
+        try await Task.sleep(for: .milliseconds(300))   // the source stays still from here on
+
+        let turnedOnAt = UInt64(CACurrentMediaTime() * 1e9)
+        model.loopback = true
+        XCTAssertTrue(["HEVC", "H.264"].contains(model.codecLabel), "the encoder is made at once: \(model.codecLabel)")
+        var waits = 0
+        while view.pacer.held?.compareWith == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        let held = try XCTUnwrap(view.pacer.held)
+        XCTAssertTrue(held.compareWith === raw.pixelBuffer, "the decoded frame is shown against the still raw frame")
+        XCTAssertFalse(held.pixelBuffer === raw.pixelBuffer, "the main picture is the decoded frame")
+        XCTAssertGreaterThanOrEqual(held.captureHostTimeNs, turnedOnAt, "stamped when encoded again, not when captured")
+        waits = 0
+        while model.codecMs == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        XCTAssertNotNil(model.codecMs, "the codec time is measured on a still source")
+        XCTAssertGreaterThan(model.snapshot.bitrateMbps, 0, "the encoded bytes count in the bitrate")
+        XCTAssertLessThanOrEqual(model.snapshot.captureFPS, 1, "the frame encoded again is not a new capture")
+        XCTAssertNil(model.codecNotice)
+        XCTAssertEqual(model.state, .capturing)
+
+        model.dividerPosition = 0.7
+        XCTAssertEqual(view.pacer.held?.divider, 0.7, "the divider moves over the still comparison")
+
+        model.loopback = false
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === raw.pixelBuffer, "loop off: the raw frame alone")
+        XCTAssertNil(view.pacer.held?.compareWith)
+        model.loopback = true
+        waits = 0
+        while view.pacer.held?.compareWith == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        XCTAssertTrue(view.pacer.held?.compareWith === raw.pixelBuffer, "on again: the same still frame, compared")
+        XCTAssertFalse(view.pacer.held?.pixelBuffer === raw.pixelBuffer)
+
+        await model.stop()
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[1].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(model.codecLabel, "raw", "a new share has no frame to encode until its source sends one")
+        XCTAssertNil(view.pacer.held, "the old share's frame is not shown again")
+        await model.stop()
+    }
+
+    /// A quality change over a still source is encoded once the slider rests: the newest raw frame again, as the
+    /// keyframe of an encoder made at the new rate, so small text visibly smears at 1 Mbps and sharpens again at 60
+    /// (the running encoder's keyframe would keep the old quality). A drag of several steps encodes once.
+    @MainActor
+    func testQualityChangeOverAStillSourceIsEncodedAgainOnceTheSliderRests() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "r")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 1280, pixelHeight: 720, scale: 2))
+        await drain()
+        let raw = try textFrame()
+        source.emit(frame: raw)
+        await drain()
+        model.qualityMbps = 60
+        model.loopback = true
+        var waits = 0
+        while view.pacer.held?.compareWith == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        let sharp = try XCTUnwrap(view.pacer.held?.pixelBuffer)
+        XCTAssertFalse(sharp === raw.pixelBuffer)
+        let sharpError = meanError(sharp, raw.pixelBuffer)
+        try await Task.sleep(for: .milliseconds(300))
+
+        let pushes = PushCounter(model.sink)
+        for quality in [40.0, 20, 8, 3, 1] {   // a slider dragged down
+            model.qualityMbps = quality
+            await drain()
+        }
+        XCTAssertEqual(pushes.count, 0, "nothing is encoded while the slider moves")
+        waits = 0
+        while view.pacer.held?.pixelBuffer === sharp, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        let held = try XCTUnwrap(view.pacer.held)
+        XCTAssertFalse(held.pixelBuffer === sharp, "the still picture is encoded again at the new quality")
+        XCTAssertTrue(held.compareWith === raw.pixelBuffer, "against the same raw frame")
+        let softError = meanError(held.pixelBuffer, raw.pixelBuffer)
+        XCTAssertGreaterThan(softError, sharpError * 2,
+                             "1 Mbps smears the text: error \(softError) against \(sharpError) at 60 Mbps")
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(pushes.count, 1, "one encode once the slider rests, not one per step")
+
+        let soft = held.pixelBuffer
+        model.qualityMbps = 60   // and back up
+        waits = 0
+        while view.pacer.held?.pixelBuffer === soft, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        let sharpAgain = try XCTUnwrap(view.pacer.held?.pixelBuffer)
+        XCTAssertFalse(sharpAgain === soft, "raising the quality encodes the still picture again")
+        let sharpAgainError = meanError(sharpAgain, raw.pixelBuffer)
+        XCTAssertLessThan(sharpAgainError, softError / 2, "60 Mbps sharpens it: error \(sharpAgainError) against \(softError)")
+        XCTAssertEqual(pushes.count, 2)
+        XCTAssertNil(model.codecNotice)
+        XCTAssertEqual(model.state, .capturing)
         await model.stop()
     }
 
