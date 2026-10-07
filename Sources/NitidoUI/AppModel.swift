@@ -8,19 +8,29 @@ public final class AppModel {
     public private(set) var share: ShareModel?
     public init() {}
 
+    /// Shows the Share screen and the picker. One share at a time: while a share is picking or capturing this
+    /// does nothing more; after a cancel or a failure it reuses the same model, which stops its old session first.
     public func startShare() {
+        let excluded = NSApp.windows.filter { $0.windowNumber > 0 }.map { CGWindowID($0.windowNumber) }
+        screen = .share
+        if let share {
+            share.start(excludingWindowIDs: excluded)
+            return
+        }
         let model = ShareModel()
         share = model
-        screen = .share
-        model.start(excludingWindowIDs: NSApp.windows.filter { $0.windowNumber > 0 }.map { CGWindowID($0.windowNumber) })
+        model.start(excludingWindowIDs: excluded)
     }
 
     public func toggleTelemetry() { share?.showTelemetry.toggle() }
 
+    /// Back to Welcome. The share is detached before the await, so a Share that lands while the old one is
+    /// still stopping gets a model of its own instead of being cleared when this stop resumes.
     public func stop() async {
-        await share?.stop()
+        let model = share
         share = nil
         screen = .welcome
+        await model?.stop()
     }
 }
 
@@ -28,10 +38,31 @@ public struct RootView: View {
     @Bindable var app: AppModel
     public init(app: AppModel) { self.app = app }
     public var body: some View {
-        switch app.screen {
-        case .welcome: WelcomeView(onShare: { app.startShare() }, onView: {})
-        case .share: if let share = app.share { ShareView(model: share) }
-        case .view: Text("View").foregroundStyle(Theme.Colors.text)   // Task 13
+        Group {
+            switch app.screen {
+            case .welcome: WelcomeView(onShare: { app.startShare() }, onView: {})
+            case .share:
+                if let share = app.share {
+                    ShareView(model: share).background(EscapeStops { Task { await app.stop() } })
+                }
+            case .view:
+                Text("View").foregroundStyle(Theme.Colors.text)   // Task 13
+                    .background(EscapeStops { Task { await app.stop() } })
+            }
         }
+        .background(KeepWindowOnScreen())
+    }
+}
+
+/// Esc inside the window. A menu item's Esc shortcut never fires while a window is key, so the Share and
+/// View screens carry this invisible button; Welcome does not, so Esc there does nothing.
+private struct EscapeStops: View {
+    let action: () -> Void
+    var body: some View {
+        Button("Stop", action: action)
+            .keyboardShortcut(.cancelAction)
+            .opacity(0)
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
     }
 }

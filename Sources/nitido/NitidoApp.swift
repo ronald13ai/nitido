@@ -12,16 +12,25 @@ struct NitidoApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Nítido") {
+        // A single window: a WindowGroup would add File > New Window on ⌘N (taking it from Share…) and let a
+        // second window bind the same model, stealing the video view from the first.
+        Window("Nítido", id: "main") {
             RootView(app: app)
                 .background(Theme.Colors.background)
                 .onAppear { NSApplication.shared.activate(ignoringOtherApps: true) }
         }
         .windowResizability(.contentSize)
         .commands {
+            // The standard group owns ⌘H for Hide, which would swallow Toggle Telemetry's ⌘H.
+            CommandGroup(replacing: .appVisibility) {
+                Button("Hide Nítido") { NSApp.hide(nil) }
+                Button("Hide Others") { NSApp.hideOtherApplications(nil) }.keyboardShortcut("h", modifiers: [.command, .option])
+                Button("Show All") { NSApp.unhideAllApplications(nil) }
+            }
             CommandMenu("Nítido") {
                 Button("Share…") { app.startShare() }.keyboardShortcut("n")
                 Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
+                // Listed for discoverability; while the window is key, Esc is handled inside it (RootView).
                 Button("Stop") { Task { await app.stop() } }.keyboardShortcut(.escape, modifiers: [])
             }
         }
