@@ -170,7 +170,14 @@ Every failure is visible in the UI and logged with `os.Logger` under subsystem `
 
 ## 13. Security
 
-TLS with a pre-shared key (the TLS 1.2 PSK ciphersuite that Network.framework supports) derived with HKDF-SHA256 from the 4-digit code and the sharer's Bonjour name; the viewer must type the code shown on the sharer's screen. A wrong code fails the handshake. Three failed handshakes regenerate the code. The listener binds to the local network only. Frames never touch disk.
+TLS 1.2 with a pre-shared key derived with HKDF-SHA256 from the 4-digit code and the sharer's Bonjour name; the viewer must type the code shown on the sharer's screen. Ciphersuite `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256` (RFC 5489: the PSK plus an ephemeral ECDH exchange). Network.framework negotiates it on macOS 26.5 (checked 2026-10-07 with a localhost listener and connection: right code connects, wrong code fails with "bad MAC"); `TLS_PSK_WITH_AES_128_GCM_SHA256` is the fallback only if an OS build refuses it, and the fallback is logged. A wrong code fails the handshake. Three failed handshakes regenerate the code. The listener binds to the local network only. Frames never touch disk.
+
+Known limit, accepted for the LAN prototype (v0.1):
+- The key is only as strong as the code: 10,000 values. The HKDF salt (`nitido-v1`) and info (the sharer name, which Bonjour broadcasts) are public, so HKDF adds no secrecy.
+- Passive attacker (records the traffic only): with ECDHE_PSK the handshake keys also depend on the ephemeral ECDH secret, so a recorded handshake gives nothing to test codes against, and a recorded session stays unreadable even if the code leaks later (forward secrecy). With the plain PSK fallback this protection is gone: one recorded handshake is brute-forced offline in milliseconds and the whole screen and ink stream decrypted. That is why ECDHE_PSK is the default.
+- Active attacker on the same LAN (spoofed Bonjour answer, ARP spoofing): it can pose as the sharer, take the viewer's Finished message, try all 10,000 codes against it in milliseconds, complete both handshakes and read or relay the stream in real time. The three-failure rotation does not help, because this attack needs no failed handshake. No ciphersuite fixes this with a 4-digit code.
+- Therefore: trusted networks only (home, office), never public Wi-Fi. The README says so in plain words.
+- Next step before any use beyond the demo (owner's choice): a PAKE over the code (SPAKE2 or SRP, where each active attempt tests one guess), or a 128-bit secret shared by QR code or link, or the section 17 certificate fallback (self-signed certificate pinned by fingerprint) with a longer code as the application-level check.
 
 ## 14. Testing
 
@@ -189,7 +196,7 @@ Manual checklist (documented in `docs/testing.md`): first-run permission flow, l
 
 ## 15. Deliverables
 
-- Public repository `github.com/ronald13ai/nitido` under the MIT license: source, this spec, README with screenshots, a 20-second GIF of the loop, how it works, measured numbers from this Mac, and "What's next" (WebRTC with STUN/TURN for the open internet, AV1 when hardware allows, a region-diff pass so static text costs no bits).
+- Public repository `github.com/ronald13ai/nitido` under the MIT license: source, this spec, README with screenshots, a 20-second GIF of the loop, how it works, measured numbers from this Mac, a Security section stating the section 13 limit in plain words, and "What's next" (WebRTC with STUN/TURN for the open internet, AV1 when hardware allows, a region-diff pass so static text costs no bits).
 - `Nítido.app` signed with the Apple Development identity, zipped, with "right-click, Open" instructions; notarization added if a Developer ID certificate is obtained before Sunday.
 - A 60 to 90 second video for Mark: pick a window, read the strip, flip loopback and the quality slider, connect the second Mac, draw from both sides, cut the Wi-Fi and watch it recover.
 

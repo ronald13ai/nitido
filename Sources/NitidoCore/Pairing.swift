@@ -1,6 +1,13 @@
 import Foundation
 import CryptoKit
 
+/// Pairing code and the TLS pre-shared key derived from it.
+///
+/// Security limit (spec section 13): the key is only as strong as the 4-digit code, 10,000 values.
+/// The salt (`pskIdentity`) and the info (the sharer name, broadcast over Bonjour) are public, so
+/// HKDF adds no secrecy. The link must use an ECDHE_PSK ciphersuite so a recorded handshake cannot
+/// be brute-forced offline; an active attacker on the same LAN can still guess the code in real
+/// time, so pairing is for trusted networks only. A PAKE or a high-entropy secret is the fix.
 public enum Pairing {
     public static let pskIdentity = "nitido-v1"
 
