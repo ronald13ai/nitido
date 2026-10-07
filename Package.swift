@@ -23,6 +23,6 @@ let package = Package(
         .testTarget(name: "NitidoCaptureTests", dependencies: ["NitidoCapture"], swiftSettings: settings),
         .testTarget(name: "NitidoCodecTests", dependencies: ["NitidoCodec"], swiftSettings: settings),
         .testTarget(name: "NitidoLinkTests", dependencies: ["NitidoLink"], swiftSettings: settings),
-        .testTarget(name: "NitidoUITests", dependencies: ["NitidoUI", "NitidoCapture"], swiftSettings: settings),
+        .testTarget(name: "NitidoUITests", dependencies: ["NitidoUI", "NitidoCapture", "NitidoCodec"], swiftSettings: settings),
     ]
 )

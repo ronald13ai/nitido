@@ -288,6 +288,83 @@ final class FramePacerTests: XCTestCase {
         }
     }
 
+    /// A still source sends no frame to carry a divider move: the held comparison is drawn again at once with the new
+    /// divider, as a redraw (not a displayed frame). The same divider, or a frame without a comparison, draws nothing.
+    @MainActor
+    func testMovingTheDividerRedrawsTheHeldComparison() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.drawableSize = CGSize(width: 1440, height: 900)
+        let raw = try makeBuffer()
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: raw, divider: 0.5))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        pacer.moveDivider(to: 0.2)
+        XCTAssertEqual(host.kinds, [.live, .redraw])
+        XCTAssertTrue(host.frames.last?.compareWith === raw)
+        XCTAssertEqual(host.frames.last?.divider, 0.2)
+        XCTAssertEqual(pacer.held?.divider, 0.2, "later redraws keep the new divider")
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 100, presentedAt: 2.0)
+        XCTAssertEqual(host.presented, [100], "a divider move is not a displayed frame")
+        pacer.moveDivider(to: 0.2)
+        XCTAssertEqual(host.kinds, [.live, .redraw], "the same divider draws nothing")
+
+        pacer.present(try frame(200))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 200, presentedAt: 3.0)
+        pacer.moveDivider(to: 0.7)
+        XCTAssertEqual(host.kinds, [.live, .redraw, .live], "a frame without a comparison is not drawn again")
+        XCTAssertNil(pacer.held?.compareWith)
+    }
+
+    /// Divider moves while a drawable is in flight wait at the cap and are drawn once, with the last divider.
+    @MainActor
+    func testDividerMovesAtTheCapAreDrawnOnceWithTheLastDivider() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.drawableSize = CGSize(width: 1440, height: 900)
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: try makeBuffer(), divider: 0.5))
+        pacer.moveDivider(to: 0.4)
+        pacer.moveDivider(to: 0.6)
+        XCTAssertEqual(host.kinds, [.live], "one drawable in flight: the moves wait")
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        XCTAssertEqual(host.kinds, [.live, .redraw])
+        XCTAssertEqual(host.frames.last?.divider, 0.6)
+    }
+
+    /// The loop turned off: the raw frame takes the held comparison's place and is drawn at once, alone, as a redraw;
+    /// a decoded frame still waiting for a drawable is drawn as the raw frame instead, once, and counted as displayed.
+    @MainActor
+    func testReplacingTheHeldFrameDrawsTheRawFrameAlone() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.drawableSize = CGSize(width: 1440, height: 900)
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: try makeBuffer(), divider: 0.5))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        let newest = try makeBuffer()
+        pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: newest, captureHostTimeNs: 150))
+        XCTAssertEqual(host.kinds, [.live, .redraw])
+        XCTAssertTrue(host.frames.last?.pixelBuffer === newest)
+        XCTAssertNil(host.frames.last?.compareWith)
+        XCTAssertTrue(pacer.held?.pixelBuffer === newest, "later redraws show the raw frame")
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 150, presentedAt: 2.0)
+        XCTAssertEqual(host.presented, [100])
+
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 300, compareWith: try makeBuffer(), divider: 0.5))
+        pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 316, compareWith: try makeBuffer(), divider: 0.5))
+        XCTAssertEqual(pacer.pending, .live, "the second decoded frame waits for a drawable")
+        let raw = try makeBuffer()
+        pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: raw, captureHostTimeNs: 316))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 300, presentedAt: 3.0)
+        XCTAssertEqual(host.kinds, [.live, .redraw, .live, .live])
+        XCTAssertTrue(host.frames.last?.pixelBuffer === raw)
+        XCTAssertNil(host.frames.last?.compareWith)
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 316, presentedAt: 4.0)
+        XCTAssertEqual(host.presented, [100, 300, 316])
+        XCTAssertTrue(host.drops.isEmpty, "the waiting frame was shown as the raw frame, not dropped")
+    }
+
     /// A frame that arrives while the window is minimized, covered or hidden is kept and drawn when it shows.
     @MainActor
     func testFrameSkippedWhileHiddenIsKeptAndDrawnWhenTheWindowShows() throws {
@@ -857,6 +934,24 @@ final class VideoViewHeldFrameTests: XCTestCase {
         XCTAssertEqual(view.pacer.held?.divider, 0.25)
         sink.push(try makeBuffer(), captureHostTimeNs: 8)
         XCTAssertNil(view.pacer.held?.compareWith, "a frame pushed without a raw frame is shown alone")
+    }
+
+    /// The sink moves the divider on the frame the view keeps, and ends the comparison with the raw frame alone.
+    @MainActor
+    func testSinkMovesTheDividerAndEndsTheComparison() throws {
+        let sink = FrameSink()
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        sink.view = view
+        let raw = try makeBuffer()
+        sink.push(try makeBuffer(), captureHostTimeNs: 7, compareWith: raw, dividerAt: 0.25)
+        sink.moveDivider(to: 0.8)
+        XCTAssertEqual(view.pacer.held?.divider, 0.8)
+        XCTAssertTrue(view.pacer.held?.compareWith === raw)
+        let newest = try makeBuffer()
+        sink.endComparison(showing: newest, captureHostTimeNs: 9)
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === newest)
+        XCTAssertEqual(view.pacer.held?.captureHostTimeNs, 9)
+        XCTAssertNil(view.pacer.held?.compareWith)
     }
 }
 

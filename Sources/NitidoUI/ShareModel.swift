@@ -42,7 +42,9 @@ public final class ShareModel {
 
     public var loopback = false { didSet { if loopback != oldValue { loopbackDidChange() } } }
     public var qualityMbps: Double = 20 { didSet { encoder?.setBitrate(Int(qualityMbps * 1_000_000)) } }
-    public var dividerPosition: Double = 0.5
+    /// Where the comparison splits (0...1). A move redraws the picture at once: a still source sends no new frame
+    /// to carry it.
+    public var dividerPosition: Double = 0.5 { didSet { if dividerPosition != oldValue { sink.moveDivider(to: dividerPosition) } } }
     public private(set) var codecMs: Double?
     public private(set) var codecLabel = "raw"
     private var encoder: VideoEncoder?
@@ -55,6 +57,8 @@ public final class ShareModel {
     public private(set) var codecNotice: String?
     /// Frames the encoder failed, dropped or emitted empty in a row; ten fail the share (`handleCodecError`).
     private var encodeFailures = 0
+    /// Frames the decoder threw on in a row; ten fail the share (`handleEncoded`). Only a frame decoded resets it.
+    private var decodeFailures = 0
 
     private let makeSource: @MainActor () -> any CaptureSource
     /// `CGPreflightScreenCaptureAccess` in the app; tests pass a fixed answer.
@@ -229,7 +233,7 @@ public final class ShareModel {
 
     private func makeEncoder(for frame: CapturedFrame) {
         encoder?.invalidate(); decoder?.invalidate(); decoder = nil; decoderConfig = nil
-        codecNotice = nil; encodeFailures = 0
+        codecNotice = nil; encodeFailures = 0; decodeFailures = 0
         do {
             let e = try VideoEncoder(width: frame.pixelWidth, height: frame.pixelHeight, preferred: .hevc, bitsPerSecond: Int(qualityMbps * 1_000_000))
             e.onFrame = { [weak self] f in Task { @MainActor in self?.handleEncoded(f) } }
@@ -239,21 +243,41 @@ public final class ShareModel {
             encoder = e
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
         } catch {
+            log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
             state = .failed("Hardware video encoder unavailable: \(error)")
         }
     }
 
-    private func handleEncoded(_ f: EncodedFrame) {
+    /// Internal, not private, so a test can hand it a frame the decoder cannot read.
+    func handleEncoded(_ f: EncodedFrame) {
         let now = CACurrentMediaTime()
         encodeFailures = 0
         telemetry.recordBytes(f.data.count, at: now)
         if let cfg = f.videoConfig, cfg != decoderConfig {
-            do { decoder = try VideoDecoder(config: cfg); decoderConfig = cfg } catch { state = .failed("Decoder: \(error)"); return }
+            do {
+                decoder = try VideoDecoder(config: cfg); decoderConfig = cfg
+            } catch {
+                log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
+                state = .failed("Decoder: \(error)"); return
+            }
             decoder?.onFrame = { [weak self] d in Task { @MainActor in self?.handleDecoded(d) } }
             decoder?.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
         }
         guard let decoder else { return }
-        do { try decoder.decode(f.videoFrame) } catch { telemetry.recordDrop(at: now); decoder.invalidate(); self.decoder = nil; decoderConfig = nil; encoder?.requestKeyframe() }
+        do {
+            try decoder.decode(f.videoFrame)
+            decodeFailures = 0
+        } catch {
+            // While the loop is on only decoded frames reach the screen, so a decoder that keeps throwing freezes the
+            // picture: ten in a row fail the share with Retry, like the encoder (and the viewer's rule in Task 14).
+            log.error("the video decoder could not decode frame \(f.seq, privacy: .public): \(String(describing: error), privacy: .public)")
+            telemetry.recordDrop(at: now)
+            encodeStarts.removeValue(forKey: f.seq)   // this frame never decodes
+            decoder.invalidate(); self.decoder = nil; decoderConfig = nil
+            decodeFailures += 1
+            if decodeFailures >= 10 { failCodec("decoder", message: "Video decoding keeps failing."); return }
+            encoder?.requestKeyframe()
+        }
     }
 
     /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed,
@@ -266,7 +290,7 @@ public final class ShareModel {
             telemetry.recordDrop(at: now)
             encodeStarts = encodeStarts.filter { now - $0.value < 1 }   // a failed frame never decodes; drop its start
             encodeFailures += 1
-            if encodeFailures >= 10 { failEncoding() }
+            if encodeFailures >= 10 { failCodec("encoder", message: "Video encoding keeps failing.") }
         case .property(let key, let status):
             codecNotice = "The video \(part) rejected its \(key) setting (\(status)); the picture goes on without it."
         case .sessionCreate, .decode, .formatDescription, .prepare:
@@ -274,15 +298,19 @@ public final class ShareModel {
         }
     }
 
-    /// The encoder is not coming back by itself: stop it, keep the raw picture, offer Retry (a fresh session and encoder).
-    private func failEncoding() {
-        log.error("the video encoder failed 10 frames in a row")
+    /// The encoder or the decoder (`part`) is not coming back by itself: stop both, keep the raw picture, offer Retry
+    /// (a fresh session and encoder).
+    private func failCodec(_ part: String, message: String) {
+        log.error("the video \(part, privacy: .public) failed 10 frames in a row")
         encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
-        encodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll()
-        state = .failed("Video encoding keeps failing.")
+        encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll()
+        state = .failed(message)
     }
 
     private func handleDecoded(_ d: DecodedFrame) {
+        // A frame decoded after the loop was turned off (or the share failed) would put the comparison back on
+        // screen, and a still source would leave it there: the raw picture already took its place.
+        guard loopback, state == .capturing else { return }
         if let start = encodeStarts.removeValue(forKey: d.seq) { codecWindow.add((CACurrentMediaTime() - start) * 1000, at: CACurrentMediaTime()) }
         if encodeStarts.count > 120 { encodeStarts.removeAll() }
         sink.push(d.pixelBuffer, captureHostTimeNs: d.captureHostTimeNs, compareWith: latestRaw?.pixelBuffer, dividerAt: dividerPosition)
@@ -291,7 +319,11 @@ public final class ShareModel {
     private func loopbackDidChange() {
         if !loopback {
             encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
-            codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0
+            codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0; decodeFailures = 0
+            // Back to raw at once: a still source sends no new frame to replace the comparison on screen. The view
+            // keeps the raw frame for redraws, so the model lets go of it.
+            if let raw = latestRaw { sink.endComparison(showing: raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs) }
+            latestRaw = nil
         }
     }
 

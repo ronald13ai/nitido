@@ -131,6 +131,23 @@ final class FramePacer {
         }
     }
 
+    /// Moves the held frame's comparison divider and draws it again, the way a resize does: a still source sends no
+    /// new frame to carry the move. Nothing when the held frame shows no comparison or already splits there.
+    func moveDivider(to divider: CGFloat) {
+        guard var frame = held, frame.compareWith != nil, frame.divider != divider else { return }
+        frame.divider = divider
+        held = frame
+        redraw()
+    }
+
+    /// Puts `frame` in place of the held one and draws it again, the way a resize does: the codec loop was turned
+    /// off, so the raw frame replaces the comparison at once instead of when the source next changes. A frame still
+    /// waiting for a drawable is drawn as this one and counted as displayed once; otherwise it is a redraw.
+    func replaceHeld(with frame: Frame) {
+        held = frame
+        redraw()
+    }
+
     /// The presented handler of a committed drawable. `presentedAt` is 0 when the drawable was discarded.
     func drawableReturned(kind: Kind, captureHostTimeNs: UInt64, presentedAt: Double) {
         inFlight = max(0, inFlight - 1)

@@ -99,6 +99,15 @@ public final class VideoView: NSView {
     /// Lets go of the frame kept for redraws, so its buffer returns to the capture pool (the share stopped).
     public func releaseHeldFrame() { pacer.releaseHeldFrame() }
 
+    /// Loopback: the comparison on the frame kept for redraws splits at `divider` (0...1) from now on, drawn at once.
+    public func moveDivider(to divider: CGFloat) { pacer.moveDivider(to: divider) }
+
+    /// Loopback off: `pixelBuffer` (the newest raw frame) is shown alone in place of the comparison, drawn at once.
+    public func endComparison(showing pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) {
+        contentPixelSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+        pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs))
+    }
+
     /// Reports a frame that was not drawn and logs it (rate limited, with counts).
     private func dropped(_ drop: Drop) {
         unloggedDrops[drop, default: 0] += 1
@@ -252,6 +261,16 @@ public final class FrameSink {
     }
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }
+    /// Moves the divider of the comparison on screen. A still source sends no new frame to carry the move, so the
+    /// view draws the frame it keeps again; nothing when that frame shows no comparison.
+    public func moveDivider(to divider: CGFloat) { view?.moveDivider(to: divider) }
+    /// Ends the comparison on screen: `raw` is shown alone at once, without waiting for the source to change.
+    public func endComparison(showing raw: CVPixelBuffer, captureHostTimeNs: UInt64) {
+        guard let view else { return }
+        view.onPresented = onPresented
+        view.onDropped = onDropped
+        view.endComparison(showing: raw, captureHostTimeNs: captureHostTimeNs)
+    }
 }
 
 public struct VideoSurface: NSViewRepresentable {

@@ -2,6 +2,7 @@ import XCTest
 import CoreVideo
 import QuartzCore
 @testable import NitidoCapture
+@testable import NitidoCodec
 @testable import NitidoUI
 
 /// A main-actor latch the test opens by hand, so a stop can be held suspended mid-await.
@@ -77,6 +78,19 @@ private func capturedFrame(index: Int, width: Int = 320, height: Int = 180) thro
     CVPixelBufferUnlockBaseAddress(buffer, [])
     return CapturedFrame(pixelBuffer: buffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9),
                          contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
+}
+
+/// A keyframe from the hardware encoder, so a test can give the model a decoder that works.
+@MainActor
+private func realKeyframe() async throws -> EncodedFrame {
+    let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+    defer { encoder.invalidate() }
+    let (frames, out) = AsyncStream<EncodedFrame>.makeStream()
+    encoder.onFrame = { out.yield($0) }
+    Task { try? await Task.sleep(for: .seconds(5)); out.finish() }
+    XCTAssertTrue(encoder.encode(try capturedFrame(index: 0).pixelBuffer, captureHostTimeNs: 0))
+    for await frame in frames where frame.isKey { return frame }
+    throw XCTSkip("the hardware encoder emitted no keyframe within 5 s")
 }
 
 @MainActor
@@ -364,6 +378,87 @@ final class ShareModelLifecycleTests: XCTestCase {
         XCTAssertFalse(model.loopback, "Stop turns the codec loop off")
         XCTAssertEqual(model.codecLabel, "raw")
         XCTAssertNil(model.codecMs)
+    }
+
+    /// A still source sends no frames (ScreenCaptureKit forwards only changed ones): a divider move still changes the
+    /// comparison the view keeps and draws again, and turning the loop off puts the newest raw frame alone in its
+    /// place at once, and a decoded frame landing late does not bring the comparison back.
+    @MainActor
+    func testStillSourceShowsDividerMovesAndTheLoopTurningOffAtOnce() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "o")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        var raws: [CVPixelBuffer] = []
+        for i in 0..<10 {
+            let frame = try capturedFrame(index: i)
+            raws.append(frame.pixelBuffer)
+            source.emit(frame: frame)
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        // The source goes still: wait for the last decoded frames to land.
+        var waits = 0
+        while view.pacer.held?.compareWith == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(model.state, .capturing)
+        let held = try XCTUnwrap(view.pacer.held)
+        XCTAssertNotNil(held.compareWith, "a decoded frame is shown against a raw one")
+        XCTAssertEqual(held.divider, 0.5)
+
+        model.dividerPosition = 0.8
+        XCTAssertEqual(view.pacer.held?.divider, 0.8, "the divider moves without a new frame")
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === held.pixelBuffer, "the same decoded frame, split elsewhere")
+
+        model.loopback = false
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === raws.last, "the newest raw frame replaces the comparison")
+        XCTAssertNil(view.pacer.held?.compareWith)
+        try await Task.sleep(for: .milliseconds(200))
+        await drain()
+        XCTAssertTrue(view.pacer.held?.pixelBuffer === raws.last, "no late decoded frame brings the comparison back")
+        XCTAssertNil(view.pacer.held?.compareWith)
+        await model.stop()
+    }
+
+    /// A decoder that keeps throwing is not a silent freeze while only decoded frames reach the screen: each throw
+    /// counts as a dropped frame, nine in a row leave the share running (a fresh keyframe may bring it back), the tenth
+    /// fails the share with Retry and stops the loop's codec. A frame decoded in between starts the count again.
+    @MainActor
+    func testDecoderThatKeepsThrowingFailsTheShareAfterTenInARow() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "p")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        let key = try await realKeyframe()
+        // Real parameter sets build a decoder that works; the data is not a picture, so `decode` throws.
+        func unreadable(_ seq: UInt32) -> EncodedFrame {
+            EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]),
+                         parameterSets: key.parameterSets, codec: key.codec, width: key.width, height: key.height)
+        }
+        for seq in 0..<9 { model.handleEncoded(unreadable(UInt32(seq))) }
+        XCTAssertEqual(model.state, .capturing, "nine throws in a row leave the share running")
+        model.handleEncoded(key)
+        for seq in 10..<19 { model.handleEncoded(unreadable(UInt32(seq))) }
+        XCTAssertEqual(model.state, .capturing, "a frame decoded in between starts the count again")
+        model.handleEncoded(unreadable(19))
+        XCTAssertEqual(model.state, .failed("Video decoding keeps failing."))
+        XCTAssertEqual(model.codecLabel, "raw")
+        XCTAssertNil(model.codecMs)
+        // The snapshot loop publishes the dropped figure every 250 ms.
+        var waits = 0
+        while model.snapshot.droppedLastSecond == 0, waits < 20 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        XCTAssertGreaterThanOrEqual(model.snapshot.droppedLastSecond, 19, "every throw counts as a dropped frame")
+        await model.stop()
     }
 
     /// A new model's picker waits until the previous model's session has fully stopped (one shared system picker).
