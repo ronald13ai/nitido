@@ -102,6 +102,37 @@ final class InkControllerTests: XCTestCase {
     }
 }
 
+/// The time stamp on each point is the milliseconds since the stroke began, as a `UInt32`. It must never trap:
+/// before the first stroke the start is 0, so a hover would otherwise stamp the machine's awake uptime, which
+/// passes `UInt32.max` milliseconds after about 49.7 days.
+final class InkTimestampTests: XCTestCase {
+    func testElapsedMillisecondsSinceTheStrokeBegan() {
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 10, now: 10.016), 16)
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 10, now: 10), 0)
+    }
+
+    func testAClockBeforeTheStartGivesZero() {
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 10, now: 9), 0)
+    }
+
+    func testAnUptimeThatStillFitsIsKept() {
+        // About 29.8 days of awake time, as seen on a real Mac: 2,578,972 s.
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 0, now: 2_578_972), 2_578_972_000)
+    }
+
+    func testAnUptimePastTheRangeIsClampedInsteadOfTrapping() {
+        let fiftyDays = 50.0 * 24 * 60 * 60
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 0, now: fiftyDays), UInt32.max)
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 0, now: Double(UInt32.max) / 1000 + 1), UInt32.max)
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 0, now: 1e12), UInt32.max)
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 0, now: .infinity), UInt32.max)
+    }
+
+    func testANonNumberGivesZero() {
+        XCTAssertEqual(InkCanvasView.elapsedMs(since: 0, now: .nan), 0)
+    }
+}
+
 /// A capture source that never sends anything: the share stays idle, which is enough to lay out the picture area.
 @MainActor
 private final class IdleSource: CaptureSource {

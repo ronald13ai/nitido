@@ -97,7 +97,16 @@ public final class InkCanvasView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         let pressure = event.type == .leftMouseDragged || event.type == .leftMouseDown ? max(0.2, Float(event.pressure == 0 ? 1 : event.pressure)) : 1
         return StrokePoint(x: Float(p.x / max(bounds.width, 1)), y: Float(p.y / max(bounds.height, 1)), pressure: pressure,
-                           tMs: UInt32(max(0, (CACurrentMediaTime() - strokeStart) * 1000)))
+                           tMs: Self.elapsedMs(since: strokeStart, now: CACurrentMediaTime()))
+    }
+
+    /// Milliseconds from `start` to `now`, clamped to `0...UInt32.max`. Before the first stroke `start` is 0, so a
+    /// hover stamps the awake uptime, which passes `UInt32.max` ms after about 49.7 days; converting that unclamped
+    /// would trap.
+    nonisolated static func elapsedMs(since start: Double, now: Double) -> UInt32 {
+        let ms = (now - start) * 1000
+        guard !ms.isNaN else { return 0 }
+        return UInt32(min(Double(UInt32.max), max(0, ms)))
     }
 
     public override func mouseDown(with event: NSEvent) {
