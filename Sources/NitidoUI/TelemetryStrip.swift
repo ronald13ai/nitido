@@ -9,10 +9,13 @@ public struct TelemetryStrip: View {
     public let codec: String
     public let latencyLabel: String
     public let codecMs: Double?
+    /// What the first figure counts: frames captured on the sharer, frames received on the viewer.
+    public let captureLabel: String
 
-    public init(snapshot: Snapshot, resolution: String, codec: String, latencyLabel: String, codecMs: Double? = nil) {
+    public init(snapshot: Snapshot, resolution: String, codec: String, latencyLabel: String, codecMs: Double? = nil,
+                captureLabel: String = "capture") {
         self.snapshot = snapshot; self.resolution = resolution; self.codec = codec; self.latencyLabel = latencyLabel
-        self.codecMs = codecMs
+        self.codecMs = codecMs; self.captureLabel = captureLabel
     }
 
     private var latencyHigh: Bool { (snapshot.latencyMs ?? 0) > 100 }
@@ -22,7 +25,7 @@ public struct TelemetryStrip: View {
     /// onto another row instead of widening the strip, so the window stays exactly as wide as the picture.
     public var body: some View {
         StripRows(spacing: 18, rowSpacing: 6, sparklineGap: 8) {
-            Figure("capture", value: fps(snapshot.captureFPS), unit: "fps")
+            Figure(captureLabel, value: fps(snapshot.captureFPS), unit: "fps")
             Figure("display", value: fps(snapshot.displayFPS), unit: "fps")
             Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", highlight: latencyHigh)
             Figure("codec", value: ms(codecMs), unit: "ms")
@@ -59,7 +62,8 @@ private struct Figure: View {
     }
 }
 
-/// Latency over the last two seconds, scaled to at least 120 ms so the baseline reads as calm.
+/// Latency over the last two seconds, scaled to at least 120 ms so the baseline reads as calm. An estimate below zero
+/// (a clock offset that is off) is drawn on the baseline, inside the strip; the figure says it as it is.
 private struct Sparkline: View {
     let values: [Double]
     var body: some View {
@@ -69,7 +73,7 @@ private struct Sparkline: View {
                 guard values.count > 1 else { return }
                 for (i, v) in values.enumerated() {
                     let x = geo.size.width * CGFloat(i) / CGFloat(values.count - 1)
-                    let y = geo.size.height * (1 - CGFloat(v / top))
+                    let y = geo.size.height * (1 - CGFloat(min(max(v, 0), top) / top))
                     i == 0 ? path.move(to: CGPoint(x: x, y: y)) : path.addLine(to: CGPoint(x: x, y: y))
                 }
             }

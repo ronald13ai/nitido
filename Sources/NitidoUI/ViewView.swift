@@ -117,7 +117,9 @@ public struct ViewView: View {
             .frame(width: size.width, height: size.height, alignment: .topTrailing)
             .frame(width: area.width, height: area.height, alignment: .topLeading)
             if model.showTelemetry {
-                TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: model.codecLabel, latencyLabel: "glass→glass (est.)")
+                // The viewer counts frames as they arrive, so its first figure says received, not capture.
+                TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: model.codecLabel,
+                               latencyLabel: "glass→glass (est.)", captureLabel: "received")
             }
         }
         .frame(width: area.width)

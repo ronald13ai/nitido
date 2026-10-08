@@ -10,7 +10,7 @@ Share a screen or a window to another Mac on the local network with crisp text, 
 - Flip the codec loop: HEVC encode and decode on the same Mac with a quality slider and a before/after divider, so you can see exactly where small text starts to smear and how many milliseconds the codec costs.
 - Pair a second Mac with a 4-digit code (TLS with a pre-shared key derived from it) and stream at 60 fps.
 - Draw on the picture from either side; strokes fade after four seconds; ⌘Z undoes on both.
-- Read the numbers: capture and display fps, capture-to-display or glass-to-glass latency, RTT, bitrate, drops.
+- Read the numbers: capture fps on the sharer and received fps on the viewer, display fps, capture-to-display or glass-to-glass latency, RTT, bitrate, drops.
 - Pull the cable: both sides say Reconnecting, the viewer reconnects with backoff and recovers with a keyframe; the bitrate adapts to backlog and RTT.
 
 ![Welcome](docs/screenshots/01-welcome.png)

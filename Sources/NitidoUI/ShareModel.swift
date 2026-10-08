@@ -17,6 +17,12 @@ protocol CaptureSource: AnyObject {
     var events: AsyncStream<CaptureEvent> { get }
     func presentPicker(excludingWindowIDs: [CGWindowID])
     func stop() async
+    /// Frames the source let go before the share took them, since the last call (`CaptureSession.takeDroppedFrames`).
+    func takeDroppedFrames() -> Int
+}
+
+extension CaptureSource {
+    func takeDroppedFrames() -> Int { 0 }
 }
 
 extension CaptureSession: CaptureSource {}
@@ -260,16 +266,20 @@ public final class ShareModel {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(250))
                     guard let self else { return }
-                    if let rtt = link?.lastRTTMs { telemetry.recordRTT(ms: rtt, at: CACurrentMediaTime()) }
+                    let now = CACurrentMediaTime()
+                    if let rtt = link?.lastRTTMs { telemetry.recordRTT(ms: rtt, at: now) }
+                    // Frames the capture stream let go because the share had not taken the one before yet.
+                    for _ in 0..<(capture?.takeDroppedFrames() ?? 0) { telemetry.recordDrop(at: now) }
+                    snapshot = telemetry.snapshot(now: now)
                     if isSending, !loopback, let link, let encoder {
-                        let bps = controller.update(rttMs: link.lastRTTMs, backlogBytes: link.backlogBytes, frameAgeMs: nil,
-                                                    fps: max(snapshot.captureFPS, 30), now: CACurrentMediaTime())
+                        // Spec 8: the RTT p50 of the last second, the strip's own figure, not the latest ping alone.
+                        let bps = controller.update(rttMs: snapshot.rttMs, backlogBytes: link.backlogBytes, frameAgeMs: nil,
+                                                    fps: max(snapshot.captureFPS, 30), now: now)
                         if bps != currentBitrate { currentBitrate = bps; encoder.setBitrate(bps) }
                     }
                     // A source that went still after the drop sends no frame that could check the drain: this does.
-                    if isSending, let link { keyframeAfterDrain(backlog: link.backlogBytes, now: CACurrentMediaTime()) }
-                    snapshot = telemetry.snapshot(now: CACurrentMediaTime())
-                    codecMs = loopback ? codecWindow.stats(now: CACurrentMediaTime())?.p50 : nil
+                    if isSending, let link { keyframeAfterDrain(backlog: link.backlogBytes, now: now) }
+                    codecMs = loopback ? codecWindow.stats(now: now)?.p50 : nil
                 }
             },
         ]
@@ -382,7 +392,9 @@ public final class ShareModel {
         // After this frame has gone out: the slot it freed takes the newest frame, if the cap turned that one away.
         defer { encodePendingNewest() }
         encodeFailures = 0
-        telemetry.recordBytes(f.data.count, at: now)
+        // The bitrate figure is what went to the viewer (frames skipped for the backlog add nothing), or with no viewer,
+        // what the codec loop's encoder made.
+        if !isSending, loopback { telemetry.recordBytes(f.data.count, at: now) }
         if isSending, let link {
             // Spec section 8: skip non-key frames while the backlog exceeds four frames' worth, then send the next
             // keyframe. A delta after a drop refers to frames the viewer never got, so none goes out until it has.
@@ -395,6 +407,7 @@ public final class ShareModel {
                 if f.isKey { needKeyAfterDrain = false; drainKeyRequestedAt = nil }
                 if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
                 link.send(.videoFrame(f.videoFrame))
+                telemetry.recordBytes(f.data.count, at: now)
             }
         }
         guard loopback else { return }

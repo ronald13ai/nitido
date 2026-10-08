@@ -58,6 +58,11 @@ public final class ViewModel {
     @ObservationIgnored private var keyframeAskedAt: CFTimeInterval?
     private var telemetry = Telemetry(now: CACurrentMediaTime())
     private var tasks: [Task<Void, Never>] = []
+    /// A negative or huge glass-to-glass estimate was logged once already on this connection (reset on `.ready`).
+    @ObservationIgnored private var reportedClockMismatch = false
+    /// The sequence number of the last video frame that arrived: a gap is frames that never did (`handleIncoming`).
+    /// Forgotten when the link is ready again and when a new setup makes a new decoder (a new encoder starts at 0).
+    @ObservationIgnored private var lastSeq: UInt32?
 
     public init() {
         ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
@@ -66,7 +71,13 @@ public final class ViewModel {
             telemetry.recordDisplay(at: presentedAt)
             if let offset = link?.clockOffsetNs {
                 let localCapture = (Double(captureNs) - Double(offset)) / 1e9
-                telemetry.recordLatency(ms: max(0, (presentedAt - localCapture) * 1000), at: presentedAt)
+                let latencyMs = (presentedAt - localCapture) * 1000
+                telemetry.recordLatency(ms: latencyMs, at: presentedAt)
+                if latencyMs < 0 || latencyMs > 5_000, !reportedClockMismatch {
+                    // The strip shows the estimate as it is; the log says what it means.
+                    reportedClockMismatch = true
+                    log.error("The clock offset to the sharer looks wrong: a frame shows \(latencyMs, format: .fixed(precision: 1), privacy: .public) ms after its capture time")
+                }
             }
             if renderFailure != nil { renderFailure = nil }
         }
@@ -181,7 +192,7 @@ public final class ViewModel {
 
     public func disconnect() {
         link?.close(); link = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []
-        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0
+        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil
         ink.clearRemote()
         pixelSize = .zero; codecLabel = "·"; codecNotice = nil; renderFailure = nil; sharerName = ""
         state = .browsing
@@ -211,7 +222,9 @@ public final class ViewModel {
     private func sessionStateChanged(_ s: LinkSession.State, peer: Peer) {
         switch s {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
-        case .ready: state = .connected; connectionCount += 1; decodeFailures = 0; askForKeyframe()
+        case .ready:
+            state = .connected; connectionCount += 1; decodeFailures = 0; lastSeq = nil; reportedClockMismatch = false
+            askForKeyframe()
         case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
         case .codeRejected:
             // The handshake failed on the keys: the code is wrong. Back to the code for that Mac, where the field
@@ -247,7 +260,7 @@ public final class ViewModel {
                 }
                 // A RealTime setting rejected inside `init` arrives the moment this is set: hop to the main actor.
                 d.onError = { [weak self] err in Task { @MainActor in self?.handleDecoderError(err) } }
-                decoder = d; decoderConfig = cfg
+                decoder = d; decoderConfig = cfg; lastSeq = nil
                 pixelSize = CGSize(width: Int(cfg.width), height: Int(cfg.height))
                 codecLabel = cfg.codec == .hevc ? "HEVC" : "H.264"
             } catch {
@@ -257,7 +270,15 @@ public final class ViewModel {
                 state = .failed("Could not start the video decoder: \(error)", nil)
             }
         case .videoFrame(let f):
+            // The strip's first figure on the viewer is frames received (`ViewView` labels it so), not captured.
             telemetry.recordCapture(at: now); telemetry.recordBytes(f.data.count, at: now)
+            // Frames the sharer skipped for its backlog, or lost in a drop, never arrive: the gap in the numbers says how
+            // many. A larger jump is not a count of frames (a new encoder starts again at 0).
+            if let last = lastSeq {
+                let gap = f.seq &- last
+                if (2..<600).contains(gap) { for _ in 1..<gap { telemetry.recordDrop(at: now) } }
+            }
+            lastSeq = f.seq
             guard let decoder else { askForKeyframe(); return }
             // Decoded off the main actor (`decoded`, `decodeFailed`), so ink, cursor and the presented handlers the
             // pacer depends on never wait behind a hardware decode.

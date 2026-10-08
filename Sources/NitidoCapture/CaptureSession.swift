@@ -149,14 +149,22 @@ public final class CaptureSession: NSObject {
     private var generation: UInt64 = 0
     /// True between `presentPicker` and `stop()`; picker updates that land after a stop are ignored.
     private var acceptsPickerUpdates = false
+    /// Frames `frames` let go because the share had not taken the one before them yet (`takeDroppedFrames`).
+    private let droppedFrames = OSAllocatedUnfairLock(initialState: 0)
 
     public override init() {
         let (f, fc) = AsyncStream<CapturedFrame>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (e, ec) = AsyncStream<CaptureEvent>.makeStream(bufferingPolicy: .bufferingNewest(8))
         frames = f; frameOut = fc; events = e; eventOut = ec
-        output = FrameOutput(continuation: fc, sizes: sizes)
+        output = FrameOutput(continuation: fc, sizes: sizes, dropped: droppedFrames)
         super.init()
         sizes.setOnChange { [weak self] in Task { @MainActor in self?.sizeChanged() } }
+    }
+
+    /// Frames the capture let go since the last call: `frames` keeps only the newest, so a frame the share had not taken
+    /// yet when the next one came was never shown or sent. Each one is counted once.
+    public func takeDroppedFrames() -> Int {
+        droppedFrames.withLock { count in defer { count = 0 }; return count }
     }
 
     /// Shows the system picker. Results arrive through `events` and then `frames`.
@@ -399,6 +407,9 @@ public final class CaptureSession: NSObject {
     func observeFrameForTesting(contentRect: CGRect, contentScale: CGFloat, scaleFactor: CGFloat) {
         output.observeSize(contentRect: contentRect, contentScale: contentScale, scaleFactor: scaleFactor)
     }
+
+    /// Test only: a complete frame handed on the way the stream's callback hands one (`FrameOutput.deliver`).
+    func deliverForTesting(_ frame: CapturedFrame) { output.deliver(frame) }
 }
 
 extension CaptureSession: SCContentSharingPickerObserver {
@@ -463,11 +474,19 @@ private final class FrameOutput: NSObject, SCStreamOutput, @unchecked Sendable {
     private let continuation: AsyncStream<CapturedFrame>.Continuation
     private let clock = MachClock()
     private let sizes: SizeWatch
+    private let dropped: OSAllocatedUnfairLock<Int>
     /// Touched only on the serial capture queue.
     private var reportedMissingDisplayTime = false
-    init(continuation: AsyncStream<CapturedFrame>.Continuation, sizes: SizeWatch) {
+    init(continuation: AsyncStream<CapturedFrame>.Continuation, sizes: SizeWatch, dropped: OSAllocatedUnfairLock<Int>) {
         self.continuation = continuation
         self.sizes = sizes
+        self.dropped = dropped
+    }
+
+    /// Hands a complete frame on. The stream keeps only the newest, so the frame waiting before it, if the share has not
+    /// taken it yet, is let go: that one counts as dropped.
+    func deliver(_ frame: CapturedFrame) {
+        if case .dropped = continuation.yield(frame) { dropped.withLock { $0 += 1 } }
     }
 
     /// Compares the frame's content, at 1:1, with the size the stream is configured for (`SizeWatch`).
@@ -496,6 +515,6 @@ private final class FrameOutput: NSObject, SCStreamOutput, @unchecked Sendable {
             }
             hostTimeNs = UInt64(CACurrentMediaTime() * 1e9)
         }
-        continuation.yield(CapturedFrame(pixelBuffer: pixelBuffer, captureHostTimeNs: hostTimeNs, contentRect: rect, scale: scale))
+        deliver(CapturedFrame(pixelBuffer: pixelBuffer, captureHostTimeNs: hostTimeNs, contentRect: rect, scale: scale))
     }
 }

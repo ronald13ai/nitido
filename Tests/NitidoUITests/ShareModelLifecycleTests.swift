@@ -57,6 +57,10 @@ private final class FakeSource: CaptureSource {
     func emit(_ event: CaptureEvent) { eventOut.yield(event) }
 
     func emit(frame: CapturedFrame) { frameOut.yield(frame) }
+
+    /// Frames the stream let go before the share took them, handed to the share once (`takeDroppedFrames`).
+    var droppedFrames = 0
+    func takeDroppedFrames() -> Int { defer { droppedFrames = 0 }; return droppedFrames }
 }
 
 /// A captured frame stamped now, in a BGRA buffer the hardware encoder takes (IOSurface backed), with a pattern
@@ -308,6 +312,24 @@ final class ShareModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.state, .capturing, "a cancelled change of content keeps sharing")
         XCTAssertEqual(cancels, 0, "the app stays on the Share screen")
         XCTAssertEqual(journal.lines, ["present t0"], "the session is not stopped")
+        await model.stop()
+    }
+
+    /// Frames the capture stream let go before the share took them (it keeps only the newest) count in the strip's
+    /// dropped figure (spec 10 and 12).
+    @MainActor
+    func testFramesTheCaptureStreamLetGoCountAsDropped() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "x")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        source.droppedFrames = 3
+        try await waitUntil("the strip counts the frames the stream let go") { model.snapshot.droppedLastSecond >= 3 }
+        XCTAssertEqual(source.droppedFrames, 0, "taken once")
         await model.stop()
     }
 

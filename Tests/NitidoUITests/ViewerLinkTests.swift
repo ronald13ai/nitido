@@ -6,7 +6,7 @@ import CoreVideo
 import QuartzCore
 import dnssd
 import NitidoCore
-import NitidoCodec
+@testable import NitidoCodec
 @testable import NitidoCapture
 @testable import NitidoLink
 @testable import NitidoUI
@@ -321,6 +321,69 @@ final class ViewerLinkTests: XCTestCase {
         viewer.sink.displayChanged(scale: 2, visibleFrame: CGRect(x: 0, y: 0, width: 2000, height: 1200))
         XCTAssertEqual(viewer.resolutionLabel, "320×180 @2x")
         viewer.disconnect()
+    }
+
+    /// Spec 10: the viewer's strip counts the frames that never reached it (skipped by the sharer for the backlog, lost
+    /// with a reconnect) from the gaps in their sequence numbers.
+    @MainActor
+    func testSeqGapsCountAsDroppedOnTheViewer() async throws {
+        let (share, _) = try await listeningShare()
+        let viewer = ViewModel()
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        func delta(_ seq: UInt32) -> VideoFrame { VideoFrame(seq: seq, captureHostTimeNs: 1, isKey: false, data: Data([0, 0, 0, 1, 2])) }
+        viewer.handleIncoming(.videoFrame(delta(1)))
+        viewer.handleIncoming(.videoFrame(delta(5)))
+        try await waitUntil("frames 2, 3 and 4 count as dropped") { viewer.snapshot.droppedLastSecond >= 3 }
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// The bitrate in the sharer's strip is what went to the viewer: frames skipped for the send backlog add nothing.
+    @MainActor
+    func testFramesSkippedForTheBacklogAddNoBitrate() async throws {
+        let (share, _) = try await listeningShare()
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let viewer = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
+        try await waitUntil("the sharer sends to the viewer") { share.isSending }
+        let link = try XCTUnwrap(share.link)
+        func frame(_ seq: UInt32, isKey: Bool) -> EncodedFrame {
+            EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: isKey, data: Data(count: 50_000), parameterSets: [], codec: .hevc, width: 320, height: 180)
+        }
+        let congestion = 20 * share.frameBytes
+        link.addBacklogForTesting(congestion)
+        for seq in 1...5 { share.handleEncoded(frame(UInt32(seq), isKey: false)) }
+        try await Task.sleep(for: .milliseconds(400))    // the 250 ms loop publishes the figures
+        XCTAssertEqual(share.snapshot.bitrateMbps, 0, "nothing went out")
+        XCTAssertGreaterThanOrEqual(share.snapshot.droppedLastSecond, 5)
+
+        link.addBacklogForTesting(-congestion)
+        share.handleEncoded(frame(6, isKey: true))
+        try await waitUntil("the keyframe that went out counts") { share.snapshot.bitrateMbps > 0 }
+        XCTAssertEqual(share.snapshot.bitrateMbps, 50_000 * 8 / 1e6, accuracy: 0.001, "the keyframe alone")
+        viewer.close()
+        await share.stop()
+    }
+
+    /// The glass-to-glass estimate is shown as it is: one below zero means the clock offset is off, and the strip says
+    /// so (the log too) instead of showing 0 ms.
+    @MainActor
+    func testTheViewerShowsALatencyEstimateBelowZeroAsItIs() async throws {
+        let (share, _) = try await listeningShare()
+        let viewer = ViewModel()
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer knows the sharer's clock") { viewer.state == .connected && viewer.snapshot.rttMs != nil }
+        // Same Mac, so the offset is about zero: a frame captured 50 ms after it was shown estimates about -50 ms.
+        let now = CACurrentMediaTime()
+        viewer.sink.onPresented?(UInt64((now + 0.050) * 1e9), now)
+        try await waitUntil("the strip shows the estimate") { viewer.snapshot.latencyMs != nil }
+        XCTAssertLessThan(try XCTUnwrap(viewer.snapshot.latencyMs), -25, "shown as it is, not as 0")
+        viewer.disconnect()
+        await share.stop()
     }
 
     /// A frame the viewer cannot draw is said over the picture and counted as dropped, until a frame reaches the
