@@ -420,7 +420,13 @@ public final class ShareModel {
             }
             d.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
         }
-        guard let decoder else { return }
+        guard let decoder else {
+            // A decode error let the decoder go, and only a keyframe's setup makes the next one. The keyframe asked for
+            // may never come out (the encoder failed or dropped it), so every delta until then asks again: it only
+            // sets a flag, and the loop never waits for the periodic keyframe, or forever over a still source.
+            if !f.isKey { encoder?.requestKeyframe() }
+            return
+        }
         if case .skipped(let first) = decoder.submit(f.videoFrame) {
             // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped. The first
             // one asks for that keyframe; a later one asks again once a second has passed.

@@ -736,6 +736,47 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// Spec 12, "Decode error: request keyframe", for the codec loop: after a decode error lets the loop's decoder go,
+    /// every delta that comes before a keyframe asks for one again, so a forced keyframe that never came out (the
+    /// encoder failed or dropped it, or a frame took the request first) cannot freeze the loop until the periodic
+    /// keyframe, or for good over a still source.
+    @MainActor
+    func testTheCodecLoopAsksAgainForAKeyframeUntilOneArrives() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "w")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 0))
+        try await waitUntil("the loop shows a decoded frame") { view.pacer.held?.compareWith != nil }
+        let encoder = try XCTUnwrap(model.encoder)
+
+        // A decode error lets the loop's decoder go and asks the encoder for a keyframe.
+        let key = try await realKeyframe()
+        model.handleEncoded(EncodedFrame(seq: 50, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]),
+                                         parameterSets: key.parameterSets, codec: key.codec, width: key.width, height: key.height))
+        try await waitUntil("the decode error lands") { model.decodeFailures == 1 }
+        XCTAssertTrue(encoder.isKeyframeRequested)
+
+        // A frame takes the request, and its keyframe never reaches the loop.
+        encoder.onFrame = { _ in }
+        XCTAssertTrue(encoder.encode(try capturedFrame(index: 1).pixelBuffer, captureHostTimeNs: 2))
+        XCTAssertFalse(encoder.isKeyframeRequested, "the frame took the request")
+
+        // The next delta finds no decoder: it asks again.
+        model.handleEncoded(EncodedFrame(seq: 51, captureHostTimeNs: 3, isKey: false, data: Data([0, 0, 0, 3, 1, 2, 3]),
+                                         parameterSets: [], codec: key.codec, width: key.width, height: key.height))
+        XCTAssertTrue(encoder.isKeyframeRequested, "a delta with no decoder to read it asks for a keyframe again")
+        XCTAssertEqual(model.state, .capturing)
+        await model.stop()
+    }
+
     /// The encoder takes two frames at a time and turns the next one away (`VideoEncoder.encode`), and the frame turned
     /// away is the newest. Spec sections 5 and 8: the newest frame is the one that gets through. Frames that arrive back
     /// to back while two are encoding, then a source that goes still (ScreenCaptureKit sends nothing more), leave the
