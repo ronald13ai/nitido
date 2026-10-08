@@ -38,7 +38,7 @@ public struct ShareView: View {
                 // The name viewers see in their list ("Mac (2)" when another Mac has this one); the key stays derived
                 // from `name`, which the TXT record publishes.
                 PairingPanel(name: model.advertisedName ?? model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
-                             connectionCount: model.connectionCount).padding(14)
+                             connectionCount: model.connectionCount, ringShownFor: $model.ringShownFor).padding(14)
                 LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
@@ -113,6 +113,8 @@ struct PairingPanel: View {
     var reconnecting = false
     /// `ShareModel.connectionCount`: the gold ring around the viewer's dot draws once per viewer that proves the code.
     let connectionCount: Int
+    /// `ShareModel.ringShownFor`: the connection the ring last played for, so the panel shown again does not replay it.
+    @Binding var ringShownFor: Int
     var body: some View {
         GlassCard {
             VStack(alignment: .trailing, spacing: 4) {
@@ -124,7 +126,7 @@ struct PairingPanel: View {
                         ZStack {
                             // Inactive while the viewer reconnects; the ring draws again once it pairs.
                             Circle().fill(reconnecting ? Theme.Colors.muted : Theme.Colors.success).frame(width: 6, height: 6)
-                            ConnectRing(trigger: connectionCount).frame(width: 14, height: 14)
+                            ConnectRing(trigger: connectionCount, shownFor: $ringShownFor).frame(width: 14, height: 14)
                         }
                         Text(viewer).font(.system(size: 11)).foregroundStyle(Theme.Colors.text)
                     }.padding(.top, 2)

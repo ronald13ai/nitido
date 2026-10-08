@@ -36,6 +36,8 @@ public final class ViewModel {
     public private(set) var discoveryNotice: String?
     /// Times the link became ready, the first time and after every reconnect: each draws the gold ring once (`ConnectRing`).
     public private(set) var connectionCount = 0
+    /// The connection the gold ring last played for, so the View screen shown again draws it at rest (`ConnectRing`).
+    @ObservationIgnored public var ringShownFor = 0
     /// Codes the chosen Mac turned away in a row: each shakes the code field once and shows "Wrong code".
     public private(set) var wrongCodeCount = 0
     /// The failure is the decoder's (it could not start, or ten frames in a row failed), not the link's: the same Mac

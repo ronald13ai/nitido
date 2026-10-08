@@ -59,22 +59,47 @@ public struct QuietButton: View {
     }
 }
 
-/// A thin gold ring that draws itself once when `trigger` changes (a new connection), then stays.
+/// A thin gold ring that draws itself once per connection (`trigger`, a model's connection count), then stays. The
+/// model keeps the last connection it played for (`shownFor`), so a screen shown again draws it at rest instead of
+/// playing it again. Under Reduce Motion there is no ring (spec 11).
 public struct ConnectRing: View {
+    /// How the ring starts when it appears or its trigger changes.
+    enum Start: Equatable {
+        /// Reduce Motion: no ring at all.
+        case hidden
+        /// Already played for this connection: drawn at rest.
+        case drawn
+        /// A connection it has not played for: it draws itself.
+        case animate
+    }
+
+    nonisolated static func start(trigger: Int, shownFor: Int, reduceMotion: Bool) -> Start {
+        guard !reduceMotion else { return .hidden }
+        return trigger > shownFor ? .animate : .drawn
+    }
+
     let trigger: Int
+    @Binding var shownFor: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var progress: CGFloat = 0
-    public init(trigger: Int) { self.trigger = trigger }
+    public init(trigger: Int, shownFor: Binding<Int>) { self.trigger = trigger; _shownFor = shownFor }
     public var body: some View {
         Circle().trim(from: 0, to: progress)
             .stroke(Theme.Colors.gold, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
             .rotationEffect(.degrees(-90))
-            .onAppear { animate() }
-            .onChange(of: trigger) { _, _ in progress = 0; animate() }
+            .opacity(reduceMotion ? 0 : 1)
+            .onAppear { begin() }
+            .onChange(of: trigger) { _, _ in begin() }
     }
-    private func animate() {
-        if reduceMotion { progress = 1; return }
-        withAnimation(Theme.Motion.connect) { progress = 1 }
+    private func begin() {
+        switch Self.start(trigger: trigger, shownFor: shownFor, reduceMotion: reduceMotion) {
+        case .hidden: progress = 0
+        case .drawn: progress = 1
+        case .animate:
+            progress = 0
+            withAnimation(Theme.Motion.connect) { progress = 1 }
+        }
+        shownFor = trigger
     }
 }
 

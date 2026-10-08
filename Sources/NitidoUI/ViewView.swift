@@ -110,7 +110,7 @@ public struct ViewView: View {
                     HStack(spacing: 6) {
                         ZStack {
                             Circle().fill(Theme.Colors.success).frame(width: 6, height: 6)
-                            ConnectRing(trigger: model.connectionCount).frame(width: 14, height: 14)
+                            ConnectRing(trigger: model.connectionCount, shownFor: $model.ringShownFor).frame(width: 14, height: 14)
                         }
                         Text(model.sharerName).font(.system(size: 11)).foregroundStyle(Theme.Colors.text)
                     }

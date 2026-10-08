@@ -102,6 +102,8 @@ public final class ShareModel {
     @ObservationIgnored private var reconnectGraceToken: UInt64 = 0
     /// Viewers that proved the code so far: each one draws the gold ring once (`ConnectRing`).
     public private(set) var connectionCount = 0
+    /// The connection the gold ring last played for, so the Share screen shown again draws it at rest (`ConnectRing`).
+    @ObservationIgnored public var ringShownFor = 0
     /// The picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
     public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
