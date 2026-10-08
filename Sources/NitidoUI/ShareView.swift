@@ -35,7 +35,8 @@ public struct ShareView: View {
                     .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
                     .allowsHitTesting(false)
                 }
-                PairingPanel(name: model.name, code: model.code, viewer: model.viewerName, connectionCount: model.connectionCount).padding(14)
+                PairingPanel(name: model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
+                             connectionCount: model.connectionCount).padding(14)
                 LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
@@ -106,22 +107,28 @@ public struct ShareView: View {
 
 struct PairingPanel: View {
     let name: String, code: String, viewer: String?
+    /// The viewer dropped without `bye` and may come back (`ShareModel.viewerReconnecting`).
+    var reconnecting = false
     /// `ShareModel.connectionCount`: the gold ring around the viewer's dot draws once per viewer that proves the code.
     let connectionCount: Int
     var body: some View {
         GlassCard {
             VStack(alignment: .trailing, spacing: 4) {
                 Text(name).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.Colors.text)
-                Text("CODE").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.muted).tracking(1.5)
+                Text("CODE").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.5)
                 Text(code).font(Theme.Fonts.figures(26)).foregroundStyle(Theme.Colors.gold).tracking(4)
                 if let viewer {
                     HStack(spacing: 6) {
                         ZStack {
-                            Circle().fill(Theme.Colors.success).frame(width: 6, height: 6)
+                            // Inactive while the viewer reconnects; the ring draws again once it pairs.
+                            Circle().fill(reconnecting ? Theme.Colors.muted : Theme.Colors.success).frame(width: 6, height: 6)
                             ConnectRing(trigger: connectionCount).frame(width: 14, height: 14)
                         }
                         Text(viewer).font(.system(size: 11)).foregroundStyle(Theme.Colors.text)
                     }.padding(.top, 2)
+                    if reconnecting {
+                        Text("Reconnecting…").font(.system(size: 11)).foregroundStyle(Theme.Colors.secondaryText)
+                    }
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
@@ -137,9 +144,9 @@ struct LoopbackPanel: View {
                 Toggle(isOn: $model.loopback) { Text("Codec loop").font(.system(size: 12, weight: .medium)) }
                     .toggleStyle(.switch).tint(Theme.Colors.gold)
                 if model.loopback {
-                    Text("QUALITY · \(Int(model.qualityMbps)) MBPS").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.muted).tracking(1.5)
+                    Text("QUALITY · \(Int(model.qualityMbps)) MBPS").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.5)
                     Slider(value: $model.qualityMbps, in: 1...60, step: 1).tint(Theme.Colors.gold).frame(width: 180)
-                    Text("Raw on the left of the line, decoded on the right. Drag the line.").font(.system(size: 10)).foregroundStyle(Theme.Colors.muted)
+                    Text("Raw on the left of the line, decoded on the right. Drag the line.").font(.system(size: 10)).foregroundStyle(Theme.Colors.secondaryText)
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)

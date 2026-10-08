@@ -8,7 +8,11 @@ public enum Theme {
         public static let background = Color(hex: 0x08090c)
         public static let surface = Color(hex: 0x0e1015)
         public static let hairline = Color(hex: 0x2b2e38)
+        /// Hairlines and inactive states only: about 1.9:1 on the background, too faint for text.
         public static let muted = Color(hex: 0x3a3e4a)
+        /// Secondary text (subtitles, small-caps captions, the strip's labels and units): 6.2:1 on the background,
+        /// 5.9:1 on the surface.
+        public static let secondaryText = Color(hex: 0x8a8f9c)
         public static let text = Color(hex: 0xf2f3f5)
         public static let gold = Color(hex: 0xc9a86a)
         public static let goldHighlight = Color(hex: 0xd8ba7e)

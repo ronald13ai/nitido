@@ -48,10 +48,10 @@ private struct Figure: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(label.uppercased()).font(Theme.Fonts.smallCaps(8)).foregroundStyle(Theme.Colors.muted).tracking(1)
+            Text(label.uppercased()).font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.secondaryText).tracking(1)
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(value).font(Theme.Fonts.figures(12)).foregroundStyle(highlight ? Theme.Colors.gold : Theme.Colors.text)
-                Text(unit).font(Theme.Fonts.figures(9)).foregroundStyle(Theme.Colors.muted)
+                Text(unit).font(Theme.Fonts.figures(10)).foregroundStyle(Theme.Colors.secondaryText)
             }
         }
         // A figure wider than a whole row (a tiny picture) is truncated, never wrapped onto a second line.

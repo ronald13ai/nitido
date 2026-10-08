@@ -30,7 +30,7 @@ public struct ViewView: View {
 
     private var browsing: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("MACS SHARING ON THIS NETWORK").font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.muted).tracking(1.5)
+            Text("MACS SHARING ON THIS NETWORK").font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.5)
             if let notice = model.discoveryNotice {
                 Text(notice).font(.system(size: 13)).foregroundStyle(Theme.Colors.text).padding(.vertical, 20)
             } else if model.peers.isEmpty {
@@ -55,7 +55,7 @@ public struct ViewView: View {
         let canConnect = model.code.count == 4 && !connecting
         return VStack(spacing: 14) {
             Text(peer.name).font(.system(size: 15, weight: .medium)).foregroundStyle(Theme.Colors.text)
-            Text("ENTER THE 4-DIGIT CODE SHOWN ON THAT MAC").font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.muted).tracking(1.5)
+            Text("ENTER THE 4-DIGIT CODE SHOWN ON THAT MAC").font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.5)
             TextField("0000", text: $model.code)
                 .textFieldStyle(.plain).font(Theme.Fonts.figures(34)).multilineTextAlignment(.center)
                 .foregroundStyle(Theme.Colors.gold).frame(width: 160)

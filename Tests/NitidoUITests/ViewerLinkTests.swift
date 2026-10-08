@@ -204,6 +204,38 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.pixelSize, .zero)
     }
 
+    /// Spec 4 and 12: the capture restarts at a new size (a window resized, the display's mode changed, another pick),
+    /// and so does the viewer: the encoder is made again for the new size and its keyframe brings the new setup, and the
+    /// sharer's hello with the new size and scale reaches the viewer already connected and any viewer that pairs later.
+    @MainActor
+    func testANewCaptureSizeAndScaleReachTheViewer() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let sharer = peer(for: share)
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        viewer.select(sharer)
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the picture reaches the viewer") { viewer.state == .connected && shown.count >= 1 }
+        XCTAssertEqual(viewer.resolutionLabel, "320×180 @2x")
+
+        source.emit(.started(pixelWidth: 640, pixelHeight: 360, scale: 1))
+        source.emit(frame: try stripedFrame(width: 640, height: 360))
+        try await waitUntil("the new size and scale reach the viewer") { viewer.pixelSize == CGSize(width: 640, height: 360) && viewer.scale == 1 }
+        XCTAssertEqual(viewer.resolutionLabel, "640×360 @1x")
+        XCTAssertEqual(share.resolutionLabel.hasPrefix("640×360 @1x"), true, share.resolutionLabel)
+
+        let later = ViewModel()
+        later.select(sharer)
+        later.code = share.code
+        later.connect()
+        try await waitUntil("a viewer that pairs later hears the new scale") { later.state == .connected && later.scale == 1 }
+        later.disconnect(); viewer.disconnect()
+        await share.stop()
+    }
+
     /// The viewer shows the sharer's picture at the same size: 1:1 stays exact, even at a half point. 1001 x 801 px
     /// at 2x is 500.5 x 400.5 pt, which `ViewView` lays out at the top left of a 501 pt wide window, as `ShareView` does.
     @MainActor
@@ -308,6 +340,44 @@ final class ViewerLinkTests: XCTestCase {
         let before = shown.count
         source.emit(frame: try stripedFrame(index: 1))
         try await waitUntil("a new frame still reaches the viewer") { shown.count > before }
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// A share that stops capturing (Stop Sharing in the menu bar ends the stream with an error, or a codec or listener
+    /// failure) ends its viewer and its listener: the viewer is told the sharer stopped sharing instead of staying
+    /// connected over a frozen picture, and nobody new can pair with a share that sends nothing. Retry listens again.
+    @MainActor
+    func testAShareThatStopsCapturingEndsTheViewerAndStopsListening() async throws {
+        let sources = SourceFactory()
+        let share = ShareModel(makeSource: sources.make, screenRecordingGranted: { true })
+        share.start(excludingWindowIDs: [])
+        try await waitUntil("the session is made") { sources.made.count == 1 }
+        sources.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the sharer listens") { share.listeningPort != nil }
+        sources.made[0].emit(frame: try stripedFrame())
+        let viewer = ViewModel()
+        let sharer = peer(for: share)
+        viewer.select(sharer)
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+
+        sources.made[0].emit(.failed("The user stopped the stream"))
+        try await waitUntil("the share fails") { share.state == .failed("The user stopped the stream") }
+        try await waitUntil("the viewer hears that the sharer stopped sharing") {
+            viewer.state == .failed("\(share.name) stopped sharing.", sharer)
+        }
+        XCTAssertFalse(share.isSending)
+        XCTAssertNil(share.viewerName)
+        XCTAssertNil(share.advertiser, "a failed share stops listening")
+        XCTAssertNil(share.listeningPort)
+        XCTAssertEqual(share.unpairedCount, 0)
+
+        share.retry()
+        try await waitUntil("Retry makes a fresh session") { sources.made.count == 2 }
+        sources.made[1].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("Retry listens again") { share.listeningPort != nil }
         viewer.disconnect()
         await share.stop()
     }
@@ -512,6 +582,44 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// `frameBytes`, the unit of the backlog rule, follows the rate the encoder runs at: a viewer that pairs starts from
+    /// the initial rate for the picture's size, not from the cut-down rate a congested viewer before it left, and the
+    /// codec loop's quality slider sets it while the loop is on.
+    @MainActor
+    func testTheBitrateStartsAfreshForEachViewerAndFollowsTheSlider() async throws {
+        let (share, source) = try await listeningShare(width: 1920, height: 1080)
+        source.emit(frame: try stripedFrame(width: 1920, height: 1080))
+        await drain()
+        let sharer = peer(for: share)
+        let initialFrameBytes = BitrateController.initialBitrate(width: 1920, height: 1080) / 8 / 60
+        let first = ViewModel()
+        first.select(sharer)
+        first.code = share.code
+        first.connect()
+        try await waitUntil("the first viewer is connected") { first.state == .connected && share.isSending }
+        try await waitUntil("the encoder runs at the initial rate") { share.frameBytes == initialFrameBytes }
+
+        // Congested: the 250 ms loop cuts the rate by a quarter.
+        let link = try XCTUnwrap(share.link)
+        let congestion = 40 * initialFrameBytes
+        link.addBacklogForTesting(congestion)
+        try await waitUntil("the controller cuts the rate") { share.frameBytes < initialFrameBytes }
+        link.addBacklogForTesting(-congestion)
+
+        let second = ViewModel()
+        second.select(sharer)
+        second.code = share.code
+        second.connect()
+        try await waitUntil("the second viewer takes over") { second.state == .connected && share.link !== link }
+        XCTAssertEqual(share.frameBytes, initialFrameBytes, "a new viewer starts from the initial rate")
+
+        share.loopback = true
+        share.qualityMbps = 60
+        XCTAssertEqual(share.frameBytes, 60_000_000 / 8 / 60, "the slider's rate sizes a frame while the loop is on")
+        second.disconnect(); first.disconnect()
+        await share.stop()
+    }
+
     /// Three connections that fail to prove the code mean someone is guessing: the sharer shows a new code and listens
     /// with its key, the old code no longer pairs, and the viewer who had paired goes on as it was.
     @MainActor
@@ -562,6 +670,42 @@ final class ViewerLinkTests: XCTestCase {
         next.connect()
         try await waitUntil("the new code pairs") { next.state == .connected }
         next.disconnect(); stale.disconnect(); viewer.disconnect()
+        await share.stop()
+    }
+
+    /// Spec 12, "Link drops": both sides say Reconnecting. A viewer link that ends without `bye` (a cut network, a viewer
+    /// that died) keeps the viewer's name in the sharer's pairing panel as reconnecting, until the viewer pairs again,
+    /// or the grace period passes and the sharer goes back to waiting. A `bye` (Back) lets the viewer go at once.
+    @MainActor
+    func testTheSharerShowsAViewerThatDroppedAsReconnecting() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        share.reconnectGrace = .milliseconds(600)
+        let endpoint = peer(for: share).endpoint
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        func pair() async throws -> NitidoLink.Link {
+            let link = NitidoLink.Link.connect(to: endpoint, code: share.code, sharerName: share.name, hello: hello)
+            try await waitUntil("the viewer pairs") { share.isSending && share.viewerName == "Viewer" && !share.viewerReconnecting }
+            return link
+        }
+
+        let first = try await pair()
+        first.abort()                                    // gone without bye
+        try await waitUntil("the sharer says the viewer is reconnecting") { share.viewerReconnecting }
+        XCTAssertEqual(share.viewerName, "Viewer", "the viewer's name stays while it reconnects")
+        XCTAssertFalse(share.isSending)
+
+        let second = try await pair()                   // it comes back
+        XCTAssertFalse(share.viewerReconnecting)
+        second.abort()
+        try await waitUntil("reconnecting again") { share.viewerReconnecting }
+        try await waitUntil("the grace period ends and the sharer waits for a viewer") { !share.viewerReconnecting && share.viewerName == nil }
+
+        let third = try await pair()
+        third.close()                                    // Back: a bye
+        try await waitUntil("a bye lets the viewer go at once") { share.viewerName == nil }
+        XCTAssertFalse(share.viewerReconnecting)
         await share.stop()
     }
 
@@ -654,6 +798,7 @@ final class ViewerLinkTests: XCTestCase {
         app.escape()
         await drain()
         XCTAssertTrue(app.confirmStop, "Esc asks before it disconnects")
+        XCTAssertEqual(app.stopQuestion, "Disconnect?", "only the viewer is live")
         XCTAssertEqual(app.screen, .view)
         XCTAssertTrue(app.view === viewer)
         XCTAssertEqual(viewer.state, .connected)
@@ -662,6 +807,40 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertNil(app.view)
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
         await share.stop()
+    }
+
+    /// ⌘Q (or closing the window, which quits the app) while a viewer is connected: the quit waits (`shouldQuitNow`
+    /// answers false) until the viewer has stopped and its `bye` is out, so the sharer hears a goodbye (the link ends
+    /// as `.cancelled` with reason `ended`) instead of a dropped connection it would wait on, and only then quits.
+    @MainActor
+    func testQuitWhileConnectedSaysByeBeforeQuitting() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234",
+                                        hello: Hello(protocolVersion: protocolVersion, role: .share, name: "Sharer", pixelWidth: 320, pixelHeight: 180, scale: 2))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "loopback", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+        let app = AppModel()
+        app.startView()
+        let viewer = try XCTUnwrap(app.view)
+        viewer.select(sharer)
+        viewer.code = "1234"
+        viewer.connect()
+        var incoming = advertiser.incoming.makeAsyncIterator()
+        guard let sharerSide = await incoming.next() else { return XCTFail("no connection") }
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+
+        var quits = 0
+        XCTAssertFalse(app.shouldQuitNow { quits += 1 }, "a live session stops before the app quits")
+        XCTAssertEqual(quits, 0)
+        try await waitUntil("the app quits once the session has stopped", timeout: 3) { quits == 1 }
+        XCTAssertNil(app.view)
+        XCTAssertEqual(app.screen, .welcome)
+        var ended: NitidoLink.Link.State?
+        for await s in sharerSide.states { ended = s }
+        XCTAssertEqual(ended, .cancelled, "the sharer heard bye, not a dropped connection")
+        XCTAssertEqual(sharerSide.byeReason, ByeReason.ended)
+        try await Task.sleep(for: .milliseconds(2_200))
+        XCTAssertEqual(quits, 1, "the deadline does not quit a second time")
     }
 
     /// A video setup the decoder cannot take fails the viewer and ends the link, so the sharer stops sending to it.

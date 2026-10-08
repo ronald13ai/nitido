@@ -59,6 +59,12 @@ public final class ShareModel {
     private var latestRaw: CapturedFrame?
     /// When the newest frame came (`CACurrentMediaTime`): a still source sends none.
     @ObservationIgnored private var lastCaptureAt: CFTimeInterval = 0
+    /// When the encoder last took a frame (`CACurrentMediaTime`): a frame it turned away carries no keyframe.
+    @ObservationIgnored private var lastAcceptedAt: CFTimeInterval = 0
+    /// The newest frame was turned away at the encoder's two-in-flight cap, and nothing newer has been taken since: the
+    /// next encoder output, which frees a slot, encodes it (`encodePendingNewest`). Spec sections 5 and 8: the newest
+    /// frame is the one that gets through, and a still source would send no other.
+    @ObservationIgnored private var newestPending = false
     /// Bumped by every quality change, loop off and retire, so a pending `qualityRested` for an earlier one does nothing.
     @ObservationIgnored private var qualityRestToken: UInt64 = 0
     private var encodeStarts: [UInt32: Double] = [:]
@@ -72,6 +78,13 @@ public final class ShareModel {
 
     public private(set) var viewerName: String?
     public private(set) var isSending = false
+    /// The viewer's link ended without `bye` (a cut network, a viewer that died): its name stays in the pairing panel as
+    /// reconnecting until it pairs again, another viewer pairs, or `reconnectGrace` passes (spec 12, "Link drops").
+    public private(set) var viewerReconnecting = false
+    /// How long a dropped viewer is shown as reconnecting. Internal so a test can shorten it.
+    @ObservationIgnored var reconnectGrace: Duration = .seconds(30)
+    /// Bumped whenever the viewer changes, so a pending grace period for an earlier drop does nothing.
+    @ObservationIgnored private var reconnectGraceToken: UInt64 = 0
     /// Viewers that proved the code so far: each one draws the gold ring once (`ConnectRing`).
     public private(set) var connectionCount = 0
     /// The picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
@@ -102,7 +115,7 @@ public final class ShareModel {
     private var needKeyAfterDrain = false
     /// When `keyframeAfterDrain` last asked for that keyframe, so it asks again only if none came within a second.
     @ObservationIgnored private var drainKeyRequestedAt: CFTimeInterval?
-    /// Connections that failed before they proved the code; three rotate it.
+    /// Connections that failed before they proved the code, over the whole share; three rotate it (`rotateCode`).
     private var failedHandshakes = 0
 
     private var hello: Hello {
@@ -260,7 +273,11 @@ public final class ShareModel {
     private func retireSession() {
         tasks.forEach { $0.cancel() }
         tasks = []
-        link?.close(); link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
+        // The viewer is told `bye` now; a stop returns only once it is out (`stop` waits for `retiring`), so a quit
+        // does not cut it off.
+        let byeSent = link.map { viewer in Task { await viewer.closeAndWait() } }
+        link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
+        viewerReconnecting = false; reconnectGraceToken &+= 1
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         listeningPort = nil; networkNotice = nil
         loopback = false
@@ -268,13 +285,15 @@ public final class ShareModel {
         // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain. The model
         // lets go of the same frame, and a new session never encodes the old one.
         sink.releaseHeldFrame()
-        latestRaw = nil
-        guard let old = capture else { return }
+        latestRaw = nil; newestPending = false
+        let old = capture
         capture = nil
+        guard old != nil || byeSent != nil else { return }
         let earlier = Self.retiring
         Self.retiring = Task { @MainActor in
             await earlier?.value
-            await old.stop()
+            await old?.stop()
+            await byeSent?.value
         }
     }
 
@@ -308,12 +327,24 @@ public final class ShareModel {
         let n = encoder.nextSeq
         // The loop's codec time; only a decoded loop frame takes its start back, so a frame for the viewer alone has none.
         if loopback { encodeStarts[n] = CACurrentMediaTime() }
-        if !encoder.encode(pixelBuffer, captureHostTimeNs: captureHostTimeNs) {
+        if encoder.encode(pixelBuffer, captureHostTimeNs: captureHostTimeNs) {
+            newestPending = false; lastAcceptedAt = CACurrentMediaTime()
+        } else {
             encodeStarts.removeValue(forKey: n)
             // `nextSeq` moves only once the encoder has taken the frame. A refusal after that went to `onError`, which
-            // counts it; a frame turned away at the two-in-flight cap, or by an invalidated encoder, is counted here.
-            if encoder.nextSeq == n { telemetry.recordDrop(at: CACurrentMediaTime()) }
+            // counts it; a frame turned away at the two-in-flight cap, or by an invalidated encoder, is counted here,
+            // and is encoded again as soon as a slot frees, unless a newer frame gets in first.
+            if encoder.nextSeq == n { telemetry.recordDrop(at: CACurrentMediaTime()); newestPending = true }
         }
+    }
+
+    /// After an encoder output, which frees a slot: the newest frame, turned away at the cap, goes in now with its own
+    /// capture time. Turned away again, it stays pending for the next output, so nothing builds a queue.
+    private func encodePendingNewest() {
+        guard newestPending else { return }
+        newestPending = false
+        guard loopback || isSending, state == .capturing, let raw = latestRaw else { return }
+        encode(raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs)
     }
 
     private func makeEncoder(width: Int, height: Int) {
@@ -334,12 +365,15 @@ public final class ShareModel {
         } catch {
             log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
             state = .failed("Hardware video encoder unavailable: \(error)")
+            endViewers()
         }
     }
 
     /// Internal, not private, so a test can hand it a frame the decoder cannot read.
     func handleEncoded(_ f: EncodedFrame) {
         let now = CACurrentMediaTime()
+        // After this frame has gone out: the slot it freed takes the newest frame, if the cap turned that one away.
+        defer { encodePendingNewest() }
         encodeFailures = 0
         telemetry.recordBytes(f.data.count, at: now)
         if isSending, let link {
@@ -362,7 +396,7 @@ public final class ShareModel {
                 decoder = try VideoDecoder(config: cfg); decoderConfig = cfg
             } catch {
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
-                state = .failed("Decoder: \(error)"); return
+                state = .failed("Decoder: \(error)"); endViewers(); return
             }
             decoder?.onFrame = { [weak self] d in Task { @MainActor in self?.handleDecoded(d) } }
             decoder?.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
@@ -419,8 +453,9 @@ public final class ShareModel {
     private func failCodec(_ part: String, message: String) {
         log.error("the video \(part, privacy: .public) failed 10 frames in a row")
         encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
-        encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll()
+        encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); newestPending = false
         state = .failed(message)
+        endViewers()
     }
 
     private func handleDecoded(_ d: DecodedFrame) {
@@ -455,7 +490,9 @@ public final class ShareModel {
     /// moving source's next frames show it. A still source sends none, so once the slider rests `qualityRested` does.
     private func qualityDidChange() {
         guard let encoder else { return }
-        encoder.setBitrate(Int(qualityMbps * 1_000_000))
+        // The backlog rule sizes a frame at the rate the encoder runs at (`frameBytes`).
+        currentBitrate = Int(qualityMbps * 1_000_000)
+        encoder.setBitrate(currentBitrate)
         qualityRestToken &+= 1
         let token = qualityRestToken
         Task { [weak self] in
@@ -480,9 +517,31 @@ public final class ShareModel {
     private func handle(_ event: CaptureEvent) {
         switch event {
         case .started(let w, let h, let s):
-            pixelSize = CGSize(width: w, height: h); scale = s; state = .capturing
+            // Also mid-share: another pick, a window resized, a display mode changed (`CaptureSession`). The encoder is
+            // made again for the new buffer size (`encode`), and its keyframe carries the new setup; the hello says the
+            // new size and scale to the viewer and to every viewer that pairs from now on.
+            let resized = state == .capturing && (pixelSize != CGSize(width: w, height: h) || scale != s)
+            pixelSize = CGSize(width: w, height: h); scale = s
+            // A codec or listener failure leaves the stream, and the raw picture, running until Retry: a new size from it
+            // resizes the picture and the failure stays.
+            if case .failed = state {
+                log.info("the failed share's capture is now \(w, privacy: .public)×\(h, privacy: .public); waiting for Retry")
+                return
+            }
+            state = .capturing
+            if resized {
+                log.info("the capture is now \(w, privacy: .public)×\(h, privacy: .public) @\(s, privacy: .public)x")
+                advertiser?.update(hello: hello)
+                link?.send(.hello(hello))
+            }
             startAdvertising()
         case .cancelled:
+            // The system's "change shared content" picker can open over a live share; cancelling it keeps the current
+            // content. Only the first pick's cancel goes back to Welcome (spec 12).
+            guard state != .capturing else {
+                log.info("A picker was cancelled while capturing; the shared content stays")
+                return
+            }
             state = .idle
             onCancelled?()
         case .stopped:
@@ -491,6 +550,7 @@ public final class ShareModel {
             // Before the first frame, a missing Screen Recording grant is the likely cause.
             failureNeedsPermission = state != .capturing && !screenRecordingGranted()
             state = .failed(message)
+            endViewers()
         }
     }
 
@@ -530,6 +590,7 @@ public final class ShareModel {
         } catch {
             log.error("could not create the network listener: \(String(describing: error), privacy: .public)")
             state = .failed("Could not start the network listener: \(error.localizedDescription)")
+            endViewers()
         }
     }
 
@@ -543,8 +604,22 @@ public final class ShareModel {
         case .failed(let reason):
             networkNotice = nil
             state = .failed("Could not listen on the local network: \(reason)")
+            endViewers()
         case .stopped: break
         }
+    }
+
+    /// The share stopped sending: a capture, codec or listener failure, or Stop Sharing in the menu bar (the stream ends
+    /// with an error). The viewer is told with `bye(sharingStopped)` and says the sharer stopped sharing, instead of
+    /// staying connected over a frozen picture, and the listener stops, so nobody new pairs with a share that sends
+    /// nothing. Retry listens again (`start`, then `.started`, then `startAdvertising`).
+    private func endViewers() {
+        if link != nil { log.info("the share stopped sending; ending the viewer's link and the listener") }
+        link?.close(reason: ByeReason.sharingStopped); link = nil
+        linkTasks.forEach { $0.cancel() }; linkTasks = []
+        unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
+        isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1
+        advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil
     }
 
     /// One viewer at a time, and only one that proved the code. The listener hands a connection over before its
@@ -571,6 +646,7 @@ public final class ShareModel {
             link?.close()
             linkTasks.forEach { $0.cancel() }
             link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
+            viewerReconnecting = false; reconnectGraceToken &+= 1
             linkTasks = [
                 pairing.states,
                 Task { [weak self] in
@@ -580,6 +656,14 @@ public final class ShareModel {
                     }
                 },
             ]
+            // Each viewer starts from the initial rate for the picture's size (spec 8), not from the rate a congested
+            // viewer before it left. With the codec loop on, the slider keeps the rate; without an encoder, the next
+            // frame makes one at the initial rate (`makeEncoder`).
+            if !loopback, let encoder {
+                currentBitrate = BitrateController.initialBitrate(width: encoder.width, height: encoder.height)
+                controller = BitrateController(initial: currentBitrate)
+                encoder.setBitrate(currentBitrate)
+            }
             sendKeyframe()
         case .failed(let m):
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
@@ -590,16 +674,28 @@ public final class ShareModel {
                 return
             }
             guard l === link else { return }
-            isSending = false; viewerName = nil; link = nil; log.info("viewer link failed: \(m)")
+            // Gone without `bye`: a viewer reconnects by itself (`LinkSession`), so it is shown as reconnecting.
+            isSending = false; link = nil; log.info("viewer link failed: \(m)")
+            viewerReconnecting = true
+            reconnectGraceToken &+= 1
+            let token = reconnectGraceToken, grace = reconnectGrace
+            Task { [weak self] in
+                do { try await Task.sleep(for: grace) } catch { return }
+                guard let self, token == reconnectGraceToken, viewerReconnecting else { return }
+                log.info("the viewer did not come back; waiting for a viewer")
+                viewerReconnecting = false; viewerName = nil
+            }
         case .cancelled:
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil { return }
             guard l === link else { return }
-            isSending = false; viewerName = nil; link = nil
+            isSending = false; viewerName = nil; link = nil; viewerReconnecting = false; reconnectGraceToken &+= 1
         case .connecting: break
         }
     }
 
-    /// Three failed handshakes in a row mean someone is guessing: new code, new key.
+    /// Three failed handshakes over the share (a viewer pairing in between does not reset the count, spec 13) mean
+    /// someone may be guessing: new code, new key. Port probes and handshakes cut short count too, so a paired viewer
+    /// can see the code change and need the new one after its next drop.
     private func rotateCode() {
         failedHandshakes = 0
         // A new code, never the one being guessed (`makeCode` repeats one in 10,000 draws).
@@ -625,14 +721,15 @@ public final class ShareModel {
 
     /// The next frame the viewer gets is a keyframe. A still source sends no next frame (`CaptureSession` forwards only
     /// changed ones), so a viewer that just connected, or lost its decoder, would see nothing until the content moved:
-    /// when no frame comes within `stillAfter`, the newest one is encoded again (a fresh encoder's first frame is a
-    /// keyframe, a running one's is after the request).
+    /// when the encoder takes no frame within `stillAfter` (a frame it turned away at its cap does not count), the
+    /// newest one is encoded again (a fresh encoder's first frame is a keyframe, a running one's is after the request).
     private func sendKeyframe() {
         encoder?.requestKeyframe()
         let requestedAt = CACurrentMediaTime()
         Task { [weak self] in
             do { try await Task.sleep(for: .seconds(Self.stillAfter)) } catch { return }
-            guard let self, lastCaptureAt < requestedAt else { return }   // a newer frame carried the keyframe
+            // A frame the encoder took since the request carried the keyframe; one it turned away at the cap did not.
+            guard let self, lastAcceptedAt < requestedAt else { return }
             encodeNewestAgain()
         }
     }

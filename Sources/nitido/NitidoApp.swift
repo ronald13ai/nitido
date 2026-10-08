@@ -2,9 +2,24 @@ import SwiftUI
 import AppKit
 import NitidoUI
 
+/// Holds the app's model so a quit can stop a live session first: ⌘Q, and the window closing, which quits the app.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let app = AppModel()
+
+    /// A live share or viewer says `bye` to the other Mac before the process ends (`AppModel.shouldQuitNow`).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        app.shouldQuitNow { sender.reply(toApplicationShouldTerminate: true) } ? .terminateNow : .terminateLater
+    }
+
+    /// One window: closing it quits, through `applicationShouldTerminate`.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
 @main
 struct NitidoApp: App {
-    @State private var app = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    private var app: AppModel { delegate.app }
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)

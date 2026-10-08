@@ -109,6 +109,20 @@ private func textFrame(width: Int = 1280, height: Int = 720) throws -> CapturedF
                          contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
 }
 
+/// A solid grey frame (`index` sets the shade) stamped now: quick to make at any size, in an IOSurface-backed BGRA
+/// buffer the hardware encoder takes.
+private func solidFrame(index: Int, width: Int, height: Int) throws -> CapturedFrame {
+    var buffer: CVPixelBuffer?
+    let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
+    let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &buffer)
+    guard status == kCVReturnSuccess, let buffer else { throw XCTSkip("CVPixelBufferCreate failed: \(status)") }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    memset(CVPixelBufferGetBaseAddress(buffer), Int32(0x20 + index * 0x30), CVPixelBufferGetBytesPerRow(buffer) * height)
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    return CapturedFrame(pixelBuffer: buffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9),
+                         contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
+}
+
 /// Mean absolute difference per colour channel between two BGRA buffers of the same size (0...255).
 private func meanError(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double {
     let width = min(CVPixelBufferGetWidth(a), CVPixelBufferGetWidth(b))
@@ -253,6 +267,29 @@ final class ShareModelLifecycleTests: XCTestCase {
         await drain()
         XCTAssertEqual(cancels, 1)
         XCTAssertEqual(model.state, .idle)
+        await model.stop()
+    }
+
+    /// The system's "change shared content" picker opens over a live share (`allowsChangingSelectedContent`), and
+    /// cancelling it keeps the current content: only the first pick's cancel goes back to Welcome (spec 12). A cancel
+    /// that arrives while capturing leaves the share capturing and never calls `onCancelled`.
+    @MainActor
+    func testCancellingTheChangeContentPickerKeepsTheShare() async {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "t")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        var cancels = 0
+        model.onCancelled = { cancels += 1 }
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        XCTAssertEqual(model.state, .capturing)
+        factory.made[0].emit(.cancelled)
+        await drain()
+        XCTAssertEqual(model.state, .capturing, "a cancelled change of content keeps sharing")
+        XCTAssertEqual(cancels, 0, "the app stays on the Share screen")
+        XCTAssertEqual(journal.lines, ["present t0"], "the session is not stopped")
         await model.stop()
     }
 
@@ -663,6 +700,45 @@ final class ShareModelLifecycleTests: XCTestCase {
         var waits = 0
         while model.snapshot.droppedLastSecond == 0, waits < 20 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
         XCTAssertGreaterThanOrEqual(model.snapshot.droppedLastSecond, 19, "every throw counts as a dropped frame")
+        // The raw picture goes on until Retry, and the stream may report a new size meanwhile (a window resized): the
+        // picture takes it, the failure stays.
+        factory.made[0].emit(.started(pixelWidth: 640, pixelHeight: 360, scale: 2))
+        await drain()
+        XCTAssertEqual(model.pixelSize, CGSize(width: 640, height: 360))
+        XCTAssertEqual(model.state, .failed("Video decoding keeps failing."), "only Retry ends a failure")
+        await model.stop()
+    }
+
+    /// The encoder takes two frames at a time and turns the next one away (`VideoEncoder.encode`), and the frame turned
+    /// away is the newest. Spec sections 5 and 8: the newest frame is the one that gets through. Frames that arrive back
+    /// to back while two are encoding, then a source that goes still (ScreenCaptureKit sends nothing more), leave the
+    /// loop showing the last frame captured, with its own capture time, not the one before it.
+    @MainActor
+    func testTheNewestFrameGetsThroughWhenTheEncoderIsBusyAndTheSourceGoesStill() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "s")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 1920, pixelHeight: 1080, scale: 2))
+        await drain()
+        model.loopback = true
+        var frames: [CapturedFrame] = []
+        for i in 0..<4 { frames.append(try solidFrame(index: i, width: 1920, height: 1080)) }
+        for frame in frames { source.emit(frame: frame) }   // back to back: more than the two the encoder takes at once
+        let newest = try XCTUnwrap(frames.last)
+        // The source is still from here on: nothing but the model can bring the newest frame through.
+        var waits = 0
+        while view.pacer.held?.captureHostTimeNs != newest.captureHostTimeNs, waits < 30 {
+            try await Task.sleep(for: .milliseconds(50)); waits += 1
+        }
+        let held = try XCTUnwrap(view.pacer.held)
+        XCTAssertEqual(held.captureHostTimeNs, newest.captureHostTimeNs, "the loop shows the newest frame captured")
+        XCTAssertTrue(held.compareWith === newest.pixelBuffer, "against the newest raw frame")
+        XCTAssertEqual(model.state, .capturing)
         await model.stop()
     }
 

@@ -36,4 +36,24 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(app.view)
         XCTAssertEqual(viewer?.state, .browsing)
     }
+
+    /// Quitting with nothing live quits at once.
+    @MainActor
+    func testQuitWithNothingLiveQuitsAtOnce() {
+        let app = AppModel()
+        var quits = 0
+        XCTAssertTrue(app.shouldQuitNow { quits += 1 })
+        XCTAssertEqual(quits, 0, "nothing to wait for: the app answers at once instead")
+    }
+
+    /// Esc's question names what it stops (`requestStop`): a share that keeps running behind the View screen is
+    /// stopped by the same confirmation, so the title says so.
+    func testTheStopQuestionNamesWhatStops() {
+        XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: false).question, "Stop sharing?")
+        XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: false).action, "Stop")
+        XCTAssertEqual(AppModel.stopWording(sharing: false, viewing: true).question, "Disconnect?")
+        XCTAssertEqual(AppModel.stopWording(sharing: false, viewing: true).action, "Disconnect")
+        XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: true).question, "Stop sharing and disconnect?")
+        XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: true).action, "Stop and Disconnect")
+    }
 }

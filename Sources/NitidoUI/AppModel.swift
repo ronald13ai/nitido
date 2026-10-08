@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+import os
+
+private let log = Logger(subsystem: "ai.ronar.nitido", category: "app")
 
 @MainActor @Observable
 public final class AppModel {
@@ -44,20 +47,56 @@ public final class AppModel {
     public func clearInk() { share?.ink.clearLocal(); view?.ink.clearLocal() }
 
     /// Detach before the await (Task 8 fix): a Share or View that lands while the old one is still stopping
-    /// keeps its own model instead of being cleared when this stop resumes.
+    /// keeps its own model instead of being cleared when this stop resumes. Returns once the other Mac has been told
+    /// `bye` (or its link gave up), so a quit (`shouldQuitNow`) does not cut the goodbye off.
     public func stop() async {
         let s = share, v = view
         share = nil; view = nil
         screen = .welcome
-        v?.disconnect()
+        await v?.disconnectAndWait()
         await s?.stop()
     }
 
-    /// Asks first ("Stop sharing?" or "Disconnect?", `RootView`) while a picture is being shared or a viewer is
-    /// connected or reconnecting; with nothing live (a picker, a list of Macs, a failure) it stops at once.
+    /// ⌘Q, or the window closing (the app quits with it, `AppDelegate`). With nothing live this answers true: quit now.
+    /// With a share or a viewer it answers false, stops them first so the other Mac is told `bye` instead of seeing a
+    /// dropped link it would keep reconnecting to, and calls `quit` once that is done, or after `deadline` at most.
+    public func shouldQuitNow(deadline: Duration = .seconds(2), then quit: @escaping @MainActor () -> Void) -> Bool {
+        guard share != nil || view != nil else { return true }
+        log.info("Quitting: stopping the live session first")
+        let once = Once(quit)
+        Task {
+            await stop()
+            once.run()
+        }
+        Task {
+            try? await Task.sleep(for: deadline)   // never cancelled; a stop that finished first has quit already
+            if once.pending { log.error("The session did not stop within \(deadline, privacy: .public); quitting anyway") }
+            once.run()
+        }
+        return false
+    }
+
+    private var sharing: Bool { share?.state == .capturing }
+    private var viewing: Bool {
+        view.map { if case .connected = $0.state { return true }; if case .reconnecting = $0.state { return true }; return false } ?? false
+    }
+
+    /// The confirmation's title and destructive button (`RootView`): what Esc stops. A share keeps running behind the
+    /// View screen (`startView`), and the same confirmation stops it, so the question names both.
+    nonisolated static func stopWording(sharing: Bool, viewing: Bool) -> (question: String, action: String) {
+        switch (sharing, viewing) {
+        case (true, true): ("Stop sharing and disconnect?", "Stop and Disconnect")
+        case (true, false): ("Stop sharing?", "Stop")
+        default: ("Disconnect?", "Disconnect")
+        }
+    }
+    public var stopQuestion: String { Self.stopWording(sharing: sharing, viewing: viewing).question }
+    public var stopAction: String { Self.stopWording(sharing: sharing, viewing: viewing).action }
+
+    /// Asks first (`stopQuestion`, `RootView`) while a picture is being shared or a viewer is connected or
+    /// reconnecting; with nothing live (a picker, a list of Macs, a failure) it stops at once.
     public func requestStop() {
-        let active = (share?.state == .capturing) || (view.map { if case .connected = $0.state { return true }; if case .reconnecting = $0.state { return true }; return false } ?? false)
-        if active { confirmStop = true } else { Task { await stop() } }
+        if sharing || viewing { confirmStop = true } else { Task { await stop() } }
     }
 
     /// The one entry point for Esc: the invisible in-window button on the Share and View screens and the Stop
@@ -81,11 +120,20 @@ public struct RootView: View {
             }
         }
         .background(KeepWindowOnScreen())
-        // Raised by `requestStop` (Esc, the Stop menu item) while something is live.
-        .confirmationDialog(app.screen == .view ? "Disconnect?" : "Stop sharing?", isPresented: $app.confirmStop) {
-            Button(app.screen == .view ? "Disconnect" : "Stop", role: .destructive) { Task { await app.stop() } }
+        // Raised by `requestStop` (Esc, the Stop menu item) while something is live; it names what stops.
+        .confirmationDialog(app.stopQuestion, isPresented: $app.confirmStop) {
+            Button(app.stopAction, role: .destructive) { Task { await app.stop() } }
         }
     }
+}
+
+/// Runs an action once, whichever of two paths gets there first (`AppModel.shouldQuitNow`).
+@MainActor
+private final class Once {
+    private var action: (@MainActor () -> Void)?
+    init(_ action: @escaping @MainActor () -> Void) { self.action = action }
+    var pending: Bool { action != nil }
+    func run() { let a = action; action = nil; a?() }
 }
 
 /// Esc inside the window. A menu item's Esc shortcut never fires while a window is key, so the Share and

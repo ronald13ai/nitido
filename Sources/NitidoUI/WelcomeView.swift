@@ -12,7 +12,7 @@ public struct WelcomeView: View {
                 VStack(spacing: 16) {
                     Text("Nítido").font(Theme.Fonts.wordmark(56)).foregroundStyle(Theme.Colors.text).appear()
                     Text("Share a screen to another Mac. Crisp text, measured latency, ink on top.")
-                        .font(.system(size: 13)).foregroundStyle(Theme.Colors.muted).appear(delay: Theme.Motion.stagger)
+                        .font(.system(size: 13)).foregroundStyle(Theme.Colors.secondaryText).appear(delay: Theme.Motion.stagger)
                     HStack(spacing: 12) {
                         GoldButton("Share", action: onShare)
                         QuietButton("View", action: onView)

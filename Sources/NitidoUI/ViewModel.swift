@@ -170,6 +170,14 @@ public final class ViewModel {
         state = .browsing
     }
 
+    /// `disconnect`, and returns once the sharer has been told `bye` (`LinkSession.closeAndWait`): a quit waits for it.
+    func disconnectAndWait() async {
+        let session = link
+        link = nil   // so `disconnect` leaves this session alone: it is closed here, and waited for
+        disconnect()
+        await session?.closeAndWait()
+    }
+
     deinit { browser.stop() }
 
     /// Says why the list may stay empty: Local Network off (discovery resumes by itself once it is allowed), or
