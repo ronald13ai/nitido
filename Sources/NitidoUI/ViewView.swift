@@ -74,7 +74,7 @@ public struct ViewView: View {
                 QuietButton("Back") { model.disconnect() }
                 GoldButton("Connect") { model.connect() }.disabled(!canConnect).opacity(canConnect ? 1 : 0.4)
             }
-            // ⏎ connects: the gold button draws its own capsule, so the default action sits on a hidden system button.
+            // ⏎ connects: the gold button draws its own shape, so the default action sits on a hidden system button.
             .background(DefaultAction { model.connect() })
         }
         .padding(40).frame(width: 520)

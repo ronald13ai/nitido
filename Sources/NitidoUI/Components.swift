@@ -35,6 +35,7 @@ public struct PressFeedback: ButtonStyle {
     }
 }
 
+/// The way forward. Spec 11: controls take the 10 pt control radius, as the rows and notices beside them do.
 public struct GoldButton: View {
     let title: String, action: () -> Void
     public init(_ title: String, action: @escaping () -> Void) { self.title = title; self.action = action }
@@ -42,7 +43,7 @@ public struct GoldButton: View {
         Button(action: action) {
             Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.Colors.background)
                 .padding(.horizontal, 22).padding(.vertical, 9)
-                .background(Theme.Colors.goldGradient, in: Capsule())
+                .background(Theme.Colors.goldGradient, in: RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
         }.buttonStyle(PressFeedback())
     }
 }
@@ -54,7 +55,8 @@ public struct QuietButton: View {
         Button(action: action) {
             Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.Colors.text)
                 .padding(.horizontal, 22).padding(.vertical, 9)
-                .overlay(Capsule().stroke(Theme.Colors.hairline, lineWidth: 1))
+                // A border, not a stroke: the 1 pt line stays inside the button's bounds instead of straddling them.
+                .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous).strokeBorder(Theme.Colors.hairline, lineWidth: 1))
         }.buttonStyle(PressFeedback())
     }
 }
