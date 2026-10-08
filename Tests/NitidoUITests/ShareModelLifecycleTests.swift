@@ -202,10 +202,22 @@ private final class Factory {
     var liveCount: Int { weakMade.filter { $0.value != nil }.count }
 }
 
+private struct TimedOut: Error {}
+
 final class ShareModelLifecycleTests: XCTestCase {
     @MainActor
     private func drain() async {
         for _ in 0..<50 { await Task.yield() }
+    }
+
+    /// Polls every 5 ms, so a test can wait for each of several quick steps (a decode on the decoder's queue) in turn.
+    @MainActor
+    private func waitUntil(_ what: String, timeout: Double = 5, _ condition: () -> Bool) async throws {
+        let deadline = CACurrentMediaTime() + timeout
+        while !condition() {
+            guard CACurrentMediaTime() < deadline else { XCTFail("timed out waiting until \(what)"); throw TimedOut() }
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     /// Share twice while the picker is up: one session, one picker.
@@ -693,18 +705,27 @@ final class ShareModelLifecycleTests: XCTestCase {
             EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]),
                          parameterSets: key.parameterSets, codec: key.codec, width: key.width, height: key.height)
         }
-        for seq in 0..<9 { model.handleEncoded(unreadable(UInt32(seq))) }
+        // Decoding runs on the decoder's queue: each failure lands (and lets that decoder go) before the next frame,
+        // whose setup then makes a fresh decoder, as the keyframe the loop asks for would.
+        func fail(_ seq: UInt32) async throws {
+            let before = model.decodeFailures
+            model.handleEncoded(unreadable(seq))
+            try await waitUntil("frame \(seq) fails") { model.decodeFailures > before || model.state != .capturing }
+        }
+        for seq in 0..<9 { try await fail(UInt32(seq)) }
+        XCTAssertEqual(model.decodeFailures, 9)
         XCTAssertEqual(model.state, .capturing, "nine throws in a row leave the share running")
         model.handleEncoded(key)
-        for seq in 10..<19 { model.handleEncoded(unreadable(UInt32(seq))) }
+        try await waitUntil("the keyframe is decoded") { model.decodeFailures == 0 }
+        for seq in 10..<19 { try await fail(UInt32(seq)) }
         XCTAssertEqual(model.state, .capturing, "a frame decoded in between starts the count again")
-        model.handleEncoded(unreadable(19))
+        try await fail(19)
         XCTAssertEqual(model.state, .failed("Video decoding keeps failing."))
         XCTAssertEqual(model.codecLabel, "raw")
         XCTAssertNil(model.codecMs)
-        // The snapshot loop publishes the dropped figure every 250 ms.
+        // The snapshot loop publishes the dropped figure every 250 ms, and one may land between the failures.
         var waits = 0
-        while model.snapshot.droppedLastSecond == 0, waits < 20 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        while model.snapshot.droppedLastSecond < 19, waits < 20 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
         XCTAssertGreaterThanOrEqual(model.snapshot.droppedLastSecond, 19, "every throw counts as a dropped frame")
         // The raw picture goes on until Retry, and the stream may report a new size meanwhile (a window resized): the
         // picture takes it, the failure stays.

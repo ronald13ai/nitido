@@ -474,7 +474,13 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.pixelSize, CGSize(width: 320, height: 180))
         // Real parameter sets built a decoder that works; this data is not a picture, so `decode` throws.
         let unreadable = VideoFrame(seq: 1, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]))
-        for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+        // Decoding runs on the decoder's queue: each batch of failures lands before the next step.
+        func failThree() async throws {
+            let before = viewer.decodeFailures
+            for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+            try await waitUntil("three frames fail") { viewer.decodeFailures == before + 3 }
+        }
+        try await failThree()
         // The third throw let the decoder go: until the setup comes again, a keyframe decodes nothing and is no failure.
         viewer.handleIncoming(.videoFrame(key.videoFrame))
         try await Task.sleep(for: .milliseconds(300))
@@ -483,18 +489,21 @@ final class ViewerLinkTests: XCTestCase {
         // Stands in for the sharer's answer to each keyframe request: a keyframe carries its setup (`videoConfig`).
         viewer.handleIncoming(.videoConfig(config))
         for _ in 0..<2 {
-            for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+            try await failThree()
             viewer.handleIncoming(.videoConfig(config))
         }
+        XCTAssertEqual(viewer.decodeFailures, 9)
         XCTAssertEqual(viewer.state, .connected, "nine throws in a row leave the link up")
         viewer.handleIncoming(.videoFrame(key.videoFrame))
         try await waitUntil("the fresh decoder shows the keyframe") { shown.count >= 1 }
+        XCTAssertEqual(viewer.decodeFailures, 0)
         for _ in 0..<3 {
-            for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+            try await failThree()
             viewer.handleIncoming(.videoConfig(config))
         }
         XCTAssertEqual(viewer.state, .connected, "a frame decoded in between starts the count again")
         viewer.handleIncoming(.videoFrame(unreadable))
+        try await waitUntil("the tenth failure lands") { viewer.state != .connected }
         XCTAssertEqual(viewer.state, .failed("Video decoding keeps failing.", nil))
         XCTAssertEqual(viewer.pixelSize, .zero)
         try await waitUntil("the strip counts every throw as dropped") { viewer.snapshot.droppedLastSecond >= 19 }

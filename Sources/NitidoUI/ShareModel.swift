@@ -74,8 +74,11 @@ public final class ShareModel {
     public private(set) var codecNotice: String?
     /// Frames the encoder failed, dropped or emitted empty in a row; ten fail the share (`handleCodecError`).
     private var encodeFailures = 0
-    /// Frames the decoder threw on in a row; ten fail the share (`handleEncoded`). Only a frame decoded resets it.
-    private var decodeFailures = 0
+    /// Frames the loop's decoder could not read in a row; ten fail the share (`loopDecodeFailed`). Only a frame decoded
+    /// resets it. Internal, not private, so a test can wait for a failure to land.
+    private(set) var decodeFailures = 0
+    /// When the loop last asked the encoder for a keyframe because its decoder skipped frames (`handleEncoded`).
+    @ObservationIgnored private var loopKeyframeAskedAt: CFTimeInterval?
     /// The share failed because its capture ended (`CaptureEvent.failed`: Stop Sharing in the menu bar, a stream that
     /// stopped, or one that could not start or change). The session's picker is still up, and a new pick from it
     /// (`.started`) resumes the share without Retry. A codec or listener failure does not set it: the stream it leaves
@@ -398,30 +401,51 @@ public final class ShareModel {
         }
         guard loopback else { return }
         if let cfg = f.videoConfig, cfg != decoderConfig {
+            let d: VideoDecoder
             do {
-                decoder = try VideoDecoder(config: cfg); decoderConfig = cfg
+                d = try VideoDecoder(config: cfg)
             } catch {
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
                 state = .failed("Decoder: \(error)"); endViewers(); return
             }
-            decoder?.onFrame = { [weak self] d in Task { @MainActor in self?.handleDecoded(d) } }
-            decoder?.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
+            decoder?.invalidate()
+            decoder = d; decoderConfig = cfg
+            // The decoder works on its own queue. Pictures and failures hop to the main actor through the main queue,
+            // which keeps them in decode order (a task each would not).
+            d.onFrame = { [weak self, weak d] frame in
+                DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.handleDecoded(frame, by: d) } } }
+            }
+            d.onDecodeFailure = { [weak self, weak d] seq, error in
+                DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.loopDecodeFailed(d, seq: seq, error: error) } } }
+            }
+            d.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
         }
         guard let decoder else { return }
-        do {
-            try decoder.decode(f.videoFrame)
-            decodeFailures = 0
-        } catch {
-            // While the loop is on only decoded frames reach the screen, so a decoder that keeps throwing freezes the
-            // picture: ten in a row fail the share with Retry, like the encoder (and the viewer's rule in Task 14).
-            log.error("the video decoder could not decode frame \(f.seq, privacy: .public): \(String(describing: error), privacy: .public)")
+        if case .skipped(let first) = decoder.submit(f.videoFrame) {
+            // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped. The first
+            // one asks for that keyframe; a later one asks again once a second has passed.
             telemetry.recordDrop(at: now)
             encodeStarts.removeValue(forKey: f.seq)   // this frame never decodes
-            decoder.invalidate(); self.decoder = nil; decoderConfig = nil
-            decodeFailures += 1
-            if decodeFailures >= 10 { failCodec("decoder", message: "Video decoding keeps failing."); return }
-            encoder?.requestKeyframe()
+            if first || loopKeyframeAskedAt.map({ now - $0 >= 1 }) ?? true {
+                loopKeyframeAskedAt = now
+                encoder?.requestKeyframe()
+            }
         }
+    }
+
+    /// A frame the loop's decoder could not read (`VideoDecoder.onDecodeFailure`, which logged it). While the loop is on
+    /// only decoded frames reach the screen, so a decoder that keeps failing freezes the picture: the decoder is let
+    /// go, the encoder asked for a keyframe (whose setup makes a fresh decoder), and ten in a row fail the share with
+    /// Retry, like the encoder (and the viewer's rule, `ViewModel.decodeFailed`). A decoder let go already says nothing
+    /// about the current one.
+    private func loopDecodeFailed(_ d: VideoDecoder, seq: UInt32, error: CodecError) {
+        guard d === decoder else { return }
+        telemetry.recordDrop(at: CACurrentMediaTime())
+        encodeStarts.removeValue(forKey: seq)   // this frame never decodes
+        d.invalidate(); decoder = nil; decoderConfig = nil
+        decodeFailures += 1
+        if decodeFailures >= 10 { failCodec("decoder", message: "Video decoding keeps failing."); return }
+        encoder?.requestKeyframe()
     }
 
     /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode again.
@@ -474,7 +498,11 @@ public final class ShareModel {
         encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); newestPending = false
     }
 
-    private func handleDecoded(_ d: DecodedFrame) {
+    /// A picture from the loop's decoder, in decode order.
+    private func handleDecoded(_ d: DecodedFrame, by source: VideoDecoder) {
+        // A decoder let go since (the loop off, a failure, a new setup) shows nothing more.
+        guard source === decoder else { return }
+        decodeFailures = 0
         // A frame decoded after the loop was turned off (or the share failed) would put the comparison back on
         // screen, and a still source would leave it there: the raw picture already took its place.
         guard loopback, state == .capturing else { return }
@@ -522,7 +550,8 @@ public final class ShareModel {
     /// from an encoder made at the new rate: that is the picture a viewer joining at this quality gets. A keyframe from
     /// the running encoder would barely change: its rate control carries the old rate's quality over and moves away
     /// from it only over many frames (60 then 2 Mbps gave a 2 Mbps keyframe as sharp as the 60 Mbps one). Once per
-    /// rest, not once per slider step.
+    /// rest, not once per slider step. The new encoder is made here, on the main actor (a hardware session and its
+    /// prepare): that happens once per rest and only over a still source, where nothing moves that it could delay.
     private func qualityRested() {
         guard loopback, state == .capturing, encoder != nil, let raw = latestRaw,
               CACurrentMediaTime() - lastCaptureAt >= Self.stillAfter else { return }

@@ -49,9 +49,13 @@ public final class ViewModel {
     private var linkTasks: [Task<Void, Never>] = []
     private var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
-    /// Frames the decoder threw on in a row; every third lets the decoder go for a fresh one, ten end the link
-    /// (`handleIncoming`). A frame decoded, the session ready again, or leaving, resets it.
-    private var decodeFailures = 0
+    /// Frames the decoder could not read in a row; every third lets the decoder go for a fresh one, ten end the link
+    /// (`decodeFailed`). A frame decoded, the session ready again, or leaving, resets it. Internal, not private, so a
+    /// test can wait for a failure to land.
+    private(set) var decodeFailures = 0
+    /// When the viewer last asked the sharer for a keyframe: a decoder that keeps skipping asks again only once a
+    /// second has passed (`handleIncoming`).
+    @ObservationIgnored private var keyframeAskedAt: CFTimeInterval?
     private var telemetry = Telemetry(now: CACurrentMediaTime())
     private var tasks: [Task<Void, Never>] = []
 
@@ -194,7 +198,7 @@ public final class ViewModel {
     private func sessionStateChanged(_ s: LinkSession.State, peer: Peer) {
         switch s {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
-        case .ready: state = .connected; connectionCount += 1; decodeFailures = 0; link?.send(.keyframeRequest)
+        case .ready: state = .connected; connectionCount += 1; decodeFailures = 0; askForKeyframe()
         case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
         case .codeRejected:
             // The handshake failed on the keys: the code is wrong. Back to the code for that Mac, where the field
@@ -220,7 +224,14 @@ public final class ViewModel {
                 decoder?.invalidate()
                 codecNotice = nil
                 let d = try VideoDecoder(config: cfg)
-                d.onFrame = { [weak self] frame in Task { @MainActor in self?.sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs) } }
+                // The decoder works on its own queue. Pictures and failures hop to the main actor through the main
+                // queue, which keeps them in decode order (a task each would not).
+                d.onFrame = { [weak self, weak d] frame in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.decoded(frame, by: d) } } }
+                }
+                d.onDecodeFailure = { [weak self, weak d] seq, error in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.decodeFailed(d, seq: seq, error: error) } } }
+                }
                 // A RealTime setting rejected inside `init` arrives the moment this is set: hop to the main actor.
                 d.onError = { [weak self] err in Task { @MainActor in self?.handleDecoderError(err) } }
                 decoder = d; decoderConfig = cfg
@@ -234,27 +245,15 @@ public final class ViewModel {
             }
         case .videoFrame(let f):
             telemetry.recordCapture(at: now); telemetry.recordBytes(f.data.count, at: now)
-            guard let decoder else { link?.send(.keyframeRequest); return }
-            do {
-                try decoder.decode(f)
-                decodeFailures = 0
-            } catch {
-                // `VideoDecoder.decode` does not log what it throws. A decoder that keeps throwing would freeze the
-                // picture without a word and ask for a keyframe on every frame: each throw is logged and counted as
-                // dropped, and ten in a row end the link and say so, as on the sharing side (`ShareModel.handleEncoded`).
-                // Every third one lets the decoder go: the keyframe asked for carries the video setup, which makes a
-                // fresh one (`.videoConfig`).
-                log.error("the video decoder could not decode frame \(f.seq, privacy: .public): \(String(describing: error), privacy: .public)")
+            guard let decoder else { askForKeyframe(); return }
+            // Decoded off the main actor (`decoded`, `decodeFailed`), so ink, cursor and the presented handlers the
+            // pacer depends on never wait behind a hardware decode.
+            if case .skipped(let first) = decoder.submit(f) {
+                // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped. The
+                // first one asks for that keyframe; a later one asks again once a second has passed, so a lost request
+                // cannot freeze the picture.
                 telemetry.recordDrop(at: now)
-                decodeFailures += 1
-                guard decodeFailures < 10 else {
-                    log.error("the video decoder failed 10 frames in a row; ending the link")
-                    disconnect()
-                    state = .failed("Video decoding keeps failing.", nil)
-                    return
-                }
-                if decodeFailures % 3 == 0 { decoder.invalidate(); self.decoder = nil; decoderConfig = nil }
-                link?.send(.keyframeRequest)
+                if first || keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
             }
         case .stroke(let s): ink.applyRemote(s)
         case .undo(let id): ink.undoRemote(id: id)
@@ -262,6 +261,38 @@ public final class ViewModel {
         case .cursor(let c): ink.remoteCursor(c, name: sharerName)
         default: break
         }
+    }
+
+    private func askForKeyframe() {
+        keyframeAskedAt = CACurrentMediaTime()
+        link?.send(.keyframeRequest)
+    }
+
+    /// A picture from the decoder, in decode order. A decoder let go since (a new setup, every third failure, the link
+    /// ended) shows nothing more.
+    private func decoded(_ frame: DecodedFrame, by d: VideoDecoder) {
+        guard d === decoder else { return }
+        decodeFailures = 0
+        sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
+    }
+
+    /// A frame the decoder could not read (`VideoDecoder.onDecodeFailure`, which logged it). A decoder that keeps failing
+    /// would freeze the picture without a word and ask for a keyframe on every frame: each failure counts as dropped,
+    /// and ten in a row end the link and say so, as on the sharing side (`ShareModel.loopDecodeFailed`). Every third
+    /// one lets the decoder go: the keyframe asked for carries the video setup, which makes a fresh one
+    /// (`.videoConfig`). A decoder let go already says nothing about the current one.
+    private func decodeFailed(_ d: VideoDecoder, seq: UInt32, error: CodecError) {
+        guard d === decoder else { return }
+        telemetry.recordDrop(at: CACurrentMediaTime())
+        decodeFailures += 1
+        guard decodeFailures < 10 else {
+            log.error("the video decoder failed 10 frames in a row; ending the link")
+            disconnect()
+            state = .failed("Video decoding keeps failing.", nil)
+            return
+        }
+        if decodeFailures % 3 == 0 { d.invalidate(); decoder = nil; decoderConfig = nil }
+        askForKeyframe()
     }
 
     /// Decoder failures that are not thrown (Task 9's `onError`); the codec has logged them. A rejected setting leaves
