@@ -14,12 +14,37 @@ public struct DecodedFrame: @unchecked Sendable {
 }
 
 /// Hardware decoder built from a `VideoConfig`. Rebuild it whenever a new config arrives.
+///
+/// `submit(_:)` is the way in for a stream: it decodes on the decoder's own serial queue, in the order the frames came
+/// (inter-coded frames refer to the ones before them, so none can be skipped on its own), and it drops work rather than
+/// queue it (spec 4): past `maxPending` frames waiting it skips to the next keyframe, and the caller asks for one. The
+/// renderer then shows the newest decoded frame. `decode(_:)` decodes one frame on the calling thread.
+///
 /// Thread-safe: every member may be used from any thread, including `invalidate()` while another
 /// thread is inside `decode(_:)`.
 public final class VideoDecoder: @unchecked Sendable {
+    /// What `submit(_:)` did with a frame.
+    public enum SubmitResult: Sendable, Equatable {
+        /// The frame waits for, or is in, the decoder's queue.
+        case queued
+        /// The frame is not decoded: `maxPending` frames were waiting, or a skip began and no keyframe has ended it
+        /// yet. `askForKeyframe` is true for the frame that began the skip, false for the ones after it.
+        case skipped(askForKeyframe: Bool)
+    }
+
+    /// At most this many frames since the newest keyframe wait for, or are in, the queue (`submit`).
+    static let maxPending = 3
+
+    /// Called on the decoder's queue, in decode order, by `submit(_:)` and `decode(_:)`.
     public var onFrame: (@Sendable (DecodedFrame) -> Void)? {
         get { lock.withLock { frameHandler } }
         set { lock.withLock { frameHandler = newValue } }
+    }
+    /// A frame `submit(_:)` could not decode (bad data), with its sequence number. Called on the decoder's queue, in
+    /// decode order; each one is logged here. Frames cut short by `invalidate()` are not failures and are not reported.
+    public var onDecodeFailure: (@Sendable (_ seq: UInt32, _ error: CodecError) -> Void)? {
+        get { lock.withLock { decodeFailureHandler } }
+        set { lock.withLock { decodeFailureHandler = newValue } }
     }
     /// Failures `init` and `decode(_:)` do not throw: a tuning property VideoToolbox rejected in
     /// `init` (RealTime; the decoder still works without it). Each one is also logged. Failures
@@ -34,7 +59,16 @@ public final class VideoDecoder: @unchecked Sendable {
     // Guarded by `lock`. VideoToolbox is never called while it is held.
     private var session: VTDecompressionSession?
     private var frameHandler: (@Sendable (DecodedFrame) -> Void)?
+    private var decodeFailureHandler: (@Sendable (UInt32, CodecError) -> Void)?
+    /// Frames submitted since the newest keyframe that have not been decoded yet.
+    private var pending = 0
+    /// A frame was skipped, so every delta up to the next keyframe is too: it refers to the skipped one.
+    private var skipping = false
+    /// Bumped by every keyframe submitted. Nothing after a keyframe refers to the frames before it: they still decode,
+    /// but no longer count in `pending`.
+    private var keyEpoch: UInt64 = 0
     private let format: CMVideoFormatDescription
+    private let queue = DispatchQueue(label: "ai.ronar.nitido.decoder", qos: .userInteractive)
 
     public init(config: VideoConfig) throws {
         let sets = config.parameterSets
@@ -68,8 +102,44 @@ public final class VideoDecoder: @unchecked Sendable {
         }
     }
 
-    /// Synchronous: `onFrame` fires before this returns. Throws on malformed data.
-    public func decode(_ frame: VideoFrame) throws {
+    /// Decodes `frame` on the decoder's queue, after every frame submitted before it, and hands the picture to
+    /// `onFrame` (a failure to `onDecodeFailure`). A keyframe is always queued, and ends a skip. A delta is skipped
+    /// while `maxPending` frames since the newest keyframe are waiting, and so is every delta after it until the next
+    /// keyframe; the first one skipped says to ask for that keyframe. Never blocks the caller.
+    @discardableResult
+    public func submit(_ frame: VideoFrame) -> SubmitResult {
+        let admitted: (epoch: UInt64?, result: SubmitResult) = lock.withLock {
+            if frame.isKey {
+                skipping = false; keyEpoch &+= 1; pending = 0
+            } else if skipping {
+                return (nil, .skipped(askForKeyframe: false))
+            } else if pending >= Self.maxPending {
+                skipping = true
+                return (nil, .skipped(askForKeyframe: true))
+            }
+            pending += 1
+            return (keyEpoch, .queued)
+        }
+        guard let epoch = admitted.epoch else { return admitted.result }
+        queue.async { [self] in
+            defer { lock.withLock { if keyEpoch == epoch { pending -= 1 } } }
+            do throws(CodecError) {
+                try decode(frame)
+            } catch {
+                guard lock.withLock({ session != nil }) else {
+                    log.debug("frame \(frame.seq) ended by invalidate: \(String(describing: error))")
+                    return
+                }
+                log.error("could not decode frame \(frame.seq, privacy: .public): \(String(describing: error), privacy: .public)")
+                onDecodeFailure?(frame.seq, error)
+            }
+        }
+        return .queued
+    }
+
+    /// Decodes on the calling thread: `onFrame` fires before this returns. Throws on malformed data. A stream goes
+    /// through `submit(_:)`, which runs this on the decoder's queue.
+    public func decode(_ frame: VideoFrame) throws(CodecError) {
         guard let session = lock.withLock({ self.session }) else { return }
         let data = frame.data
         var block: CMBlockBuffer?
@@ -109,12 +179,20 @@ public final class VideoDecoder: @unchecked Sendable {
     }
 
     /// Releases the session. Safe to call while another thread is decoding; later calls to
-    /// `decode` return without decoding.
+    /// `decode` return without decoding, and frames still waiting in the queue end without a word.
     public func invalidate() {
         let taken: VTDecompressionSession? = lock.withLock { defer { session = nil }; return session }
         guard let taken else { return }
         VTDecompressionSessionInvalidate(taken)
     }
+
+    // MARK: Test seams
+
+    /// Test only: holds the queue, as a stall would; frames submitted meanwhile wait.
+    func suspendForTesting() { queue.suspend() }
+    func resumeForTesting() { queue.resume() }
+    /// Test only: returns once every frame submitted so far has been decoded and no longer counts as waiting.
+    func drainForTesting() { queue.sync {} }
 
     deinit { invalidate() }
 }
