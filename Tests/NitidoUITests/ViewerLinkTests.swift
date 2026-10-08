@@ -1070,7 +1070,7 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the sharer sends to the viewer") { share.isSending }
         viewer.handleIncoming(.videoConfig(VideoConfig(codec: .hevc, width: 320, height: 180, parameterSets: [Data([0, 1, 2])])))
         guard case .failed(let message, let peer) = viewer.state else { return XCTFail("expected a failure, got \(viewer.state)") }
-        XCTAssertTrue(message.hasPrefix("Could not start the video decoder"), message)
+        XCTAssertTrue(message.hasPrefix("The video decoder could not start. The video setup could not be read (error "), message)
         XCTAssertEqual(peer, self.peer(for: share), "Reconnect goes back to the same Mac")
         XCTAssertTrue(viewer.failureOffersReconnect)
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }

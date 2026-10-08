@@ -285,7 +285,7 @@ public final class ViewModel {
             sharerName = h.name; scale = h.scale.isFinite && (1...8).contains(h.scale) ? CGFloat(h.scale) : 2
         case .videoConfig(let cfg):
             guard cfg != decoderConfig else { return }
-            do {
+            do throws(CodecError) {
                 decoder?.invalidate()
                 codecNotice = nil
                 let d = try VideoDecoder(config: cfg)
@@ -306,7 +306,7 @@ public final class ViewModel {
                 // Nothing on this link can be shown any more: end it, so it does not go on sending to nobody. A fresh
                 // session brings the setup again, so the failure offers to reconnect to the same Mac.
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
-                failForDecoder("Could not start the video decoder: \(error)")
+                failForDecoder("The video decoder could not start. \(error.plainDescription)")
             }
         case .videoFrame(let f):
             // The strip's first figure on the viewer is frames received (`ViewView` labels it so), not captured.
@@ -389,9 +389,9 @@ public final class ViewModel {
     private func handleDecoderError(_ error: CodecError) {
         switch error {
         case .property(let key, let status):
-            codecNotice = "The video decoder rejected its \(key) setting (\(status)); the picture goes on without it."
+            codecNotice = "The video decoder rejected its \(CodecError.settingName(key)) setting (error \(status)); the picture goes on without it."
         default:
-            codecNotice = "Video decoder: \(error)"
+            codecNotice = error.plainDescription
         }
     }
 }

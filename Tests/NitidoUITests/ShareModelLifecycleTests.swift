@@ -799,6 +799,29 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// Spec 9: a setting VideoToolbox rejects is said over the picture in plain language, not with its key.
+    @MainActor
+    func testARejectedSettingIsSaidInPlainLanguage() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "y")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 0))
+        try await waitUntil("the loop makes an encoder") { model.encoder != nil }
+        model.encoder?.setBitrate(-1)
+        try await waitUntil("the rejected setting is said") { model.codecNotice != nil }
+        let notice = try XCTUnwrap(model.codecNotice)
+        XCTAssertTrue(notice.contains("average bitrate"), notice)
+        XCTAssertFalse(notice.contains("AverageBitRate"), notice)
+        XCTAssertFalse(notice.contains("DataRateLimits"), notice)
+        await model.stop()
+    }
+
     /// The encoder takes two frames at a time and turns the next one away (`VideoEncoder.encode`), and the frame turned
     /// away is the newest. Spec sections 5 and 8: the newest frame is the one that gets through. Frames that arrive back
     /// to back while two are encoding, then a source that goes still (ScreenCaptureKit sends nothing more), leave the

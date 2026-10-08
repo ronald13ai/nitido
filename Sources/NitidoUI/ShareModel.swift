@@ -373,7 +373,7 @@ public final class ShareModel {
     private func makeEncoder(width: Int, height: Int) {
         encoder?.invalidate(); decoder?.invalidate(); decoder = nil; decoderConfig = nil
         codecNotice = nil; encodeFailures = 0; decodeFailures = 0
-        do {
+        do throws(CodecError) {
             let bitsPerSecond = loopback ? Int(qualityMbps * 1_000_000) : BitrateController.initialBitrate(width: width, height: height)
             let e = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: bitsPerSecond)
             e.onFrame = { [weak self] f in Task { @MainActor in self?.handleEncoded(f) } }
@@ -387,7 +387,7 @@ public final class ShareModel {
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
         } catch {
             log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
-            state = .failed("Hardware video encoder unavailable: \(error)")
+            state = .failed("The hardware video encoder could not start. \(error.plainDescription)")
             endViewers()
         }
     }
@@ -422,11 +422,11 @@ public final class ShareModel {
         guard loopback else { return }
         if let cfg = f.videoConfig, cfg != decoderConfig {
             let d: VideoDecoder
-            do {
+            do throws(CodecError) {
                 d = try VideoDecoder(config: cfg)
             } catch {
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
-                state = .failed("Decoder: \(error)"); endViewers(); return
+                state = .failed("The video decoder could not start. \(error.plainDescription)"); endViewers(); return
             }
             decoder?.invalidate()
             decoder = d; decoderConfig = cfg
@@ -502,9 +502,9 @@ public final class ShareModel {
             // a share retired): a late failure from it makes no new one.
             if encoder != nil { encodePendingNewest() }
         case .property(let key, let status):
-            codecNotice = "The video \(part) rejected its \(key) setting (\(status)); the picture goes on without it."
+            codecNotice = "The video \(part) rejected its \(CodecError.settingName(key)) setting (error \(status)); the picture goes on without it."
         case .sessionCreate, .decode, .formatDescription, .prepare:
-            codecNotice = "Video \(part): \(error)"   // Task 9 throws these instead; shown all the same if one ever arrives
+            codecNotice = error.plainDescription   // Task 9 throws these instead; shown all the same if one ever arrives
         }
     }
 
@@ -751,13 +751,13 @@ public final class ShareModel {
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
                 // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was. A link that was the
                 // viewer's had proved the code, so only these count as failed handshakes.
-                log.info("a connection ended before it proved the code: \(m)")
+                log.info("a connection ended before it proved the code: \(m, privacy: .public)")
                 failedHandshakes += 1; if failedHandshakes >= 3 { rotateCode() }
                 return
             }
             guard l === link else { return }
             // Gone without `bye`: a viewer reconnects by itself (`LinkSession`), so it is shown as reconnecting.
-            isSending = false; link = nil; log.info("viewer link failed: \(m)")
+            isSending = false; link = nil; log.info("viewer link failed: \(m, privacy: .public)")
             viewerReconnecting = true
             reconnectGraceToken &+= 1
             let token = reconnectGraceToken, grace = reconnectGrace
