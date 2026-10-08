@@ -36,7 +36,9 @@ protocol FrameDrawing: AnyObject {
 /// `.backlog` drop) and is drawn at once into the empty queue, which brings latency back to one refresh; if none
 /// comes, the source went still and the held-back frame is drawn then. A frame that waited only because the
 /// presented handler reached the main actor after it is drawn at once. If frames keep starving at the cap, the
-/// display keeps each drawable longer than a refresh, and the cap rises by one, up to the pool size minus one.
+/// display keeps each drawable longer than a refresh, and the cap rises by one, up to the pool size minus one. It
+/// steps back down by one after ten seconds without starving, so a transient (a Space switch, Mission Control, a
+/// main-thread hitch) does not cost a refresh of latency for the rest of the session.
 @MainActor
 final class FramePacer {
     struct Frame {
@@ -60,6 +62,9 @@ final class FramePacer {
     static let lateFrameGrace: CFTimeInterval = 1.0 / 60
     /// Drawable returns in a row that find a frame starved before one more drawable may be in flight.
     static let starvedReturnsBeforeRaise = 6
+    /// Drawable returns in a row without a starved frame (about ten seconds at 60 Hz) before one drawable fewer may be
+    /// in flight again.
+    static let healthyReturnsBeforeLower = 600
 
     weak var host: (any FrameDrawing)?
     var now: () -> CFTimeInterval = { CACurrentMediaTime() }
@@ -92,6 +97,14 @@ final class FramePacer {
     private var replacedSinceReturn = false
     /// Drawable returns in a row that found a live frame starved: late, or replacing another while it waited.
     private var starvedReturns = 0
+    /// Drawable returns in a row that found no live frame starved.
+    private var healthyReturns = 0
+    /// Healthy returns in a row that lower the cap. Doubles (up to `longestWaitBeforeLower`) each time the cap has to
+    /// rise again before this many returns have passed since it was lowered: that display needs the deeper queue.
+    private var lowerAfter = FramePacer.healthyReturnsBeforeLower
+    private static let longestWaitBeforeLower = 8 * FramePacer.healthyReturnsBeforeLower
+    /// Drawable returns since the cap was last lowered; nil until it first is.
+    private var returnsSinceLower: Int?
     /// Presented time of the last drawable shown, for the spacing in the debug log.
     private var lastPresentedAt: Double = 0
     /// When the newest frame reached `present`: a divider move waits for the frame after it (`moveDivider`).
@@ -240,14 +253,24 @@ final class FramePacer {
         }
     }
 
-    /// Counts drawable returns that found a live frame starved; enough in a row raise the cap by one.
+    /// Counts drawable returns that found a live frame starved; enough in a row raise the cap by one. Enough in a row
+    /// that found none (`lowerAfter`) lower it by one again, never below one.
     private func noteReturn(starved: Bool) {
         replacedSinceReturn = false
+        returnsSinceLower = returnsSinceLower.map { $0 + 1 }
         starvedReturns = starved ? starvedReturns + 1 : 0
-        guard starvedReturns >= Self.starvedReturnsBeforeRaise, let host, cap < max(1, host.drawableCount - 1) else { return }
-        cap += 1
-        starvedReturns = 0
-        log.info("Frames kept waiting for a drawable: the display holds each one longer than a refresh. Allowing \(self.cap, privacy: .public) in flight")
+        healthyReturns = starved ? 0 : healthyReturns + 1
+        if starvedReturns >= Self.starvedReturnsBeforeRaise, let host, cap < max(1, host.drawableCount - 1) {
+            cap += 1
+            starvedReturns = 0
+            if let since = returnsSinceLower, since < lowerAfter { lowerAfter = min(2 * lowerAfter, Self.longestWaitBeforeLower) }
+            log.info("Frames kept waiting for a drawable: the display holds each one longer than a refresh. Allowing \(self.cap, privacy: .public) in flight")
+        } else if cap > 1, healthyReturns >= lowerAfter {
+            cap -= 1
+            healthyReturns = 0
+            returnsSinceLower = 0
+            log.info("Drawables come back in time again: allowing \(self.cap, privacy: .public) in flight")
+        }
     }
 
     private func submit(_ frame: Frame, kind: Kind) {

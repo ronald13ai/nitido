@@ -784,6 +784,65 @@ final class FramePacerTests: XCTestCase {
         }
     }
 
+    /// A raised cap is not for the rest of the session: ten seconds of drawable returns without a starved frame (600
+    /// at 60 Hz) lower it by one again, so a transient (a Space switch, Mission Control, a main-thread hitch) costs a
+    /// refresh of latency for ten seconds, not for good. A cap that has to rise again right after it was lowered waits
+    /// twice as long before the next try, so a display that needs the deeper queue is probed rarely.
+    @MainActor
+    func testCapStepsBackDownAfterTenSecondsWithoutStarving() throws {
+        let host = FakeDrawing()
+        host.drawableCount = 3
+        let pacer = FramePacer()
+        pacer.host = host
+        var clock = 10.0
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        let buffer = try makeBuffer()
+        var ns: UInt64 = 1
+        pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+        var shownNs = ns
+
+        /// Each frame waits through a refresh at the cap, then a newer one replaces it: one starved return each.
+        func starve(_ count: Int) {
+            for _ in 0..<count {
+                clock += 0.002; ns += 1
+                pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+                clock += 0.015
+                pacer.drawableReturned(kind: .live, captureHostTimeNs: shownNs, presentedAt: clock - 0.0005)
+                clock += 0.002; ns += 1
+                pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+                shownNs = ns
+            }
+        }
+        /// A drawable comes back before the next frame waited through a refresh: one return without starving each.
+        func healthy(_ count: Int) {
+            for _ in 0..<count {
+                clock += 0.010; ns += 1
+                pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+                pacer.drawableReturned(kind: .live, captureHostTimeNs: shownNs, presentedAt: clock - 0.005)
+                shownNs = ns
+            }
+        }
+
+        starve(FramePacer.starvedReturnsBeforeRaise)
+        XCTAssertEqual(pacer.cap, 2)
+        healthy(FramePacer.healthyReturnsBeforeLower - 1)
+        XCTAssertEqual(pacer.cap, 2, "not before ten seconds without starving")
+        healthy(1)
+        XCTAssertEqual(pacer.cap, 1, "ten seconds without starving lower the cap")
+
+        starve(FramePacer.starvedReturnsBeforeRaise)
+        XCTAssertEqual(pacer.cap, 2, "starving again right away raises it again")
+        healthy(FramePacer.healthyReturnsBeforeLower)
+        XCTAssertEqual(pacer.cap, 2, "a cap that had to rise right after it was lowered waits twice as long")
+        healthy(FramePacer.healthyReturnsBeforeLower)
+        XCTAssertEqual(pacer.cap, 1)
+        healthy(2 * FramePacer.healthyReturnsBeforeLower)
+        XCTAssertEqual(pacer.cap, 1, "never below one")
+    }
+
     /// No drawable back for over a second: the count resets and drawing resumes (a lost presented handler).
     @MainActor
     func testStalledBacklogResetsAfterOneSecond() throws {
