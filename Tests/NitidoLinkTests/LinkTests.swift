@@ -1,5 +1,7 @@
 import XCTest
 import Network
+import OSLog
+import QuartzCore
 @testable import NitidoLink
 @testable import NitidoCore
 
@@ -64,6 +66,84 @@ final class LinkTests: XCTestCase {
         }
         XCTAssertTrue(failed)
         advertiser.stop()
+    }
+
+    /// A pair of ready links on loopback: the sharer's end and the viewer's.
+    private func readyPair(_ advertiser: Advertiser, port: UInt16) async throws -> (sharer: Link, viewer: Link) {
+        let viewer = Link.connect(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234", sharerName: "Sharer", hello: hello(.view))
+        var iterator = advertiser.incoming.makeAsyncIterator()
+        guard let sharer = await iterator.next() else { throw XCTSkip("no incoming link") }
+        try await waitReady(sharer); try await waitReady(viewer)
+        return (sharer, viewer)
+    }
+
+    /// The final state a link's `states` ends on.
+    private func finalState(_ link: Link) async -> Link.State? {
+        var last: Link.State?
+        for await s in link.states { last = s }
+        return last
+    }
+
+    /// A `bye` carries its reason (`ByeReason`) to the other side, which ends as `.cancelled`, not as a failure.
+    func testAByeCarriesItsReason() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let (sharer, viewer) = try await readyPair(advertiser, port: port)
+        XCTAssertNil(viewer.byeReason)
+        sharer.close(reason: ByeReason.sharingStopped)
+        let ended = await finalState(viewer)
+        XCTAssertEqual(ended, .cancelled)
+        XCTAssertEqual(viewer.byeReason, ByeReason.sharingStopped)
+        advertiser.stop()
+    }
+
+    /// `closeAndWait` returns once the `bye` is out, well before the one-second fallback: the other side ends on the
+    /// bye (`.cancelled`, reason `ended`), not on a dropped connection. A link that never became ready returns at once.
+    func testCloseAndWaitReturnsOnceTheByeIsOut() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let (sharer, viewer) = try await readyPair(advertiser, port: port)
+        let started = CACurrentMediaTime()
+        await viewer.closeAndWait()
+        XCTAssertLessThan(CACurrentMediaTime() - started, 0.9, "the bye's send completed; the fallback did not have to")
+        let ended = await finalState(sharer)
+        XCTAssertEqual(ended, .cancelled)
+        XCTAssertEqual(sharer.byeReason, ByeReason.ended)
+
+        let unready = Link.connect(to: .hostPort(host: "127.0.0.1", port: 1), code: "1234", sharerName: "Sharer", hello: hello(.view))
+        let again = CACurrentMediaTime()
+        await unready.closeAndWait()
+        XCTAssertLessThan(CACurrentMediaTime() - again, 0.5, "nothing to say bye on: cancelled at once")
+        advertiser.stop()
+    }
+
+    /// A `bye` often comes with the end of the stream in the same delivery, or just before the receive the closed
+    /// connection cancels. Either way the link ends on the bye (`.cancelled`) and logs no error claiming the other side
+    /// left without one, or that the receive failed (a clean stop or Back left those false errors behind). The sharer
+    /// that closed logs none either.
+    func testAByeLogsNoFalseErrorOnEitherSide() async throws {
+        let since = Date()
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        for _ in 0..<5 {
+            let (sharer, viewer) = try await readyPair(advertiser, port: port)
+            sharer.close()
+            let viewerEnded = await finalState(viewer), sharerEnded = await finalState(sharer)
+            XCTAssertEqual(viewerEnded, .cancelled)
+            XCTAssertEqual(sharerEnded, .cancelled)
+        }
+        advertiser.stop()
+        try await Task.sleep(for: .milliseconds(200))
+        let until = Date()
+        // `position(date:)` only says where to start reading; entries from earlier tests still come, so the window is
+        // checked on every entry.
+        let store = try OSLogStore(scope: .currentProcessIdentifier)
+        let falseErrors = try store.getEntries(at: store.position(date: since))
+            .compactMap { $0 as? OSLogEntryLog }
+            .filter { $0.date >= since && $0.date <= until && $0.subsystem == "ai.ronar.nitido" && $0.category == "link" }
+            .map(\.composedMessage)
+            .filter { $0.contains("closed the connection without bye") || $0.contains("receive failed") }
+        XCTAssertEqual(falseErrors, [], "a link that ended on a bye logged a failure")
     }
 
     func testClosingOneSideEndsTheOther() async throws {

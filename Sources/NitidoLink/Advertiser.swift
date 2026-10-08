@@ -19,6 +19,8 @@ public final class Advertiser: @unchecked Sendable {
     private let queue = DispatchQueue(label: "ai.ronar.nitido.advertiser")
     /// The `start()` call still waiting for its port; taken exactly once.
     private let pendingStart = OSAllocatedUnfairLock<CheckedContinuation<UInt16, Error>?>(initialState: nil)
+    /// What every new connection says first (`Link`); `update(hello:)` replaces it when the capture size changes.
+    private let hello: OSAllocatedUnfairLock<Hello>
 
     public init(name: String, code: String, hello: Hello, port: UInt16? = nil) throws {
         let params = LinkTLS.parameters(code: code, sharerName: name)
@@ -26,9 +28,10 @@ public final class Advertiser: @unchecked Sendable {
         listener.service = NWListener.Service(name: name, type: "_nitido._tcp", txtRecord: NWTXTRecord(["v": "\(protocolVersion)", "name": name]))
         (incoming, out) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
+        self.hello = OSAllocatedUnfairLock(initialState: hello)
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { return }
-            let link = Link(connection: connection, role: .share, hello: hello)
+            let link = Link(connection: connection, role: .share, hello: self.hello.withLock { $0 })
             link.start()
             out.yield(link)
         }
@@ -43,6 +46,9 @@ public final class Advertiser: @unchecked Sendable {
             listener.start(queue: queue)
         }
     }
+
+    /// The hello that connections from now on say first: the capture's new pixel size and scale.
+    public func update(hello: Hello) { self.hello.withLock { $0 = hello } }
 
     public func stop() {
         listener.cancel()

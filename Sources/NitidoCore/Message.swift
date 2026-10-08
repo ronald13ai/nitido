@@ -3,6 +3,16 @@ import Foundation
 public let protocolVersion: UInt16 = 1
 
 public enum Role: UInt8, Sendable, Equatable { case share = 1, view = 2 }
+
+/// The `u8 reason` a `bye` carries (spec section 6).
+public enum ByeReason {
+    /// The session ended: Esc, Back, Stop or quit.
+    public static let ended: UInt8 = 0
+    /// The two sides speak different protocol versions.
+    public static let protocolMismatch: UInt8 = 1
+    /// The sharer stopped capturing (a failure, or Stop Sharing in the menu bar) and no longer listens for viewers.
+    public static let sharingStopped: UInt8 = 2
+}
 public enum Codec: UInt8, Sendable, Equatable { case hevc = 1, h264 = 2 }
 public enum StrokePhase: UInt8, Sendable, Equatable { case begin = 1, append = 2, end = 3 }
 

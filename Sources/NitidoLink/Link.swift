@@ -29,6 +29,8 @@ public final class Link: @unchecked Sendable {
     /// True when the TLS handshake failed because the two sides derived different keys: with the pre-shared key, the
     /// viewer's code is not the one the sharer listens with ("bad MAC"). Set before `states` reports the failure.
     public var keyMismatch: Bool { lock.withLock { _keyMismatch } }
+    /// The reason the other side gave in its `bye` (`ByeReason`), once one came. Set before `states` reports `.cancelled`.
+    public var byeReason: UInt8? { lock.withLock { _byeReason } }
 
     private let connection: NWConnection
     private let hello: Hello
@@ -49,6 +51,7 @@ public final class Link: @unchecked Sendable {
     private var backlog = 0
     private var _wasReady = false
     private var _keyMismatch = false
+    private var _byeReason: UInt8?
     private var nextPing: UInt32 = 0
     /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
     private var pingSentAt: [UInt32: UInt64] = [:]
@@ -137,17 +140,33 @@ public final class Link: @unchecked Sendable {
         })
     }
 
-    /// Ends the link. A ready link says `bye` first and is cancelled once that is sent, or after one second if
-    /// the send never completes; a link that never became ready is cancelled at once. Either way `states`
-    /// ends with `.cancelled` (or the failure that got there first).
-    public func close() {
+    /// Ends the link. A ready link says `bye` with `reason` (`ByeReason`) first and is cancelled once that is sent, or
+    /// after one second if the send never completes; a link that never became ready is cancelled at once. Either way
+    /// `states` ends with `.cancelled` (or the failure that got there first).
+    public func close(reason: UInt8 = ByeReason.ended) { close(reason: reason, whenSent: nil) }
+
+    /// `close`, and returns once the `bye` has been handed to the network (or the one-second fallback cancelled the
+    /// connection, or the link was not ready): a process about to quit waits for this, so it does not cut the bye off.
+    public func closeAndWait(reason: UInt8 = ByeReason.ended) async {
+        await withCheckedContinuation { (sent: CheckedContinuation<Void, Never>) in
+            close(reason: reason) { sent.resume() }
+        }
+    }
+
+    private func close(reason: UInt8, whenSent: (@Sendable () -> Void)?) {
         let connection = connection
+        // Taken once: by the send's completion or by the fallback, whichever comes first.
+        let pending = OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: whenSent)
+        let cancel: @Sendable () -> Void = {
+            connection.cancel()
+            pending.withLock { waiter in defer { waiter = nil }; return waiter }?()
+        }
         queue.async { [self] in
             closing = true
             pingTimer?.cancel(); pingTimer = nil
-            guard state == .ready else { connection.cancel(); return }
-            connection.send(content: Wire.encode(.bye(reason: 0)), completion: .contentProcessed { _ in connection.cancel() })
-            queue.asyncAfter(deadline: .now() + 1) { connection.cancel() }
+            guard state == .ready else { cancel(); return }
+            connection.send(content: Wire.encode(.bye(reason: reason)), completion: .contentProcessed { _ in cancel() })
+            queue.asyncAfter(deadline: .now() + 1) { cancel() }
         }
     }
 
@@ -186,15 +205,19 @@ public final class Link: @unchecked Sendable {
                     finish(.failed("protocol: \(error)")); connection.cancel(); return
                 }
             }
+            // `bye` ends a link as `.cancelled` (`handle`, possibly in this same delivery), and so does this side's own
+            // `close()`; both cancel the connection. What follows either (the end of the stream, a cancelled receive) is
+            // that, not a fault, and logs nothing. A stream that ends, or a receive that fails, while the link is still
+            // up is the other side gone (a process that died, a connection cut on the way): a failure, which a viewer's
+            // `LinkSession` answers by reconnecting.
+            let up = state == .ready && !closing
             if let error {
+                guard up else { finish(.cancelled); return }
                 log.error("receive failed: \(error.localizedDescription, privacy: .public)")
                 finish(.failed(error.localizedDescription)); return
             }
             if complete {
-                // `bye` ends a link as `.cancelled` (`handle`), and so does this side's own `close()`. A stream that
-                // ends without either is the other side gone (a process that died, a connection cut on the way): a
-                // failure, which a viewer's `LinkSession` answers by reconnecting.
-                if closing { finish(.cancelled); return }
+                guard up else { finish(.cancelled); return }
                 log.error("\(self.role.logName, privacy: .public) link: the other side closed the connection without bye")
                 finish(.failed("The other side closed the connection without saying goodbye.")); connection.cancel(); return
             }
@@ -209,7 +232,7 @@ public final class Link: @unchecked Sendable {
             lock.withLock { _peerHello = h }
             if h.protocolVersion != protocolVersion {
                 log.error("protocol version mismatch: peer speaks \(h.protocolVersion), this side \(protocolVersion)")
-                send(.bye(reason: 1)); finish(.failed("protocol version \(h.protocolVersion), expected \(protocolVersion)")); connection.cancel(); return
+                send(.bye(reason: ByeReason.protocolMismatch)); finish(.failed("protocol version \(h.protocolVersion), expected \(protocolVersion)")); connection.cancel(); return
             }
             messageOut.yield(m)
         case .ping(let id, let t):
@@ -224,7 +247,8 @@ public final class Link: @unchecked Sendable {
                 return
             }
             lock.withLock { _lastRTTMs = sample.rttMs; _clockOffsetNs = sample.offsetNs }
-        case .bye:
+        case .bye(let reason):
+            lock.withLock { _byeReason = reason }
             finish(.cancelled); connection.cancel()
         default:
             messageOut.yield(m)

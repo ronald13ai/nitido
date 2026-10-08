@@ -53,10 +53,16 @@ public final class LinkSession: @unchecked Sendable {
     public func start() { attemptConnection() }
     public func send(_ m: Message) { current?.send(m) }
 
-    public func close() {
+    public func close() { shut()?.close() }
+
+    /// `close`, and returns once the sharer has been told `bye` (`Link.closeAndWait`): a quit waits for this.
+    public func closeAndWait() async { await shut()?.closeAndWait() }
+
+    /// Ends the session's streams and hands back the link to close.
+    private func shut() -> Link? {
         lock.lock(); open = false; let link = _current; lock.unlock()
-        link?.close()
         stateOut.yield(.closed(nil)); stateOut.finish(); messageOut.finish()
+        return link
     }
 
     private func attemptConnection() {
@@ -83,8 +89,16 @@ public final class LinkSession: @unchecked Sendable {
                 case .failed(let reason):
                     scheduleRetry(after: reason, codeRejected: link.keyMismatch)
                 case .cancelled:
+                    // A `bye`. With `sharingStopped` the sharer stopped capturing and listening (a failure, or Stop
+                    // Sharing in the menu bar) while its app stays open: say so, since no retry could pair.
                     let stillOpen = lock.withLock { open }
-                    if stillOpen { end(.closed("The sharer ended the session.")) }
+                    guard stillOpen else { break }
+                    if link.byeReason == ByeReason.sharingStopped {
+                        log.info("\(self.sharerName, privacy: .public) stopped sharing")
+                        end(.closed("\(sharerName) stopped sharing."))
+                    } else {
+                        end(.closed("The sharer ended the session."))
+                    }
                 case .connecting: break
                 }
             }
