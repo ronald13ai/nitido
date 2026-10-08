@@ -828,6 +828,43 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// Spec 4, in the codec loop: a decoder that falls behind drops work rather than queue it. With three frames waiting
+    /// (the decoder's queue held here, as a stall would), the next delta starts a skip to the next keyframe and the one
+    /// after it is skipped too; the keyframe then drops the three that waited instead of decoding them first. All five
+    /// count as dropped, none is a decode failure, and the keyframe reaches the screen.
+    @MainActor
+    func testTheCodecLoopSkipsToTheKeyframeWhenItFallsBehindAndCountsWhatItDropped() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "s")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let pushed = PushCounter(model.sink)
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        let key = try await realKeyframe()
+        // Numbered one after another; the deltas are never decoded, so any bytes do.
+        func frame(_ seq: UInt32, isKey: Bool) -> EncodedFrame {
+            EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: isKey, data: isKey ? key.data : Data([0, 0, 0, 3, 1, 2, 3]),
+                         parameterSets: isKey ? key.parameterSets : [], codec: key.codec, width: key.width, height: key.height)
+        }
+        model.handleEncoded(frame(0, isKey: true))
+        try await waitUntil("the first keyframe reaches the screen") { pushed.count == 1 }
+        let decoder = try XCTUnwrap(model.decoder)
+        decoder.drainForTesting()
+        decoder.suspendForTesting()
+        for seq in 1...5 { model.handleEncoded(frame(UInt32(seq), isKey: false)) }   // 1 to 3 wait, 4 and 5 are skipped
+        model.handleEncoded(frame(6, isKey: true))
+        XCTAssertTrue(model.decoder === decoder, "the keyframe's setup is the one the decoder has")
+        decoder.resumeForTesting()
+        try await waitUntil("the keyframe after the skip reaches the screen") { pushed.count == 2 }
+        try await waitUntil("the five frames count as dropped", timeout: 2) { model.snapshot.droppedLastSecond == 5 }
+        XCTAssertEqual(model.decodeFailures, 0, "no delta reached the decoder")
+        XCTAssertEqual(model.state, .capturing)
+        await model.stop()
+    }
+
     /// Spec 9: a setting VideoToolbox rejects is said over the picture in plain language, not with its key.
     @MainActor
     func testARejectedSettingIsSaidInPlainLanguage() async throws {

@@ -583,11 +583,14 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.pixelSize, CGSize(width: 320, height: 180))
         // Real parameter sets built a decoder that works; this data is not a picture, so `decode` throws.
         let unreadable = VideoFrame(seq: 1, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]))
-        // Decoding runs on the decoder's queue: each batch of failures lands before the next step.
+        // Decoding runs on the decoder's queue: each failure lands before the next frame goes in. A keyframe that went in
+        // while the one before it still waited would supersede it, and that one would never be decoded.
         func failThree() async throws {
-            let before = viewer.decodeFailures
-            for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
-            try await waitUntil("three frames fail") { viewer.decodeFailures == before + 3 }
+            for _ in 0..<3 {
+                let before = viewer.decodeFailures
+                viewer.handleIncoming(.videoFrame(unreadable))
+                try await waitUntil("the frame fails") { viewer.decodeFailures == before + 1 }
+            }
         }
         try await failThree()
         // The third throw let the decoder go: until the setup comes again, a keyframe decodes nothing and is no failure.
@@ -794,6 +797,40 @@ final class ViewerLinkTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))    // the 250 ms loop publishes the figures
         XCTAssertEqual(viewer.snapshot.droppedLastSecond, 0)
         XCTAssertEqual(viewer.decodeFailures, 0)
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// Spec 4: a viewer whose decoder falls behind drops work rather than queue it. With three frames waiting (the
+    /// decoder's queue held here, as a stall would), the next delta starts a skip to the next keyframe and the one after
+    /// it is skipped too; the keyframe then drops the three that waited instead of decoding them first. Every one of
+    /// the five never reaches the screen and counts as dropped, none is a decode failure, and the keyframe is shown.
+    @MainActor
+    func testAViewerThatFellBehindSkipsToTheKeyframeAndCountsWhatItDropped() async throws {
+        let (share, _) = try await listeningShare()
+        let key = try await realKeyframe()
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(key.videoConfig)))
+        // Numbered one after another, so no gap counts as dropped; the deltas are never decoded, so any bytes do.
+        func frame(_ seq: UInt32, isKey: Bool) -> VideoFrame {
+            VideoFrame(seq: seq, captureHostTimeNs: 1, isKey: isKey, data: isKey ? key.data : Data([0, 0, 0, 3, 1, 2, 3]))
+        }
+        viewer.handleIncoming(.videoFrame(frame(0, isKey: true)))
+        try await waitUntil("the first keyframe is shown") { shown.count == 1 }
+        let decoder = try XCTUnwrap(viewer.decoder)
+        decoder.drainForTesting()
+        decoder.suspendForTesting()
+        for seq in 1...5 { viewer.handleIncoming(.videoFrame(frame(UInt32(seq), isKey: false))) }   // 1 to 3 wait, 4 and 5 are skipped
+        viewer.handleIncoming(.videoFrame(frame(6, isKey: true)))
+        decoder.resumeForTesting()
+        try await waitUntil("the keyframe after the skip is shown") { shown.count == 2 }
+        try await waitUntil("the five frames count as dropped") { viewer.snapshot.droppedLastSecond == 5 }
+        XCTAssertEqual(viewer.decodeFailures, 0, "no delta reached the decoder")
         viewer.disconnect()
         await share.stop()
     }

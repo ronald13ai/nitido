@@ -58,7 +58,8 @@ public final class ShareModel {
     public private(set) var codecLabel = "raw"
     /// Internal, not private, so a test can stand in for VideoToolbox's callbacks on the encoder the share made.
     private(set) var encoder: VideoEncoder?
-    private var decoder: VideoDecoder?
+    /// Internal, not private, so a test can hold the loop's decoder queue, as a stall would.
+    private(set) var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
     /// The newest captured frame, raw: the left of the comparison while the loop is on. While it is off it is the frame
     /// the view holds (it was pushed raw), so it pins no buffer of its own; turning the loop on encodes it at once,
@@ -440,6 +441,9 @@ public final class ShareModel {
             d.onDecodeFailure = { [weak self, weak d] seq, error in
                 DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.loopDecodeFailed(d, seq: seq, error: error) } } }
             }
+            d.onSuperseded = { [weak self, weak d] seq in
+                DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.loopSuperseded(seq, by: d) } } }
+            }
             d.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err, from: "decoder") } }
         }
         guard let decoder else {
@@ -450,8 +454,9 @@ public final class ShareModel {
             return
         }
         if case .skipped(let first) = decoder.submit(f.videoFrame) {
-            // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped. The first
-            // one asks for that keyframe; a later one asks again once a second has passed.
+            // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped, and that
+            // keyframe drops the frames still waiting (`loopSuperseded`). The first one asks for that keyframe; a later
+            // one asks again once a second has passed.
             telemetry.recordDrop(at: now)
             encodeStarts.removeValue(forKey: f.seq)   // this frame never decodes
             if first || loopKeyframeAskedAt.map({ now - $0 >= 1 }) ?? true {
@@ -459,6 +464,14 @@ public final class ShareModel {
                 encoder?.requestKeyframe()
             }
         }
+    }
+
+    /// A frame a later keyframe superseded before the loop's decoder reached it (`VideoDecoder.onSuperseded`): it never
+    /// reaches the screen, so it counts as dropped. A decoder let go already says nothing about the current one.
+    private func loopSuperseded(_ seq: UInt32, by d: VideoDecoder) {
+        guard d === decoder else { return }
+        telemetry.recordDrop(at: CACurrentMediaTime())
+        encodeStarts.removeValue(forKey: seq)   // this frame never decodes
     }
 
     /// A frame the loop's decoder could not read (`VideoDecoder.onDecodeFailure`, which logged it). While the loop is on

@@ -54,7 +54,8 @@ public final class ViewModel {
     /// The Mac of the current session, so a decoder failure can offer to reconnect to it (`reconnect`).
     private var currentPeer: Peer?
     private var linkTasks: [Task<Void, Never>] = []
-    private var decoder: VideoDecoder?
+    /// Internal, not private, so a test can hold the decoder's queue, as a stall would.
+    private(set) var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
     /// Frames the decoder could not read in a row; every third lets the decoder go for a fresh one, ten end the link
     /// (`decodeFailed`). A frame decoded, the session ready again, or leaving, resets it. Internal, not private, so a
@@ -299,6 +300,9 @@ public final class ViewModel {
                 d.onDecodeFailure = { [weak self, weak d] seq, error in
                     DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.decodeFailed(d, seq: seq, error: error) } } }
                 }
+                d.onSuperseded = { [weak self, weak d] _ in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.superseded(by: d) } } }
+                }
                 // A RealTime setting rejected inside `init` arrives the moment this is set: hop to the main actor.
                 d.onError = { [weak self] err in Task { @MainActor in self?.handleDecoderError(err) } }
                 decoder = d; decoderConfig = cfg; lastSeq = nil
@@ -333,9 +337,9 @@ public final class ViewModel {
             // Decoded off the main actor (`decoded`, `decodeFailed`), so ink, cursor and the presented handlers the
             // pacer depends on never wait behind a hardware decode.
             if case .skipped(let first) = decoder.submit(f) {
-                // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped. The
-                // first one asks for that keyframe; a later one asks again once a second has passed, so a lost request
-                // cannot freeze the picture.
+                // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped, and
+                // that keyframe drops the frames still waiting (`superseded`). The first one asks for that keyframe; a
+                // later one asks again once a second has passed, so a lost request cannot freeze the picture.
                 telemetry.recordDrop(at: now)
                 if first || keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
             }
@@ -366,6 +370,13 @@ public final class ViewModel {
         guard d === decoder else { return }
         decodeFailures = 0
         sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
+    }
+
+    /// A frame a later keyframe superseded before the decoder reached it (`VideoDecoder.onSuperseded`): it never
+    /// reaches the screen, so it counts as dropped. A decoder let go already says nothing about the current one.
+    private func superseded(by d: VideoDecoder) {
+        guard d === decoder else { return }
+        telemetry.recordDrop(at: CACurrentMediaTime())
     }
 
     /// A frame the decoder could not read (`VideoDecoder.onDecodeFailure`, which logged it). A decoder that keeps failing

@@ -102,7 +102,9 @@ final class CodecLoopTests: XCTestCase {
     /// Spec 4 and 8: the decoder drops work rather than queue it. With three frames waiting (the queue held here, as a
     /// stall would), the next delta is skipped and asks for a keyframe once, the deltas after it are skipped quietly
     /// (they refer to the one skipped), and the keyframe ends the skip and starts the count again, so the delta after
-    /// it decodes. Nothing waits beyond that: the frames that did wait decode in order once the queue moves.
+    /// it decodes. The three that waited are dropped undecoded when the queue moves (`onSuperseded`), since nothing
+    /// from the keyframe on refers to them: no more than three frames ever wait to be decoded, and the keyframe that
+    /// recovers the picture does not decode behind frames it replaces.
     func testSubmitSkipsToTheNextKeyframeWhenThreeFramesWait() throws {
         let frames = try encodeFrames(8, keyframesAt: [6])
         XCTAssertTrue(frames[0].isKey); XCTAssertTrue(frames[6].isKey)
@@ -114,9 +116,9 @@ final class CodecLoopTests: XCTestCase {
         wait(for: [first], timeout: 5)
         decoder.drainForTesting()
 
-        let seqs = Box<[UInt32]>([])
-        let decoded = expectation(description: "the frames that waited"); decoded.expectedFulfillmentCount = 5
-        decoder.onFrame = { d in seqs.append(d.seq); decoded.fulfill() }
+        let seqs = Box<[UInt32]>([]), superseded = Box<[UInt32]>([])
+        decoder.onFrame = { d in seqs.append(d.seq) }
+        decoder.onSuperseded = { seq in superseded.append(seq) }
         decoder.suspendForTesting()
         for i in 1...3 { XCTAssertEqual(decoder.submit(frames[i].videoFrame), .queued, "delta \(i)") }
         XCTAssertEqual(decoder.submit(frames[4].videoFrame), .skipped(askForKeyframe: true))
@@ -124,8 +126,9 @@ final class CodecLoopTests: XCTestCase {
         XCTAssertEqual(decoder.submit(frames[6].videoFrame), .queued, "a keyframe ends the skip")
         XCTAssertEqual(decoder.submit(frames[7].videoFrame), .queued, "the delta after the keyframe decodes")
         decoder.resumeForTesting()
-        wait(for: [decoded], timeout: 5)
-        XCTAssertEqual(seqs.value, [1, 2, 3, 6, 7])
+        decoder.drainForTesting()   // `decode` hands each picture to `onFrame` before it returns
+        XCTAssertEqual(superseded.value, [1, 2, 3], "the keyframe superseded the deltas still waiting")
+        XCTAssertEqual(seqs.value, [6, 7])
         decoder.invalidate()
     }
 

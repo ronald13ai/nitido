@@ -17,8 +17,9 @@ public struct DecodedFrame: @unchecked Sendable {
 ///
 /// `submit(_:)` is the way in for a stream: it decodes on the decoder's own serial queue, in the order the frames came
 /// (inter-coded frames refer to the ones before them, so none can be skipped on its own), and it drops work rather than
-/// queue it (spec 4): past `maxPending` frames waiting it skips to the next keyframe, and the caller asks for one. The
-/// renderer then shows the newest decoded frame. `decode(_:)` decodes one frame on the calling thread.
+/// queue it (spec 4): past `maxPending` frames waiting it skips to the next keyframe, and the caller asks for one; a
+/// keyframe drops the frames still waiting before it (`onSuperseded`). The renderer then shows the newest decoded
+/// frame. `decode(_:)` decodes one frame on the calling thread.
 ///
 /// Thread-safe: every member may be used from any thread, including `invalidate()` while another
 /// thread is inside `decode(_:)`.
@@ -32,7 +33,8 @@ public final class VideoDecoder: @unchecked Sendable {
         case skipped(askForKeyframe: Bool)
     }
 
-    /// At most this many frames since the newest keyframe wait for, or are in, the queue (`submit`).
+    /// At most this many frames from the newest keyframe on wait for the decoder or are in it (`submit`); one from
+    /// before that keyframe is dropped when its turn comes (`onSuperseded`).
     static let maxPending = 3
 
     /// Called on the decoder's queue, in decode order, by `submit(_:)` and `decode(_:)`.
@@ -45,6 +47,13 @@ public final class VideoDecoder: @unchecked Sendable {
     public var onDecodeFailure: (@Sendable (_ seq: UInt32, _ error: CodecError) -> Void)? {
         get { lock.withLock { decodeFailureHandler } }
         set { lock.withLock { decodeFailureHandler = newValue } }
+    }
+    /// A frame `submit(_:)` queued that a keyframe submitted after it superseded before its turn came, with its
+    /// sequence number. Nothing from that keyframe on refers to it, so it is dropped undecoded rather than decoded
+    /// ahead of the keyframe. Called on the decoder's queue, in submit order; not after `invalidate()`.
+    public var onSuperseded: (@Sendable (_ seq: UInt32) -> Void)? {
+        get { lock.withLock { supersededHandler } }
+        set { lock.withLock { supersededHandler = newValue } }
     }
     /// Failures `init` and `decode(_:)` do not throw: a tuning property VideoToolbox rejected in
     /// `init` (RealTime; the decoder still works without it). Each one is also logged. Failures
@@ -60,12 +69,13 @@ public final class VideoDecoder: @unchecked Sendable {
     private var session: VTDecompressionSession?
     private var frameHandler: (@Sendable (DecodedFrame) -> Void)?
     private var decodeFailureHandler: (@Sendable (UInt32, CodecError) -> Void)?
+    private var supersededHandler: (@Sendable (UInt32) -> Void)?
     /// Frames submitted since the newest keyframe that have not been decoded yet.
     private var pending = 0
     /// A frame was skipped, so every delta up to the next keyframe is too: it refers to the skipped one.
     private var skipping = false
-    /// Bumped by every keyframe submitted. Nothing after a keyframe refers to the frames before it: they still decode,
-    /// but no longer count in `pending`.
+    /// Bumped by every keyframe submitted. Nothing after a keyframe refers to the frames before it: those still waiting
+    /// are dropped undecoded (`onSuperseded`), and none counts in `pending` any more.
     private var keyEpoch: UInt64 = 0
     private let format: CMVideoFormatDescription
     private let queue = DispatchQueue(label: "ai.ronar.nitido.decoder", qos: .userInteractive)
@@ -103,9 +113,10 @@ public final class VideoDecoder: @unchecked Sendable {
     }
 
     /// Decodes `frame` on the decoder's queue, after every frame submitted before it, and hands the picture to
-    /// `onFrame` (a failure to `onDecodeFailure`). A keyframe is always queued, and ends a skip. A delta is skipped
-    /// while `maxPending` frames since the newest keyframe are waiting, and so is every delta after it until the next
-    /// keyframe; the first one skipped says to ask for that keyframe. Never blocks the caller.
+    /// `onFrame` (a failure to `onDecodeFailure`). A keyframe is always queued, ends a skip, and supersedes the frames
+    /// still waiting before it: each goes to `onSuperseded` instead of the decoder. A delta is skipped while
+    /// `maxPending` frames are waiting, and so is every delta after it until the next keyframe; the first one skipped
+    /// says to ask for that keyframe. Never blocks the caller.
     @discardableResult
     public func submit(_ frame: VideoFrame) -> SubmitResult {
         let admitted: (epoch: UInt64?, result: SubmitResult) = lock.withLock {
@@ -122,6 +133,12 @@ public final class VideoDecoder: @unchecked Sendable {
         }
         guard let epoch = admitted.epoch else { return admitted.result }
         queue.async { [self] in
+            // A keyframe submitted since this frame starts what is shown next, and nothing from it on refers to this
+            // one: decoding it would only hold the keyframe up.
+            if lock.withLock({ session != nil && keyEpoch != epoch }) {
+                onSuperseded?(frame.seq)
+                return
+            }
             defer { lock.withLock { if keyEpoch == epoch { pending -= 1 } } }
             do throws(CodecError) {
                 try decode(frame)
