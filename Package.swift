@@ -19,10 +19,13 @@ let package = Package(
                 resources: [.copy("Fonts")],
                 swiftSettings: settings),
         .executableTarget(name: "nitido", dependencies: ["NitidoUI"], swiftSettings: settings),
+        // What more than one test target uses (`LogMark`); never part of the app.
+        .target(name: "NitidoTestSupport", path: "Tests/NitidoTestSupport", swiftSettings: settings),
         .testTarget(name: "NitidoCoreTests", dependencies: ["NitidoCore"], swiftSettings: settings),
         .testTarget(name: "NitidoCaptureTests", dependencies: ["NitidoCapture"], swiftSettings: settings),
         .testTarget(name: "NitidoCodecTests", dependencies: ["NitidoCodec"], swiftSettings: settings),
-        .testTarget(name: "NitidoLinkTests", dependencies: ["NitidoLink"], swiftSettings: settings),
-        .testTarget(name: "NitidoUITests", dependencies: ["NitidoUI", "NitidoCapture", "NitidoCodec"], swiftSettings: settings),
+        .testTarget(name: "NitidoLinkTests", dependencies: ["NitidoLink", "NitidoTestSupport"], swiftSettings: settings),
+        .testTarget(name: "NitidoUITests", dependencies: ["NitidoUI", "NitidoCapture", "NitidoCodec", "NitidoTestSupport"],
+                    swiftSettings: settings),
     ]
 )

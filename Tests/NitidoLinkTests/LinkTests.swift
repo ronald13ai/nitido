@@ -1,6 +1,7 @@
 import XCTest
 import Network
 import QuartzCore
+import NitidoTestSupport
 @testable import NitidoLink
 @testable import NitidoCore
 

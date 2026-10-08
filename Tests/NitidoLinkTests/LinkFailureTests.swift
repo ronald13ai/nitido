@@ -2,6 +2,7 @@ import XCTest
 import Network
 import dnssd
 import os
+import NitidoTestSupport
 @testable import NitidoLink
 @testable import NitidoCore
 

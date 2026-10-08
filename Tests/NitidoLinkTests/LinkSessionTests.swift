@@ -1,5 +1,6 @@
 import XCTest
 import Network
+import NitidoTestSupport
 @testable import NitidoLink
 @testable import NitidoCore
 
