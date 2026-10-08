@@ -53,7 +53,7 @@ nitido (app)  ->  NitidoUI  ->  NitidoCapture, NitidoCodec, NitidoLink  ->  Niti
 ### NitidoCodec (VideoToolbox)
 - `VideoEncoder`: HEVC Main (H.264 High if HEVC hardware encode is unavailable), realtime, no frame reordering, keyframe every 120 frames or on request, `expectedFrameRate` 60, `averageBitRate` set from `BitrateController`. Emits `EncodedFrame { data (NAL units with 4-byte length prefixes, as VideoToolbox produces them), isKey, parameterSets?, captureHostTime, seq }`.
 - `VideoDecoder`: builds the format description from parameter sets, decodes to `CVPixelBuffer`, emits `DecodedFrame { pixelBuffer, captureHostTime, seq }`. Flushes and rebuilds on a new `videoConfig`.
-- Both drop work rather than queue it: the encoder always takes the newest captured frame; the decoder decodes whatever arrives and the renderer shows the newest.
+- Both drop work rather than queue it: the encoder always takes the newest captured frame; the decoder decodes on its own queue with at most three frames waiting: when more would wait it skips to the next keyframe and asks for one, and a keyframe drops the frames still waiting before it; the renderer shows the newest.
 
 ### NitidoLink (Network.framework)
 - `Advertiser` (sharer): `NWListener` over TCP with TLS PSK, Bonjour service `_nitido._tcp`, TXT record with display name and protocol version.
@@ -129,7 +129,7 @@ Errors: shown inline in the window where they happen, in plain language, with th
 
 ## 10. Telemetry strip
 
-A single row under the picture (when the picture is narrower than that row, the figures wrap onto further rows rather than widen the window past the picture), SF Mono figures, updated 4 times per second from 1-second rolling windows: capture fps · display fps · capture→display ms (exact in loopback, estimated across Macs) · RTT ms · bitrate Mbps · resolution and scale · codec. A 2-second sparkline of latency sits at the right end. Values that cross a threshold (latency over 100 ms, dropped frames) turn gold for one second, never red; the strip informs, it does not alarm. ⌘H hides it instantly, without animation.
+A single row under the picture (when the picture is narrower than that row, the figures wrap onto further rows rather than widen the window past the picture), SF Mono figures, updated 4 times per second from 1-second rolling windows: capture fps (received fps on the viewer) · display fps · capture→display ms (exact in loopback, estimated across Macs) · RTT ms · bitrate Mbps · resolution and scale · codec. A 2-second sparkline of latency sits at the right end. Values that cross a threshold (latency over 100 ms, dropped frames) turn gold for one second, never red; the strip informs, it does not alarm. ⌘H hides it instantly, without animation.
 
 ## 11. Visual direction
 
