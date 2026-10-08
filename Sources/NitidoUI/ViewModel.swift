@@ -71,8 +71,9 @@ public final class ViewModel {
     private var tasks: [Task<Void, Never>] = []
     /// A negative or huge glass-to-glass estimate was logged once already on this connection (reset on `.ready`).
     @ObservationIgnored private var reportedClockMismatch = false
-    /// The sequence number of the last video frame that arrived: a gap is frames that never did (`handleIncoming`).
-    /// Forgotten when the link is ready again and when a new setup makes a new decoder (a new encoder starts at 0).
+    /// The sequence number of the last video frame that arrived: a gap is frames the sharer numbered and never sent
+    /// (`handleIncoming`). Forgotten when the link is ready again and when a new setup makes a new decoder (a new
+    /// encoder starts at 0), so frames lost with a drop never count.
     @ObservationIgnored private var lastSeq: UInt32?
 
     public init() {
@@ -317,8 +318,9 @@ public final class ViewModel {
         case .videoFrame(let f):
             // The strip's first figure on the viewer is frames received (`ViewView` labels it so), not captured.
             telemetry.recordCapture(at: now); telemetry.recordBytes(f.data.count, at: now)
-            // Frames the sharer skipped for its backlog, or lost in a drop, never arrive: the gap in the numbers says how
-            // many. A larger jump is not a count of frames (a new encoder starts again at 0).
+            // Frames the sharer numbered and never sent (skipped for its send backlog, or failed in its encoder) leave a
+            // gap in the numbers that says how many. A larger jump is not a count of frames (a new encoder starts again
+            // at 0). An outage leaves no gap: the link ready again forgets the number (`.ready`).
             if let last = lastSeq {
                 let gap = f.seq &- last
                 if (2..<600).contains(gap) { for _ in 1..<gap { telemetry.recordDrop(at: now) } }

@@ -329,8 +329,8 @@ final class ViewerLinkTests: XCTestCase {
         viewer.disconnect()
     }
 
-    /// Spec 10: the viewer's strip counts the frames that never reached it (skipped by the sharer for the backlog, lost
-    /// with a reconnect) from the gaps in their sequence numbers.
+    /// Spec 10: the viewer's strip counts the frames the sharer numbered and never sent (skipped for its send backlog,
+    /// or failed in its encoder) from the gaps in their sequence numbers.
     @MainActor
     func testSeqGapsCountAsDroppedOnTheViewer() async throws {
         let (share, _) = try await listeningShare()
