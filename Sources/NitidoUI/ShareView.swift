@@ -2,6 +2,10 @@ import SwiftUI
 import NitidoCore
 
 public struct ShareView: View {
+    /// The strip's latency label: exact capture to display on this Mac (spec 10, which writes it "capture→display").
+    /// Spelled out, because the strip's Marcellus has no arrow (`TelemetryStripLabelTests`).
+    static let latencyLabel = "capture to display"
+
     @Bindable var model: ShareModel
     public init(model: ShareModel) { self.model = model }
 
@@ -47,7 +51,7 @@ public struct ShareView: View {
             .frame(width: areaSize.width, height: areaSize.height, alignment: .topLeading)
             if model.showTelemetry {
                 TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: model.codecLabel,
-                               latencyLabel: "capture→display", codecMs: model.codecMs)
+                               latencyLabel: Self.latencyLabel, codecMs: model.codecMs)
             }
         }
         // As wide as the picture (to the whole point), so `.windowResizability(.contentSize)` fixes the window's

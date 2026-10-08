@@ -4,6 +4,16 @@ import NitidoCore
 /// One quiet row of figures (wrapped only when the picture is narrower than the row). Gold while a value is over
 /// its threshold, never red.
 public struct TelemetryStrip: View {
+    /// The strip's own labels, set in Marcellus small caps (`Figure`). Each screen names its latency figure itself
+    /// (`ShareView.latencyLabel`, `ViewView.latencyLabel`) and says whether its first figure counts frames captured or
+    /// received.
+    public enum Label {
+        public static let capture = "capture", received = "received", display = "display", codec = "codec", rtt = "rtt"
+        public static let bitrate = "bitrate", dropped = "dropped", size = "size"
+    }
+    /// Every label above: the bundled Marcellus has no fallback for a character it lacks, so a test checks them all.
+    static let fixedLabels = [Label.capture, Label.received, Label.display, Label.codec, Label.rtt, Label.bitrate, Label.dropped, Label.size]
+
     public let snapshot: Snapshot
     public let resolution: String
     public let codec: String
@@ -13,7 +23,7 @@ public struct TelemetryStrip: View {
     public let captureLabel: String
 
     public init(snapshot: Snapshot, resolution: String, codec: String, latencyLabel: String, codecMs: Double? = nil,
-                captureLabel: String = "capture") {
+                captureLabel: String = Label.capture) {
         self.snapshot = snapshot; self.resolution = resolution; self.codec = codec; self.latencyLabel = latencyLabel
         self.codecMs = codecMs; self.captureLabel = captureLabel
     }
@@ -26,13 +36,13 @@ public struct TelemetryStrip: View {
     public var body: some View {
         StripRows(spacing: 18, rowSpacing: 6, sparklineGap: 8) {
             Figure(captureLabel, value: fps(snapshot.captureFPS), unit: "fps")
-            Figure("display", value: fps(snapshot.displayFPS), unit: "fps")
+            Figure(Label.display, value: fps(snapshot.displayFPS), unit: "fps")
             Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", highlight: latencyHigh)
-            Figure("codec", value: ms(codecMs), unit: "ms")
-            Figure("rtt", value: ms(snapshot.rttMs), unit: "ms")
-            Figure("bitrate", value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps")
-            Figure("dropped", value: "\(snapshot.droppedLastSecond)", unit: "/s", highlight: dropping)
-            Figure("size", value: resolution, unit: codec)
+            Figure(Label.codec, value: ms(codecMs), unit: "ms")
+            Figure(Label.rtt, value: ms(snapshot.rttMs), unit: "ms")
+            Figure(Label.bitrate, value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps")
+            Figure(Label.dropped, value: "\(snapshot.droppedLastSecond)", unit: "/s", highlight: dropping)
+            Figure(Label.size, value: resolution, unit: codec)
             Sparkline(values: snapshot.latencySeries).frame(width: 96, height: 18)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)

@@ -3,6 +3,10 @@ import NitidoCore
 import NitidoLink
 
 public struct ViewView: View {
+    /// The strip's latency label: glass to glass across two Macs, estimated through the clock offset (spec 5). Spelled
+    /// out, because the strip's Marcellus has no arrow (`TelemetryStripLabelTests`).
+    static let latencyLabel = "glass to glass (est.)"
+
     @Bindable var model: ViewModel
     public init(model: ViewModel) { self.model = model }
 
@@ -123,7 +127,7 @@ public struct ViewView: View {
             if model.showTelemetry {
                 // The viewer counts frames as they arrive, so its first figure says received, not capture.
                 TelemetryStrip(snapshot: model.snapshot, resolution: model.resolutionLabel, codec: model.codecLabel,
-                               latencyLabel: "glass→glass (est.)", captureLabel: "received")
+                               latencyLabel: Self.latencyLabel, captureLabel: TelemetryStrip.Label.received)
             }
         }
         .frame(width: area.width)

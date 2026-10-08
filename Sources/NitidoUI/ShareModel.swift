@@ -337,7 +337,7 @@ public final class ShareModel {
 
     /// A still source sends no frame (`CaptureSession` forwards only changed ones), so the loop or a viewer would show
     /// nothing until the content changed: the newest raw frame is encoded again. It is stamped now, as it reaches the
-    /// encoder, so the capture→display figure counts the codec and the display, not how long the source has been still
+    /// encoder, so the capture-to-display figure counts the codec and the display, not how long the source has been still
     /// (which could be seconds, and over five would be logged as the clocks disagreeing). It is not a new capture.
     private func encodeNewestAgain() {
         guard loopback || isSending, state == .capturing, let raw = latestRaw else { return }

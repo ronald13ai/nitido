@@ -140,7 +140,7 @@ final class StripRowsTests: XCTestCase {
     @MainActor
     func testTelemetryStripTakesTheOfferedWidthAndWrapsWhenNarrow() {
         func measure(_ width: CGFloat) -> CGSize {
-            let strip = TelemetryStrip(snapshot: .empty, resolution: "2048×1280 @2x", codec: "raw", latencyLabel: "capture→display")
+            let strip = TelemetryStrip(snapshot: .empty, resolution: "2048×1280 @2x", codec: "raw", latencyLabel: ShareView.latencyLabel)
             return NSHostingController(rootView: strip.frame(width: width)).sizeThatFits(in: CGSize(width: width, height: 10_000))
         }
         let wide = measure(1200), narrow = measure(350), tiny = measure(150)
