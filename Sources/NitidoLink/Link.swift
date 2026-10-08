@@ -104,7 +104,8 @@ public final class Link: @unchecked Sendable {
             case .failed(let e):
                 log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
                 noteKeyMismatch(e)
-                finish(.failed(e.localizedDescription))
+                // Network.framework expects a failed connection to be cancelled; until then it holds on to it.
+                finish(.failed(e.localizedDescription)); connection.cancel()
             case .cancelled: finish(.cancelled)
             case .waiting(let e):
                 // A failed TLS handshake (wrong code) parks a client connection in .waiting, where
@@ -176,6 +177,8 @@ public final class Link: @unchecked Sendable {
     /// Cancels without sending bye, like a cable pull. Used by tests and when the process dies.
     public func abort() { queue.async { [self] in pingTimer?.cancel(); pingTimer = nil; connection.cancel() } }
     func muteForTesting() { queue.async { [self] in muted = true } }
+    /// Test only: what Network.framework says the connection is doing.
+    var connectionStateForTesting: NWConnection.State { connection.state }
     /// Test only: counts bytes as waiting to be sent (a negative count takes them back), as a congested network would.
     func addBacklogForTesting(_ bytes: Int) { lock.withLock { backlog += bytes } }
 
@@ -217,7 +220,7 @@ public final class Link: @unchecked Sendable {
             if let error {
                 guard up else { finish(.cancelled); return }
                 log.error("receive failed: \(error.localizedDescription, privacy: .public)")
-                finish(.failed(error.localizedDescription)); return
+                finish(.failed(error.localizedDescription)); connection.cancel(); return
             }
             if complete {
                 guard up else { finish(.cancelled); return }

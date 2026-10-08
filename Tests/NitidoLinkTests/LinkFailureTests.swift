@@ -69,6 +69,25 @@ final class LinkFailureTests: XCTestCase {
         silent.stop()
     }
 
+    /// Network.framework expects `cancel()` after `.failed`; until then the connection holds on to what it uses, here
+    /// until the link is freed. A wrong code fails the sharer's incoming link with the TLS error as `.failed`.
+    func testAFailedConnectionIsCancelled() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let viewer = Link.connect(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "0000", sharerName: "Sharer", hello: hello(.view))
+        var incoming = advertiser.incoming.makeAsyncIterator()
+        guard let sharer = await incoming.next() else { return XCTFail("no incoming link") }
+        let end = await outcome(of: sharer, within: 5)
+        guard case .ended(last: .failed?) = end else { return XCTFail("expected .failed, got \(end)") }
+        let deadline = ContinuousClock.now + .seconds(1)
+        while sharer.connectionStateForTesting != .cancelled, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(sharer.connectionStateForTesting, .cancelled)
+        if case .failed = sharer.state {} else { XCTFail("state is \(sharer.state)") }
+        viewer.close(); advertiser.stop()
+    }
+
     func testPongSampleKeepsHonestSamplesAndDropsForgedOnes() {
         let sent: UInt64 = 999_990_000_000, now = 1_000.0   // sent at 999.99 s, answered at 1000 s
         let honest = Link.pongSample(sentTNs: sent, originalTNs: sent, replyTNs: 5_000_000_000_000, now: now)
