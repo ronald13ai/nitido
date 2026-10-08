@@ -56,6 +56,9 @@ public final class ViewModel {
     /// When the viewer last asked the sharer for a keyframe: a decoder that keeps skipping asks again only once a
     /// second has passed (`handleIncoming`).
     @ObservationIgnored private var keyframeAskedAt: CFTimeInterval?
+    /// The link is ready, the first time or again, and no keyframe has come since: the decoder has nothing a delta could
+    /// refer to, or only the frame from before the drop, so deltas wait for the keyframe asked for (`handleIncoming`).
+    @ObservationIgnored private var awaitingKeyframe = false
     private var telemetry = Telemetry(now: CACurrentMediaTime())
     private var tasks: [Task<Void, Never>] = []
     /// A negative or huge glass-to-glass estimate was logged once already on this connection (reset on `.ready`).
@@ -210,7 +213,7 @@ public final class ViewModel {
 
     public func disconnect() {
         link?.close(); link = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []
-        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil
+        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil; awaitingKeyframe = false
         ink.clearRemote()
         pixelSize = .zero; codecLabel = "·"; codecNotice = nil; renderFailure = nil; sharerName = ""
         state = .browsing
@@ -242,6 +245,7 @@ public final class ViewModel {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
         case .ready:
             state = .connected; connectionCount += 1; decodeFailures = 0; lastSeq = nil; reportedClockMismatch = false
+            awaitingKeyframe = true
             askForKeyframe()
         case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
         case .codeRejected:
@@ -297,6 +301,15 @@ public final class ViewModel {
                 if (2..<600).contains(gap) { for _ in 1..<gap { telemetry.recordDrop(at: now) } }
             }
             lastSeq = f.seq
+            if awaitingKeyframe {
+                // Decoded against the frame from before the drop, it would show a corrupted picture until the keyframe.
+                // The keyframe was asked for on `.ready`; again only if a second passes without it.
+                guard f.isKey else {
+                    if keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
+                    return
+                }
+                awaitingKeyframe = false
+            }
             guard let decoder else { askForKeyframe(); return }
             // Decoded off the main actor (`decoded`, `decodeFailed`), so ink, cursor and the presented handlers the
             // pacer depends on never wait behind a hardware decode.

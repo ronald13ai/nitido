@@ -103,6 +103,10 @@ private func realDelta() async throws -> EncodedFrame {
 @MainActor
 private final class ReceivedFrames { var frames: [VideoFrame] = [] }
 
+/// Every message a plain viewer link received, in order.
+@MainActor
+private final class ReceivedMessages { var messages: [Message] = [] }
+
 /// Set by an observation's change handler, which may run on any thread.
 private final class Fired: @unchecked Sendable { var value = false }
 
@@ -349,20 +353,22 @@ final class ViewerLinkTests: XCTestCase {
         let viewer = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
         try await waitUntil("the sharer sends to the viewer") { share.isSending }
         let link = try XCTUnwrap(share.link)
-        func frame(_ seq: UInt32, isKey: Bool) -> EncodedFrame {
-            EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: isKey, data: Data(count: 50_000), parameterSets: [], codec: .hevc, width: 320, height: 180)
+        func frame(_ seq: UInt32, isKey: Bool, bytes: Int = 50_000) -> EncodedFrame {
+            EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: isKey, data: Data(count: bytes), parameterSets: [], codec: .hevc, width: 320, height: 180)
         }
+        // The viewer's first keyframe goes out (1 kB), so the deltas after it are the backlog rule's to skip.
+        share.handleEncoded(frame(0, isKey: true, bytes: 1_000))
         let congestion = 20 * share.frameBytes
         link.addBacklogForTesting(congestion)
         for seq in 1...5 { share.handleEncoded(frame(UInt32(seq), isKey: false)) }
         try await Task.sleep(for: .milliseconds(400))    // the 250 ms loop publishes the figures
-        XCTAssertEqual(share.snapshot.bitrateMbps, 0, "nothing went out")
+        XCTAssertEqual(share.snapshot.bitrateMbps, 1_000 * 8 / 1e6, accuracy: 1e-9, "the keyframe only: the skipped deltas add nothing")
         XCTAssertGreaterThanOrEqual(share.snapshot.droppedLastSecond, 5)
 
         link.addBacklogForTesting(-congestion)
         share.handleEncoded(frame(6, isKey: true))
-        try await waitUntil("the keyframe that went out counts") { share.snapshot.bitrateMbps > 0 }
-        XCTAssertEqual(share.snapshot.bitrateMbps, 50_000 * 8 / 1e6, accuracy: 0.001, "the keyframe alone")
+        try await waitUntil("the keyframe that went out counts") { share.snapshot.bitrateMbps >= 50_000 * 8 / 1e6 }
+        XCTAssertLessThanOrEqual(share.snapshot.bitrateMbps, 51_000 * 8 / 1e6 + 1e-9, "the two keyframes, and not the skipped deltas")
         viewer.close()
         await share.stop()
     }
@@ -730,6 +736,59 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("deltas go out again") { received.frames.count > keyed }
         XCTAssertFalse(received.frames[keyed].isKey)
         viewer.close()
+        await share.stop()
+    }
+
+    /// Spec 1 point 6 and spec 8: a viewer that takes over, or pairs again, has none of the frames the encoder's deltas in
+    /// flight refer to (or only the one from before the drop), so it gets nothing before its keyframe: the deltas that
+    /// were already in the encoder are held back, and the keyframe goes out with its setup.
+    @MainActor
+    func testANewViewerGetsNoDeltaBeforeItsKeyframe() async throws {
+        let (share, _) = try await listeningShare()
+        let key = try await realKeyframe()
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let viewer = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
+        let received = ReceivedMessages()
+        let reader = Task { @MainActor in for await m in viewer.messages { received.messages.append(m) } }
+        defer { reader.cancel() }
+        try await waitUntil("the sharer sends to the viewer") { share.isSending }
+        // A delta still in the encoder when the viewer took over, then the keyframe the takeover asked for.
+        share.handleEncoded(EncodedFrame(seq: 7, captureHostTimeNs: 1, isKey: false, data: Data([0, 0, 0, 1, 2]), parameterSets: [],
+                                         codec: key.codec, width: key.width, height: key.height))
+        share.handleEncoded(key)
+        try await waitUntil("the keyframe reaches the viewer") {
+            received.messages.contains { if case .videoFrame(let f) = $0 { return f.isKey }; return false }
+        }
+        let video = received.messages.filter { if case .videoConfig = $0 { return true }; if case .videoFrame = $0 { return true }; return false }
+        XCTAssertEqual(video, [.videoConfig(try XCTUnwrap(key.videoConfig)), .videoFrame(key.videoFrame)], "the setup and the keyframe, no delta")
+        XCTAssertEqual(share.snapshot.droppedLastSecond, 0, "a delta the viewer could not use is not a dropped frame")
+        viewer.close()
+        await share.stop()
+    }
+
+    /// The viewer's side of the same rule: once its link is ready (the first time or again), a delta that arrives before
+    /// the keyframe never reaches the decoder, which would decode it against the frame from before the drop. It is
+    /// neither a decode failure nor a dropped frame, and the keyframe after it is shown.
+    @MainActor
+    func testTheViewerDecodesNoDeltaBeforeItsKeyframe() async throws {
+        let (share, _) = try await listeningShare()
+        let key = try await realKeyframe()
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(key.videoConfig)))
+        viewer.handleIncoming(.videoFrame(VideoFrame(seq: 1, captureHostTimeNs: 1, isKey: false, data: Data([0, 0, 0, 3, 1, 2, 3]))))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(viewer.decodeFailures, 0, "the delta never reached the decoder")
+        viewer.handleIncoming(.videoFrame(key.videoFrame))
+        try await waitUntil("the keyframe is shown") { shown.count >= 1 }
+        try await Task.sleep(for: .milliseconds(300))    // the 250 ms loop publishes the figures
+        XCTAssertEqual(viewer.snapshot.droppedLastSecond, 0)
+        XCTAssertEqual(viewer.decodeFailures, 0)
+        viewer.disconnect()
         await share.stop()
     }
 

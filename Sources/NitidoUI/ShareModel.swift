@@ -130,6 +130,9 @@ public final class ShareModel {
     private var needKeyAfterDrain = false
     /// When `keyframeAfterDrain` last asked for that keyframe, so it asks again only if none came within a second.
     @ObservationIgnored private var drainKeyRequestedAt: CFTimeInterval?
+    /// A viewer just took over (`linkStateChanged`): it has none of the frames the deltas still in the encoder refer to,
+    /// so none goes out to it before the keyframe the takeover asked for (`handleEncoded`).
+    @ObservationIgnored private var viewerNeedsKeyframe = false
     /// Connections that failed before they proved the code, over the whole share; three rotate it (`rotateCode`).
     private var failedHandshakes = 0
 
@@ -294,7 +297,7 @@ public final class ShareModel {
         // does not cut it off.
         let byeSent = link.map { viewer in Task { await viewer.closeAndWait() } }
         link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
-        viewerReconnecting = false; reconnectGraceToken &+= 1
+        viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         listeningPort = nil; networkNotice = nil
         loopback = false
@@ -399,12 +402,15 @@ public final class ShareModel {
             // Spec section 8: skip non-key frames while the backlog exceeds four frames' worth, then send the next
             // keyframe. A delta after a drop refers to frames the viewer never got, so none goes out until it has.
             let backlog = link.backlogBytes
-            if !f.isKey, needKeyAfterDrain || backlog > 4 * frameBytes {
+            if !f.isKey, viewerNeedsKeyframe {
+                // A delta encoded before the viewer took over: it never had the frames it refers to. Not a dropped frame,
+                // since this viewer was never going to see it; its keyframe is on the way (`sendKeyframe`).
+            } else if !f.isKey, needKeyAfterDrain || backlog > 4 * frameBytes {
                 if !needKeyAfterDrain { log.info("send backlog of \(backlog, privacy: .public) bytes; skipping frames until a keyframe") }
                 telemetry.recordDrop(at: now); needKeyAfterDrain = true
                 keyframeAfterDrain(backlog: backlog, now: now)
             } else {
-                if f.isKey { needKeyAfterDrain = false; drainKeyRequestedAt = nil }
+                if f.isKey { needKeyAfterDrain = false; drainKeyRequestedAt = nil; viewerNeedsKeyframe = false }
                 if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
                 link.send(.videoFrame(f.videoFrame))
                 telemetry.recordBytes(f.data.count, at: now)
@@ -689,7 +695,7 @@ public final class ShareModel {
         link?.close(reason: ByeReason.sharingStopped); link = nil
         linkTasks.forEach { $0.cancel() }; linkTasks = []
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
-        isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1
+        isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
         advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil
     }
 
@@ -735,6 +741,7 @@ public final class ShareModel {
                 controller = BitrateController(initial: currentBitrate)
                 encoder.setBitrate(currentBitrate)
             }
+            viewerNeedsKeyframe = true
             sendKeyframe()
         case .failed(let m):
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
