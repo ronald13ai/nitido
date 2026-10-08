@@ -152,12 +152,30 @@ public final class ViewModel {
         (sink.visibleFrame ?? NSScreen.main?.visibleFrame).map { Fit.limit(visibleFrame: $0) }
     }
 
+    /// The code as the key needs it: ASCII digits, the first four. A decimal digit of any script (full-width from a
+    /// Japanese IME, Arabic-Indic, Persian, Devanagari...) becomes its ASCII digit; anything else (letters,
+    /// superscripts, fractions) is dropped. The key is derived from the code's bytes, so the right code typed as
+    /// '١٢٣٤' would otherwise fail as a wrong one, and count toward the sharer's rotation.
+    nonisolated static func normalizedCode(_ s: String) -> String {
+        var digits = ""
+        for character in s where digits.count < 4 {
+            let scalars = character.unicodeScalars
+            guard scalars.count == 1, let scalar = scalars.first, scalar.properties.numericType == .decimal,
+                  let value = scalar.properties.numericValue, let digit = Int(exactly: value), (0...9).contains(digit)
+            else { continue }
+            digits += String(digit)
+        }
+        return digits
+    }
+
     /// A new Mac starts the wrong-code count again. The code field is not on screen here (the list is), so the reset
     /// never shakes it; the same holds for `retry`, which comes from a failure screen.
     public func select(_ peer: Peer) { code = ""; wrongCodeCount = 0; state = .enteringCode(peer) }
 
     public func connect() {
-        guard case .enteringCode(let peer) = state, code.count == 4, code.allSatisfy(\.isNumber) else { return }
+        let typed = Self.normalizedCode(code)
+        if typed != code { code = typed }
+        guard case .enteringCode(let peer) = state, code.count == 4, code.allSatisfy({ ("0"..."9").contains($0) }) else { return }
         let hello = Hello(protocolVersion: protocolVersion, role: .view, name: name, pixelWidth: 0, pixelHeight: 0,
                           scale: Float(NSScreen.main?.backingScaleFactor ?? 2))
         // The name the sharer keyed its listener with (Task 13): Bonjour may show it renamed, as "Name (2)".

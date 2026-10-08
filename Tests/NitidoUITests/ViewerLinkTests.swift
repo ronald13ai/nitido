@@ -1038,6 +1038,23 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// The right code typed on an Arabic keyboard ('١٢٣٤') pairs: the key is derived from ASCII digits, so the code is
+    /// normalized before it is used, instead of failing as a wrong code and counting toward the sharer's rotation.
+    @MainActor
+    func testACodeTypedInArabicIndicDigitsPairs() async throws {
+        let (share, _) = try await listeningShare()
+        let viewer = ViewModel()
+        viewer.select(peer(for: share))
+        viewer.code = String(share.code.unicodeScalars.map { Character(UnicodeScalar(0x0660 + $0.value - 0x30)!) })
+        XCTAssertNotEqual(viewer.code, share.code)
+        viewer.connect()
+        try await waitUntil("the viewer pairs") { viewer.state == .connected && share.isSending }
+        XCTAssertEqual(viewer.wrongCodeCount, 0)
+        XCTAssertEqual(viewer.code, share.code, "the field shows the code in ASCII digits")
+        viewer.disconnect()
+        await share.stop()
+    }
+
     /// Connect does nothing until the code is four digits.
     @MainActor
     func testConnectNeedsFourDigits() async throws {

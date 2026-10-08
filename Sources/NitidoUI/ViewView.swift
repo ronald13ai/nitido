@@ -59,7 +59,11 @@ public struct ViewView: View {
             TextField("0000", text: $model.code)
                 .textFieldStyle(.plain).font(Theme.Fonts.figures(34)).multilineTextAlignment(.center)
                 .foregroundStyle(Theme.Colors.gold).frame(width: 160)
-                .onChange(of: model.code) { _, v in model.code = String(v.filter(\.isNumber).prefix(4)) }
+                // Digits of any script become ASCII digits (the key is derived from them); nothing else gets in.
+                .onChange(of: model.code) { _, v in
+                    let typed = ViewModel.normalizedCode(v)
+                    if typed != v { model.code = typed }
+                }
                 .onSubmit { model.connect() }
                 .shake(trigger: model.wrongCodeCount)
             // One line, always there so nothing below moves: what the code is doing, or that it was wrong. Gold, as
