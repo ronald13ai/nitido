@@ -341,6 +341,7 @@ public final class ViewModel {
                 // that keyframe drops the frames still waiting (`superseded`). The first one asks for that keyframe; a
                 // later one asks again once a second has passed, so a lost request cannot freeze the picture.
                 telemetry.recordDrop(at: now)
+                if first { log.info("the video decoder fell behind with \(VideoDecoder.maxPending, privacy: .public) frames waiting; skipping to the next keyframe") }
                 if first || keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
             }
         case .stroke(let s): ink.applyRemote(s)

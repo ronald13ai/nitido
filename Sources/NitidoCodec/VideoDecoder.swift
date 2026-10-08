@@ -35,7 +35,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
     /// At most this many frames from the newest keyframe on wait for the decoder or are in it (`submit`); one from
     /// before that keyframe is dropped when its turn comes (`onSuperseded`).
-    static let maxPending = 3
+    public static let maxPending = 3
 
     /// Called on the decoder's queue, in decode order, by `submit(_:)` and `decode(_:)`.
     public var onFrame: (@Sendable (DecodedFrame) -> Void)? {

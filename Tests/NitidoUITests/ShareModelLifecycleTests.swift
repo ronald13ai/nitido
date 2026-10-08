@@ -2,6 +2,8 @@ import XCTest
 import CoreVideo
 import QuartzCore
 import CoreText
+import OSLog
+import NitidoTestSupport
 @testable import NitidoCapture
 @testable import NitidoCodec
 @testable import NitidoUI
@@ -831,7 +833,8 @@ final class ShareModelLifecycleTests: XCTestCase {
     /// Spec 4, in the codec loop: a decoder that falls behind drops work rather than queue it. With three frames waiting
     /// (the decoder's queue held here, as a stall would), the next delta starts a skip to the next keyframe and the one
     /// after it is skipped too; the keyframe then drops the three that waited instead of decoding them first. All five
-    /// count as dropped, none is a decode failure, and the keyframe reaches the screen.
+    /// count as dropped, none is a decode failure, and the keyframe reaches the screen. Spec 12: the skip is logged,
+    /// once.
     @MainActor
     func testTheCodecLoopSkipsToTheKeyframeWhenItFallsBehindAndCountsWhatItDropped() async throws {
         let journal = Journal()
@@ -853,6 +856,7 @@ final class ShareModelLifecycleTests: XCTestCase {
         try await waitUntil("the first keyframe reaches the screen") { pushed.count == 1 }
         let decoder = try XCTUnwrap(model.decoder)
         decoder.drainForTesting()
+        let mark = LogMark()
         decoder.suspendForTesting()
         for seq in 1...5 { model.handleEncoded(frame(UInt32(seq), isKey: false)) }   // 1 to 3 wait, 4 and 5 are skipped
         model.handleEncoded(frame(6, isKey: true))
@@ -862,6 +866,10 @@ final class ShareModelLifecycleTests: XCTestCase {
         try await waitUntil("the five frames count as dropped", timeout: 2) { model.snapshot.droppedLastSecond == 5 }
         XCTAssertEqual(model.decodeFailures, 0, "no delta reached the decoder")
         XCTAssertEqual(model.state, .capturing)
+        let skips = try mark.entries("share").filter { $0.composedMessage.contains("keyframe") && $0.composedMessage.contains("behind") }
+        XCTAssertEqual(skips.map(\.composedMessage),
+                       ["the codec loop's decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
+        XCTAssertEqual(skips.first?.level, .info)
         await model.stop()
     }
 

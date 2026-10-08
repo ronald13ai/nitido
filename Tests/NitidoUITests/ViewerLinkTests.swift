@@ -5,6 +5,8 @@ import Network
 import CoreVideo
 import QuartzCore
 import dnssd
+import OSLog
+import NitidoTestSupport
 import NitidoCore
 @testable import NitidoCodec
 @testable import NitidoCapture
@@ -805,6 +807,7 @@ final class ViewerLinkTests: XCTestCase {
     /// decoder's queue held here, as a stall would), the next delta starts a skip to the next keyframe and the one after
     /// it is skipped too; the keyframe then drops the three that waited instead of decoding them first. Every one of
     /// the five never reaches the screen and counts as dropped, none is a decode failure, and the keyframe is shown.
+    /// Spec 12: the skip is logged, once, as the sharer logs a skip for its send backlog.
     @MainActor
     func testAViewerThatFellBehindSkipsToTheKeyframeAndCountsWhatItDropped() async throws {
         let (share, _) = try await listeningShare()
@@ -824,6 +827,7 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the first keyframe is shown") { shown.count == 1 }
         let decoder = try XCTUnwrap(viewer.decoder)
         decoder.drainForTesting()
+        let mark = LogMark()
         decoder.suspendForTesting()
         for seq in 1...5 { viewer.handleIncoming(.videoFrame(frame(UInt32(seq), isKey: false))) }   // 1 to 3 wait, 4 and 5 are skipped
         viewer.handleIncoming(.videoFrame(frame(6, isKey: true)))
@@ -831,6 +835,9 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the keyframe after the skip is shown") { shown.count == 2 }
         try await waitUntil("the five frames count as dropped") { viewer.snapshot.droppedLastSecond == 5 }
         XCTAssertEqual(viewer.decodeFailures, 0, "no delta reached the decoder")
+        let skips = try mark.entries("view").filter { $0.composedMessage.contains("keyframe") && $0.composedMessage.contains("behind") }
+        XCTAssertEqual(skips.map(\.composedMessage), ["the video decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
+        XCTAssertEqual(skips.first?.level, .info)
         viewer.disconnect()
         await share.stop()
     }

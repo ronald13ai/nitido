@@ -459,6 +459,7 @@ public final class ShareModel {
             // one asks again once a second has passed.
             telemetry.recordDrop(at: now)
             encodeStarts.removeValue(forKey: f.seq)   // this frame never decodes
+            if first { log.info("the codec loop's decoder fell behind with \(VideoDecoder.maxPending, privacy: .public) frames waiting; skipping to the next keyframe") }
             if first || loopKeyframeAskedAt.map({ now - $0 >= 1 }) ?? true {
                 loopKeyframeAskedAt = now
                 encoder?.requestKeyframe()
