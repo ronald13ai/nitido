@@ -31,7 +31,7 @@ Replace every "(fill in)" with the figures you read from the strip while recordi
 
 ## How it works
 
-One Swift package: five library targets and a thin app target that only wires them together.
+One Swift package: five library targets and a thin app target (plus a test-support target under Tests/) that only wires them together.
 
 - `NitidoCore` is pure Swift and fully unit-tested: the wire protocol (big-endian, a `u32 length · u8 type` header, 11 message types, payloads capped at 16 MiB, unknown types skipped by length), rolling one-second telemetry with p50/p95, a deterministic bitrate controller, the minimum-RTT clock-offset filter, ink geometry (Catmull-Rom smoothing, speed-to-width, fade, undo) and the HKDF pairing key.
 - `NitidoCapture` wraps `SCContentSharingPicker` and `SCStream`: native pixel size, up to 60 fps, BGRA. Nítido's own windows are left out of the picker's choices, and a shared display is captured without the Nítido application, so its windows and sheets never appear in it. When the content changes size (a window resized, a display's mode changed), the stream restarts at the new size once it holds for 150 ms. Start, update and stop run one at a time, so a quick re-pick never races a stream being torn down.
