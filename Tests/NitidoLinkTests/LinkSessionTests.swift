@@ -18,6 +18,7 @@ final class LinkSessionTests: XCTestCase {
     }
 
     func testSessionReconnectsAfterTheSharerDropsWithoutBye() async throws {
+        let mark = LogMark()
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share), port: 47_211)
         _ = try await advertiser.start()
         let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: 47_211), code: "1234", sharerName: "Sharer", hello: hello(.view))
@@ -44,6 +45,11 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertTrue(seen.contains { if case .reconnecting(let a, let d) = $0 { return a == 1 && d == 0.5 }; return false })
         XCTAssertEqual(seen.filter { $0 == .ready }.count, 2)
         session.close(); advertiser.stop()
+
+        // The drop is in the log with its reason, not '<private>': the log is the failure record (spec 12).
+        let drops = try mark.entries("session").filter { $0.composedMessage.hasPrefix("link failed (") }
+        XCTAssertFalse(drops.isEmpty, "the drop was not logged")
+        XCTAssertEqual(drops.flatMap(\.redactedStrings), [], "Console shows these as <private>")
     }
 
     /// A wrong code fails the first handshake on the keys: the session ends as `.codeRejected` (the viewer's "Wrong

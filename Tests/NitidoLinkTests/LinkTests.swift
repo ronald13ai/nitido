@@ -1,6 +1,5 @@
 import XCTest
 import Network
-import OSLog
 import QuartzCore
 @testable import NitidoLink
 @testable import NitidoCore
@@ -122,7 +121,7 @@ final class LinkTests: XCTestCase {
     /// left without one, or that the receive failed (a clean stop or Back left those false errors behind). The sharer
     /// that closed logs none either.
     func testAByeLogsNoFalseErrorOnEitherSide() async throws {
-        let since = Date()
+        let mark = LogMark()
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
         for _ in 0..<5 {
@@ -134,13 +133,7 @@ final class LinkTests: XCTestCase {
         }
         advertiser.stop()
         try await Task.sleep(for: .milliseconds(200))
-        let until = Date()
-        // `position(date:)` only says where to start reading; entries from earlier tests still come, so the window is
-        // checked on every entry.
-        let store = try OSLogStore(scope: .currentProcessIdentifier)
-        let falseErrors = try store.getEntries(at: store.position(date: since))
-            .compactMap { $0 as? OSLogEntryLog }
-            .filter { $0.date >= since && $0.date <= until && $0.subsystem == "ai.ronar.nitido" && $0.category == "link" }
+        let falseErrors = try mark.entries("link")
             .map(\.composedMessage)
             .filter { $0.contains("closed the connection without bye") || $0.contains("receive failed") }
         XCTAssertEqual(falseErrors, [], "a link that ended on a bye logged a failure")

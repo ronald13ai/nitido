@@ -131,7 +131,7 @@ public final class LinkSession: @unchecked Sendable {
             return
         }
         let delay = Self.retryDelay(attempt: n)
-        log.info("link failed (\(reason)); retry \(n) in \(delay)s")
+        log.info("link failed (\(reason, privacy: .public)); retry \(n) in \(delay)s")
         stateOut.yield(.reconnecting(attempt: n, delay: delay))
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
