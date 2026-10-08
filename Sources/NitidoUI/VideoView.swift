@@ -29,6 +29,9 @@ public final class VideoView: NSView {
     public var onPresented: (@MainActor @Sendable (_ captureHostTimeNs: UInt64, _ presentedAt: Double) -> Void)?
     /// Called on the main actor for every frame that was not drawn.
     public var onDropped: (@MainActor @Sendable (Drop) -> Void)?
+    /// The display the picture is on: the window's backing scale and its screen's visible frame, each time the view
+    /// enters a window, the window changes screen or backing scale, or the screens change (`reportDisplay`).
+    var onDisplayChange: ((_ scale: CGFloat, _ visibleFrame: CGRect?) -> Void)?
     public private(set) var contentPixelSize: CGSize = .zero
 
     private let device = MTLCreateSystemDefaultDevice()!
@@ -38,7 +41,7 @@ public final class VideoView: NSView {
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
     /// Holds the newest frame, caps frames in flight and redraws after a resize or when the window shows again.
     let pacer = FramePacer()
-    /// The window whose occlusion and deminiaturize notifications this view observes.
+    /// The window whose occlusion, deminiaturize and screen-change notifications this view observes.
     private weak var observedWindow: NSWindow?
     /// Drops not logged yet, by reason. Logged at most once a second so a long stall does not flood the log.
     private var unloggedDrops: [Drop: Int] = [:]
@@ -54,6 +57,9 @@ public final class VideoView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .never
         pacer.host = self
+        // A screen's visible frame changes with the Dock and the menu bar, and its scale with the display's mode.
+        NotificationCenter.default.addObserver(self, selector: #selector(displayMayHaveChanged(_:)),
+                                               name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -70,7 +76,11 @@ public final class VideoView: NSView {
         return l
     }
 
-    public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); updateDrawableSize() }
+    public override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateDrawableSize()
+        reportDisplay()
+    }
     public override func layout() { super.layout(); updateDrawableSize() }
 
     /// Sizes the drawable to the view in pixels. A real change makes the pacer draw the held frame again, since
@@ -83,11 +93,13 @@ public final class VideoView: NSView {
         pacer.drawableSize = size
     }
 
-    /// The point size at which `pixelSize` shows 1:1 on this view's screen.
-    public func pointSize(forPixelSize px: CGSize) -> CGSize {
-        let s = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        return CGSize(width: px.width / s, height: px.height / s)
+    /// Tells `onDisplayChange` the display the picture is on; nothing while the view is in no window.
+    func reportDisplay() {
+        guard let window else { return }
+        onDisplayChange?(window.backingScaleFactor, window.screen?.visibleFrame)
     }
+
+    @objc private func displayMayHaveChanged(_ note: Notification) { reportDisplay() }
 
     /// `compareWith` is the raw frame shown left of `dividerAt` (0...1); the main buffer is shown on the right.
     public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
@@ -149,6 +161,7 @@ public final class VideoView: NSView {
         if let observedWindow {
             center.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: observedWindow)
             center.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: observedWindow)
+            center.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: observedWindow)
         }
         observedWindow = window
         guard let window else {
@@ -161,6 +174,9 @@ public final class VideoView: NSView {
                            name: NSWindow.didChangeOcclusionStateNotification, object: window)
         center.addObserver(self, selector: #selector(windowMayHaveBecomeVisible(_:)),
                            name: NSWindow.didDeminiaturizeNotification, object: window)
+        center.addObserver(self, selector: #selector(displayMayHaveChanged(_:)),
+                           name: NSWindow.didChangeScreenNotification, object: window)
+        reportDisplay()
     }
 
     /// Frames that arrived while the window was minimized, covered or hidden were kept, not drawn: show the newest.
@@ -247,13 +263,27 @@ extension VideoView: FrameDrawing {
     func frameDropped(_ drop: Drop) { dropped(drop) }
 }
 
-/// Lets a model push frames straight to the view, bypassing SwiftUI's update cycle.
-@MainActor
+/// Lets a model push frames straight to the view, bypassing SwiftUI's update cycle. It also says which display the
+/// picture is on (`backingScale`, `visibleFrame`), observably, so the window's 1:1 size follows a move to another
+/// display whatever else the window shows.
+@MainActor @Observable
 public final class FrameSink {
-    public weak var view: VideoView?
-    public var onPresented: (@MainActor @Sendable (UInt64, Double) -> Void)?
-    public var onDropped: (@MainActor @Sendable (VideoView.Drop) -> Void)?
+    @ObservationIgnored public weak var view: VideoView?
+    @ObservationIgnored public var onPresented: (@MainActor @Sendable (UInt64, Double) -> Void)?
+    @ObservationIgnored public var onDropped: (@MainActor @Sendable (VideoView.Drop) -> Void)?
+    /// The backing scale of the window the view is in; nil until it is in one.
+    public private(set) var backingScale: CGFloat?
+    /// The visible frame of that window's screen; nil until the view is in a window on a screen.
+    public private(set) var visibleFrame: CGRect?
     public init() {}
+
+    /// The view's window moved to another display, or its display changed. Assigns only what changed, so SwiftUI
+    /// re-evaluates the window's size only then.
+    func displayChanged(scale: CGFloat?, visibleFrame: CGRect?) {
+        if backingScale != scale { backingScale = scale }
+        if self.visibleFrame != visibleFrame { self.visibleFrame = visibleFrame }
+    }
+
     public func push(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
         guard let view else { onDropped?(.hidden); return }
         view.onPresented = onPresented
@@ -277,6 +307,13 @@ public final class FrameSink {
 public struct VideoSurface: NSViewRepresentable {
     public let sink: FrameSink
     public init(sink: FrameSink) { self.sink = sink }
-    public func makeNSView(context: Context) -> VideoView { let v = VideoView(frame: .zero); sink.view = v; return v }
-    public func updateNSView(_ view: VideoView, context: Context) { sink.view = view }
+    public func makeNSView(context: Context) -> VideoView { let v = VideoView(frame: .zero); attach(v); return v }
+    public func updateNSView(_ view: VideoView, context: Context) { attach(view) }
+
+    /// The sink pushes frames to this view and hears which display it is on, taking the current one at once.
+    private func attach(_ view: VideoView) {
+        sink.view = view
+        view.onDisplayChange = { [weak sink] scale, visibleFrame in sink?.displayChanged(scale: scale, visibleFrame: visibleFrame) }
+        view.reportDisplay()
+    }
 }

@@ -103,6 +103,9 @@ private func realDelta() async throws -> EncodedFrame {
 @MainActor
 private final class ReceivedFrames { var frames: [VideoFrame] = [] }
 
+/// Set by an observation's change handler, which may run on any thread.
+private final class Fired: @unchecked Sendable { var value = false }
+
 /// Both ends of a share in one process: a ShareModel fed by a fake capture source and a ViewModel, joined over the
 /// real TLS link on the loopback address (the sharer's own listener, so the code and the key are the real ones).
 final class ViewerLinkTests: XCTestCase {
@@ -281,6 +284,27 @@ final class ViewerLinkTests: XCTestCase {
 
         viewer.disconnect()
         await share.stop()
+    }
+
+    /// The viewer's 1:1 size follows the display the picture is on, observably (`FrameSink.displayChanged`), as the
+    /// sharer's does: dragged to a display of another scale, the window takes its new size with the strip hidden too.
+    @MainActor
+    func testTheViewerWindowSizeFollowsTheDisplayThePictureIsOn() async throws {
+        let viewer = ViewModel()
+        let key = try await realKeyframe()
+        viewer.handleIncoming(.hello(Hello(protocolVersion: protocolVersion, role: .share, name: "Mac", pixelWidth: 320, pixelHeight: 180, scale: 2)))
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(key.videoConfig)))
+        XCTAssertEqual(viewer.pixelSize, CGSize(width: 320, height: 180))
+        let visible = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        viewer.sink.displayChanged(scale: 2, visibleFrame: visible)
+        XCTAssertEqual(viewer.fittedPointSize, CGSize(width: 160, height: 90), "1:1 on a 2x display")
+
+        let fired = Fired()
+        withObservationTracking { _ = viewer.fittedPointSize } onChange: { fired.value = true }
+        viewer.sink.displayChanged(scale: 1, visibleFrame: visible)
+        XCTAssertTrue(fired.value, "the window hears that the display changed")
+        XCTAssertEqual(viewer.fittedPointSize, CGSize(width: 320, height: 180), "1:1 on a 1x display")
+        viewer.disconnect()
     }
 
     /// A frame the viewer cannot draw is said over the picture and counted as dropped, until a frame reaches the

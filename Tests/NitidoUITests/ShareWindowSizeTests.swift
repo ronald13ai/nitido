@@ -151,3 +151,41 @@ final class StripRowsTests: XCTestCase {
         XCTAssertGreaterThan(tiny.height, narrow.height)
     }
 }
+
+/// Set by an observation's change handler, which may run on any thread.
+private final class Fired: @unchecked Sendable {
+    var value = false
+}
+
+/// The window's 1:1 size follows the display the picture is on, observably: the sink hears it from the view's window
+/// (`FrameSink.displayChanged`), so a window dragged to a display of another scale takes its new size even with the
+/// strip hidden, when nothing else the view reads changes.
+final class DisplayChangeTests: XCTestCase {
+    @MainActor
+    func testTheShareWindowSizeFollowsTheDisplayThePictureIsOn() async throws {
+        var source: PickSource?
+        let model = ShareModel(makeSource: { let s = PickSource(); source = s; return s }, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        for _ in 0..<50 { await Task.yield() }
+        source?.pick(3024, 1890)
+        for _ in 0..<50 where model.pixelSize == .zero { await Task.yield() }
+        XCTAssertEqual(model.pixelSize, CGSize(width: 3024, height: 1890))
+
+        let visible = CGRect(x: 0, y: 0, width: 3000, height: 2000)
+        model.sink.displayChanged(scale: 2, visibleFrame: visible)
+        XCTAssertEqual(model.fittedPointSize, CGSize(width: 1512, height: 945), "1:1 on a 2x display")
+
+        let fired = Fired()
+        withObservationTracking { _ = model.fittedPointSize } onChange: { fired.value = true }
+        model.sink.displayChanged(scale: 1, visibleFrame: visible)
+        XCTAssertTrue(fired.value, "the window hears that the display changed")
+        XCTAssertEqual(model.fittedPointSize, Fit.size(natural: CGSize(width: 3024, height: 1890), limit: CGSize(width: 2960, height: 1880)),
+                       "on a 1x display the same pixels take twice the points, fitted to the screen")
+
+        let again = Fired()
+        withObservationTracking { _ = model.fittedPointSize } onChange: { again.value = true }
+        model.sink.displayChanged(scale: 1, visibleFrame: visible)
+        XCTAssertFalse(again.value, "the same display changes nothing")
+        await model.stop()
+    }
+}

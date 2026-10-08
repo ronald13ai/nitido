@@ -190,15 +190,18 @@ public final class ShareModel {
         return f < 1 ? "\(base) · \(Int((f * 100).rounded()))%" : base
     }
 
-    /// The content's point size at 1:1 on this view's screen.
+    /// The content's point size at 1:1 on the display the picture is on. The sink says which (SwiftUI observes it, so
+    /// the window takes the new size when it moves to a display of another scale); the main display until the view is
+    /// in a window.
     private var naturalPointSize: CGSize {
-        sink.view?.pointSize(forPixelSize: pixelSize) ?? CGSize(width: pixelSize.width / scale, height: pixelSize.height / scale)
+        let s = sink.backingScale ?? NSScreen.main?.backingScaleFactor ?? scale
+        return CGSize(width: pixelSize.width / s, height: pixelSize.height / s)
     }
 
-    /// Room for the picture on the window's screen, leaving space for the title bar, the strip and a margin.
+    /// Room for the picture on that display's screen, leaving space for the title bar, the strip and a margin.
     private var pictureLimit: CGSize? {
-        guard let screen = sink.view?.window?.screen ?? NSScreen.main else { return nil }
-        return CGSize(width: screen.visibleFrame.width - 40, height: screen.visibleFrame.height - 120)
+        guard let frame = sink.visibleFrame ?? NSScreen.main?.visibleFrame else { return nil }
+        return Fit.limit(visibleFrame: frame)
     }
 
     private var fitFactor: CGFloat {

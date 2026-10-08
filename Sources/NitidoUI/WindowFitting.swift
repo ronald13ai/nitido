@@ -9,6 +9,11 @@ enum Fit {
         return max(0.01, min(1, limit.width / natural.width, limit.height / natural.height))
     }
 
+    /// Room for a picture on a screen with `visibleFrame`, leaving space for the title bar, the strip and a margin.
+    static func limit(visibleFrame: CGRect) -> CGSize {
+        CGSize(width: visibleFrame.width - 40, height: visibleFrame.height - 120)
+    }
+
     /// `natural` itself when it fits (so 1:1 stays exact), otherwise scaled down and rounded to whole points.
     static func size(natural: CGSize, limit: CGSize) -> CGSize {
         let f = factor(natural: natural, limit: limit)

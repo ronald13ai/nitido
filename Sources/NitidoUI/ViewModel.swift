@@ -122,10 +122,20 @@ public final class ViewModel {
     /// left of a whole-point window; rounding it would scale the picture by a hair and blur every pixel.
     public var fittedPointSize: CGSize {
         guard pixelSize != .zero else { return CGSize(width: 640, height: 400) }
-        let natural = sink.view?.pointSize(forPixelSize: pixelSize) ?? CGSize(width: pixelSize.width / scale, height: pixelSize.height / scale)
-        // Room on the window's screen for the picture, leaving space for the title bar, the strip and a margin.
-        guard let screen = sink.view?.window?.screen ?? NSScreen.main else { return natural }
-        return Fit.size(natural: natural, limit: CGSize(width: screen.visibleFrame.width - 40, height: screen.visibleFrame.height - 120))
+        guard let limit = pictureLimit else { return naturalPointSize }
+        return Fit.size(natural: naturalPointSize, limit: limit)
+    }
+
+    /// The picture's point size at 1:1 on the display it is on. The sink says which (SwiftUI observes it, so the window
+    /// takes the new size when it moves to a display of another scale); the main display until the view is in a window.
+    private var naturalPointSize: CGSize {
+        let s = sink.backingScale ?? NSScreen.main?.backingScaleFactor ?? scale
+        return CGSize(width: pixelSize.width / s, height: pixelSize.height / s)
+    }
+
+    /// Room for the picture on that display's screen, leaving space for the title bar, the strip and a margin.
+    private var pictureLimit: CGSize? {
+        (sink.visibleFrame ?? NSScreen.main?.visibleFrame).map { Fit.limit(visibleFrame: $0) }
     }
 
     /// A new Mac starts the wrong-code count again. The code field is not on screen here (the list is), so the reset
