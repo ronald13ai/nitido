@@ -617,14 +617,22 @@ public final class ShareModel {
             }
             startAdvertising()
         case .cancelled:
-            // The system's "change shared content" picker can open over a live share; cancelling it keeps the current
-            // content. Only the first pick's cancel goes back to Welcome (spec 12).
-            guard state != .capturing else {
+            // Only the first pick's cancel goes back to Welcome (spec 12).
+            switch state {
+            case .picking:
+                state = .idle
+                onCancelled?()
+            case .capturing:
+                // The system's "change shared content" picker can open over a live share; cancelling it keeps the
+                // current content.
                 log.info("A picker was cancelled while capturing; the shared content stays")
-                return
+            case .failed:
+                // The capture ended (Stop Sharing in the menu bar) and the picker that could resume it was cancelled:
+                // the Share window keeps offering Retry (spec 12), rather than going back to Welcome.
+                log.info("The picker was cancelled after the capture ended; the failure stays")
+            case .idle:
+                break
             }
-            state = .idle
-            onCancelled?()
         case .stopped:
             state = .idle
         case .failed(let message):

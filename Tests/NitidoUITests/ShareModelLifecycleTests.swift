@@ -333,6 +333,35 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// Spec 12: after Stop Sharing in the menu bar the Share window offers Retry. The system's picker stays up to resume
+    /// the share, and cancelling it is not the first pick's cancel: the failure card stays, with its Retry, instead of
+    /// going back to Welcome. A pick from the picker after that still resumes the share.
+    @MainActor
+    func testCancellingThePickerAfterTheCaptureEndedKeepsTheFailure() async {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "z")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        var cancels = 0
+        model.onCancelled = { cancels += 1 }
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        source.emit(.failed("stopped"))
+        await drain()
+        XCTAssertEqual(model.state, .failed("stopped"))
+        source.emit(.cancelled)
+        await drain()
+        XCTAssertEqual(model.state, .failed("stopped"), "the failure card stays, with Retry")
+        XCTAssertEqual(cancels, 0, "the app stays on the Share screen")
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        XCTAssertEqual(model.state, .capturing, "a pick after the cancel still resumes the share")
+        XCTAssertEqual(journal.lines, ["present z0"], "the same session")
+        await model.stop()
+    }
+
     /// A model dropped without Stop is still released: its loops do not hold it.
     @MainActor
     func testLoopsDoNotKeepTheModelAlive() async {
