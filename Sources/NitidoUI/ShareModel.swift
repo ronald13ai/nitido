@@ -104,7 +104,7 @@ public final class ShareModel {
     public private(set) var connectionCount = 0
     /// The connection the gold ring last played for, so the Share screen shown again draws it at rest (`ConnectRing`).
     @ObservationIgnored public var ringShownFor = 0
-    /// The picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
+    /// The first pick's picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
     public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
     public private(set) var networkNotice: String?
