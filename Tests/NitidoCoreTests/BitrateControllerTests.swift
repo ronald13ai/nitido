@@ -30,6 +30,25 @@ final class BitrateControllerTests: XCTestCase {
         XCTAssertEqual(c.update(rttMs: 10, backlogBytes: twoFrames + 1, frameAgeMs: nil, fps: 60, now: 2), 11_250_000)
     }
 
+    /// Congestion right after a 10% step-up, the likeliest moment for it, cuts at once: only a cut holds for 2 s.
+    func testCongestionRightAfterARaiseCutsAtOnce() {
+        var c = BitrateController(initial: 20_000_000)
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: 0, frameAgeMs: nil, fps: 60, now: 0), 22_000_000)
+        // The first whole byte over two frames at 22 Mbps (91 666.7).
+        let overTwoFrames = 22_000_000 * 2 / 8 / 60 + 1
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: overTwoFrames, frameAgeMs: nil, fps: 60, now: 0.25), 16_500_000)
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: overTwoFrames, frameAgeMs: nil, fps: 60, now: 1), 16_500_000)
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: overTwoFrames, frameAgeMs: nil, fps: 60, now: 2.25), 12_375_000)
+    }
+
+    func testNoRaiseWithinTwoSecondsOfACut() {
+        var c = BitrateController(initial: 20_000_000)
+        let twoFrames = 20_000_000 * 2 / 8 / 60
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: twoFrames + 1, frameAgeMs: nil, fps: 60, now: 0), 15_000_000)
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: 0, frameAgeMs: nil, fps: 60, now: 1), 15_000_000)
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: 0, frameAgeMs: nil, fps: 60, now: 2), 16_500_000)
+    }
+
     func testRTTAboveBaselinePlusFortyCuts() {
         var c = BitrateController(initial: 20_000_000)
         XCTAssertEqual(c.update(rttMs: 10, backlogBytes: oneFrame, frameAgeMs: nil, fps: 60, now: 0), 20_000_000)
