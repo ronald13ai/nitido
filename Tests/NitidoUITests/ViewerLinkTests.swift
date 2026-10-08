@@ -84,6 +84,25 @@ private func realKeyframe() async throws -> EncodedFrame {
     throw XCTSkip("the hardware encoder emitted no keyframe within 5 s")
 }
 
+/// A real delta frame from the hardware encoder: the frame after a keyframe, with a different picture.
+private func realDelta() async throws -> EncodedFrame {
+    let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+    defer { encoder.invalidate() }
+    let (frames, out) = AsyncStream<EncodedFrame>.makeStream()
+    encoder.onFrame = { out.yield($0) }
+    Task { try? await Task.sleep(for: .seconds(5)); out.finish() }
+    var next = frames.makeAsyncIterator()
+    XCTAssertTrue(encoder.encode(try stripedFrame(index: 0).pixelBuffer, captureHostTimeNs: 0))
+    guard await next.next() != nil else { throw XCTSkip("the hardware encoder emitted no frame within 5 s") }
+    XCTAssertTrue(encoder.encode(try stripedFrame(index: 1).pixelBuffer, captureHostTimeNs: 1))
+    while let frame = await next.next() { if !frame.isKey { return frame } }
+    throw XCTSkip("the hardware encoder emitted no delta frame within 5 s")
+}
+
+/// The video frames a plain viewer link received, in order.
+@MainActor
+private final class ReceivedFrames { var frames: [VideoFrame] = [] }
+
 /// Both ends of a share in one process: a ShareModel fed by a fake capture source and a ViewModel, joined over the
 /// real TLS link on the loopback address (the sharer's own listener, so the code and the key are the real ones).
 final class ViewerLinkTests: XCTestCase {
@@ -402,6 +421,90 @@ final class ViewerLinkTests: XCTestCase {
         deadline.cancel()
         XCTAssertTrue(askedForKeyframe, "a viewer that pairs again asks for a keyframe")
         viewer.disconnect()
+    }
+
+    /// A sharer that died and came back with a new code (every launch makes one) turns the viewer's reconnect away in
+    /// the handshake: the viewer asks for the new code instead of saying Reconnecting forever, which would also cost
+    /// the sharer a failed handshake every few seconds and rotate its code under whoever is typing it.
+    @MainActor
+    func testAViewerWhoseSharerCameBackWithANewCodeAsksForIt() async throws {
+        let sharerHello = Hello(protocolVersion: protocolVersion, role: .share, name: "Sharer", pixelWidth: 320, pixelHeight: 180, scale: 2)
+        let first = try Advertiser(name: "Sharer", code: "1234", hello: sharerHello, port: 47_215)
+        _ = try await first.start()
+        let sharer = Peer(id: "loopback", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: 47_215))
+        let viewer = ViewModel()
+        viewer.select(sharer)
+        viewer.code = "1234"
+        viewer.connect()
+        var incoming = first.incoming.makeAsyncIterator()
+        guard let dropped = await incoming.next() else { return XCTFail("no connection") }
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        dropped.abort(); first.stop()                    // the sharer dies without bye...
+        // ...and comes back on the same port with a new code, once the stopped listener has let the port go.
+        var relaunched: Advertiser?
+        for _ in 0..<40 where relaunched == nil {
+            let advertiser = try Advertiser(name: "Sharer", code: "5678", hello: sharerHello, port: 47_215)
+            do { _ = try await advertiser.start(); relaunched = advertiser } catch { advertiser.stop(); try await Task.sleep(for: .milliseconds(25)) }
+        }
+        guard let relaunched else { throw XCTSkip("port 47215 stayed in use") }
+        let attempts = Task { () -> Int in var n = 0; for await _ in relaunched.incoming { n += 1 }; return n }
+        try await waitUntil("the viewer asks for the new code", timeout: 15) {
+            viewer.state == .failed("The code on Sharer has changed. Enter the new code to connect again.", sharer)
+        }
+        try await Task.sleep(for: .seconds(2))           // longer than the next backoff: nothing tries again
+        relaunched.stop()
+        let tried = await attempts.value
+        XCTAssertEqual(tried, 1, "one failed handshake on the sharer, not one every few seconds")
+        viewer.retry()
+        XCTAssertEqual(viewer.state, .enteringCode(sharer))
+    }
+
+    /// Spec section 8: once frames are dropped for the send backlog, no delta goes out (it would refer to frames the
+    /// viewer never got) until a keyframe has, and that keyframe follows as soon as the backlog drains under one frame,
+    /// even from a source that went still and sends no frame that could check the drain.
+    @MainActor
+    func testAfterABacklogDropOnlyAKeyframeGoesOutEvenFromAStillSource() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let viewer = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
+        let received = ReceivedFrames()
+        let reader = Task { @MainActor in
+            for await m in viewer.messages { if case .videoFrame(let f) = m { received.frames.append(f) } }
+        }
+        defer { reader.cancel() }
+        try await waitUntil("the viewer gets the keyframe it paired with") { received.frames.first?.isKey == true }
+        let link = try XCTUnwrap(share.link)
+        let delta = try await realDelta()
+        let sent = received.frames.count
+
+        // Congested: more than four frames' worth waits to be sent, so deltas are skipped.
+        let congestion = 20 * share.frameBytes
+        link.addBacklogForTesting(congestion)
+        for _ in 0..<3 { share.handleEncoded(delta) }
+        try await Task.sleep(for: .milliseconds(400))    // the 250 ms loop runs, and sends no keyframe yet
+        XCTAssertEqual(received.frames.count, sent, "nothing goes out while the backlog exceeds four frames")
+
+        // Draining, but still over one frame: a delta now would refer to the frames just skipped.
+        let draining = 5 * share.frameBytes / 2
+        link.addBacklogForTesting(draining - congestion)
+        for _ in 0..<3 { share.handleEncoded(delta) }
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(received.frames.count, sent, "no delta after a drop, and no keyframe before the drain")
+
+        // Drained, and the source is still: no frame comes to check the drain, the 250 ms loop sends the keyframe.
+        link.addBacklogForTesting(-draining)
+        try await waitUntil("a keyframe follows the drain") { received.frames.count > sent }
+        XCTAssertTrue(received.frames[sent].isKey, "the first frame after the drop is a keyframe")
+
+        // With the keyframe there, deltas go out again.
+        let keyed = received.frames.count
+        share.handleEncoded(delta)
+        try await waitUntil("deltas go out again") { received.frames.count > keyed }
+        XCTAssertFalse(received.frames[keyed].isKey)
+        viewer.close()
+        await share.stop()
     }
 
     /// Three connections that fail to prove the code mean someone is guessing: the sharer shows a new code and listens

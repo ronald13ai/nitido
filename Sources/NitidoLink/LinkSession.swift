@@ -6,7 +6,8 @@ import os
 private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 
 /// A viewer-side connection that survives drops: reconnects with backoff (0.5, 1, 2, 5 s) while open.
-/// A failure before the first ready state is treated as a bad code and ends the session.
+/// A failure before the first ready state is treated as a bad code and ends the session, and so does a reconnect the
+/// sharer turns away with another key: its code changed (a new one every launch, or after three failed handshakes).
 public final class LinkSession: @unchecked Sendable {
     public enum State: Sendable, Equatable {
         case connecting(attempt: Int)
@@ -67,7 +68,7 @@ public final class LinkSession: @unchecked Sendable {
                     lock.withLock { everReady = true; attempt = 0 }
                     stateOut.yield(.ready)
                 case .failed(let reason):
-                    scheduleRetry(after: reason)
+                    scheduleRetry(after: reason, codeRejected: link.keyMismatch)
                 case .cancelled:
                     let stillOpen = lock.withLock { open }
                     if stillOpen { end("The sharer ended the session.") }
@@ -77,11 +78,19 @@ public final class LinkSession: @unchecked Sendable {
         }
     }
 
-    private func scheduleRetry(after reason: String) {
+    private func scheduleRetry(after reason: String, codeRejected: Bool) {
         // `attempt` counts the attempts since the last ready one (0 right after a drop); `n` is the one this retry makes.
         lock.lock(); let stillOpen = open, ready = everReady, n = attempt + 1; lock.unlock()
         guard stillOpen else { return }
         guard ready else { end("Could not connect. Check the code and try again."); return }
+        // The sharer answered, but with a key this code does not make: it was relaunched (a new code every launch) or
+        // rotated its code. No retry can pass, and each one would count there as a failed handshake, three of which
+        // rotate its code again under whoever is typing it: end the session and ask for the code it shows now.
+        guard !codeRejected else {
+            log.error("reconnect refused: the sharer no longer takes this code (\(reason, privacy: .public))")
+            end("The code on \(sharerName) has changed. Enter the new code to connect again.")
+            return
+        }
         let delay = min(5, 0.5 * pow(2, Double(max(0, n - 1))))
         log.info("link failed (\(reason)); retry \(n) in \(delay)s")
         stateOut.yield(.reconnecting(attempt: n, delay: delay))

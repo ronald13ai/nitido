@@ -78,8 +78,9 @@ public final class ShareModel {
     private(set) var advertiser: Advertiser?
     /// The port the listener bound, once it is ready (logged; tests connect to it directly).
     @ObservationIgnored private(set) var listeningPort: UInt16?
-    /// The viewer: a connection that proved the code. Only it is sent to and heard from.
-    private var link: NitidoLink.Link?
+    /// The viewer: a connection that proved the code. Only it is sent to and heard from. Internal, not private, so a
+    /// test can congest it.
+    private(set) var link: NitidoLink.Link?
     private var linkTasks: [Task<Void, Never>] = []
     /// Connections the listener took that have not proved the code yet, each with the loop that follows its states
     /// (`attach`). Until one does, it may be anybody on the network, so it never touches the viewer.
@@ -90,8 +91,13 @@ public final class ShareModel {
     private var controller = BitrateController(initial: 20_000_000)
     /// The encoder's rate, which also sizes a frame for the backlog dropping rule (`handleEncoded`).
     private var currentBitrate = 20_000_000
-    /// Frames were dropped for the backlog: once it drains, the encoder is asked for a keyframe.
+    /// One frame's worth of bytes at the current rate: the unit of the backlog dropping rule. Internal for tests.
+    var frameBytes: Int { currentBitrate / 8 / 60 }
+    /// Frames were dropped for the backlog, so the viewer lacks the frames the next deltas refer to: every non-key frame
+    /// is skipped until a keyframe goes out, asked for once the backlog drains under one frame (`keyframeAfterDrain`).
     private var needKeyAfterDrain = false
+    /// When `keyframeAfterDrain` last asked for that keyframe, so it asks again only if none came within a second.
+    @ObservationIgnored private var drainKeyRequestedAt: CFTimeInterval?
     /// Connections that failed before they proved the code; three rotate it.
     private var failedHandshakes = 0
 
@@ -236,6 +242,8 @@ public final class ShareModel {
                                                     fps: max(snapshot.captureFPS, 30), now: CACurrentMediaTime())
                         if bps != currentBitrate { currentBitrate = bps; encoder.setBitrate(bps) }
                     }
+                    // A source that went still after the drop sends no frame that could check the drain: this does.
+                    if isSending, let link { keyframeAfterDrain(backlog: link.backlogBytes, now: CACurrentMediaTime()) }
                     snapshot = telemetry.snapshot(now: CACurrentMediaTime())
                     codecMs = loopback ? codecWindow.stats(now: CACurrentMediaTime())?.p50 : nil
                 }
@@ -331,11 +339,15 @@ public final class ShareModel {
         encodeFailures = 0
         telemetry.recordBytes(f.data.count, at: now)
         if isSending, let link {
-            let frameBytes = currentBitrate / 8 / 60
-            if !f.isKey, link.backlogBytes > 4 * frameBytes {
+            // Spec section 8: skip non-key frames while the backlog exceeds four frames' worth, then send the next
+            // keyframe. A delta after a drop refers to frames the viewer never got, so none goes out until it has.
+            let backlog = link.backlogBytes
+            if !f.isKey, needKeyAfterDrain || backlog > 4 * frameBytes {
+                if !needKeyAfterDrain { log.info("send backlog of \(backlog, privacy: .public) bytes; skipping frames until a keyframe") }
                 telemetry.recordDrop(at: now); needKeyAfterDrain = true
+                keyframeAfterDrain(backlog: backlog, now: now)
             } else {
-                if needKeyAfterDrain, link.backlogBytes < frameBytes { needKeyAfterDrain = false; encoder?.requestKeyframe() }
+                if f.isKey { needKeyAfterDrain = false; drainKeyRequestedAt = nil }
                 if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
                 link.send(.videoFrame(f.videoFrame))
             }
@@ -366,6 +378,18 @@ public final class ShareModel {
             if decodeFailures >= 10 { failCodec("decoder", message: "Video decoding keeps failing."); return }
             encoder?.requestKeyframe()
         }
+    }
+
+    /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode again.
+    /// `sendKeyframe` covers a still source too (it encodes the newest frame again), so the viewer never keeps a damaged
+    /// or stale picture until the content moves. Asks again only if no keyframe went out within a second. With no
+    /// encoder there is nothing to ask: the next frame makes one, and a fresh encoder starts with a keyframe.
+    private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
+        guard needKeyAfterDrain, backlog < frameBytes, encoder != nil else { return }
+        if let asked = drainKeyRequestedAt, now - asked < 1 { return }
+        drainKeyRequestedAt = now
+        log.info("the send backlog drained after dropped frames; sending a keyframe")
+        sendKeyframe()
     }
 
     /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed,

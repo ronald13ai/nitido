@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import QuartzCore
+import Security
 import NitidoCore
 import os
 
@@ -10,7 +11,7 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "link")
 ///
 /// Threading: everything that changes the link runs on `queue` (Network.framework callbacks, the ping timer,
 /// the connect deadlines, `close()` and `abort()`). The values callers read from other threads (`state`, `peerHello`,
-/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`) and the ping bookkeeping live behind `lock`.
+/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`) and the ping bookkeeping live behind `lock`.
 public final class Link: @unchecked Sendable {
     public enum State: Sendable, Equatable { case connecting, ready, failed(String), cancelled }
 
@@ -25,6 +26,9 @@ public final class Link: @unchecked Sendable {
     public var backlogBytes: Int { lock.withLock { backlog } }
     /// True once the link has been ready, even after it ended: it proved the code.
     public var wasReady: Bool { lock.withLock { _wasReady } }
+    /// True when the TLS handshake failed because the two sides derived different keys: with the pre-shared key, the
+    /// viewer's code is not the one the sharer listens with ("bad MAC"). Set before `states` reports the failure.
+    public var keyMismatch: Bool { lock.withLock { _keyMismatch } }
 
     private let connection: NWConnection
     private let hello: Hello
@@ -44,6 +48,7 @@ public final class Link: @unchecked Sendable {
     private var _clockOffsetNs: Int64?
     private var backlog = 0
     private var _wasReady = false
+    private var _keyMismatch = false
     private var nextPing: UInt32 = 0
     /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
     private var pingSentAt: [UInt32: UInt64] = [:]
@@ -92,6 +97,7 @@ public final class Link: @unchecked Sendable {
                 setState(.ready); send(.hello(hello)); receiveLoop(); startPings()
             case .failed(let e):
                 log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
+                noteKeyMismatch(e)
                 finish(.failed(e.localizedDescription))
             case .cancelled: finish(.cancelled)
             case .waiting(let e):
@@ -99,6 +105,7 @@ public final class Link: @unchecked Sendable {
                 // Network.framework would retry the same doomed handshake forever: end it as a failure.
                 if case .tls = e {
                     log.error("handshake failed: \(e.localizedDescription, privacy: .public)")
+                    noteKeyMismatch(e)
                     finish(.failed(e.localizedDescription)); connection.cancel()
                 } else {
                     // Refused, unreachable or Local Network denied: Network.framework retries on its own, which
@@ -147,6 +154,20 @@ public final class Link: @unchecked Sendable {
     /// Cancels without sending bye, like a cable pull. Used by tests and when the process dies.
     public func abort() { queue.async { [self] in pingTimer?.cancel(); pingTimer = nil; connection.cancel() } }
     func muteForTesting() { queue.async { [self] in muted = true } }
+    /// Test only: counts bytes as waiting to be sent (a negative count takes them back), as a congested network would.
+    func addBacklogForTesting(_ bytes: Int) { lock.withLock { backlog += bytes } }
+
+    /// The TLS statuses that mean the other side holds another key (RFC 5489 PSK: the Finished message does not
+    /// decrypt). The side that fails to decrypt reports its own status, the other one the peer's alert.
+    static let keyMismatchStatuses: Set<OSStatus> = [
+        errSSLBadRecordMac, errSSLPeerBadRecordMac, errSSLDecryptionFail, errSSLPeerDecryptionFail, errSSLPeerDecryptError,
+    ]
+
+    /// On `queue`, before the failure is reported: remembers a handshake that failed because the keys differ.
+    private func noteKeyMismatch(_ e: NWError) {
+        guard case .tls(let status) = e, Self.keyMismatchStatuses.contains(status), state == .connecting else { return }
+        lock.withLock { _keyMismatch = true }
+    }
 
     /// On `queue`: fails a link that is still connecting; does nothing once it is ready or ended.
     private func giveUpConnecting(_ reason: String) {

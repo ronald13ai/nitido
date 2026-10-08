@@ -6,6 +6,17 @@ import Network
 final class LinkSessionTests: XCTestCase {
     private func hello(_ role: Role) -> Hello { Hello(protocolVersion: protocolVersion, role: role, name: role == .share ? "Sharer" : "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2) }
 
+    /// A sharer listening on `port` again, as soon as the one stopped there has let the port go (its stop and its
+    /// dropped connection finish on their own queues).
+    private func relaunch(code: String, port: UInt16) async throws -> Advertiser {
+        for _ in 0..<40 {
+            let advertiser = try Advertiser(name: "Sharer", code: code, hello: hello(.share), port: port)
+            do { _ = try await advertiser.start(); return advertiser } catch { advertiser.stop() }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw XCTSkip("port \(port) stayed in use")
+    }
+
     func testSessionReconnectsAfterTheSharerDropsWithoutBye() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share), port: 47_211)
         _ = try await advertiser.start()
@@ -44,6 +55,37 @@ final class LinkSessionTests: XCTestCase {
         for await s in session.states { if case .closed(let reason) = s { closed = reason; break } }
         XCTAssertNotNil(closed)
         advertiser.stop()
+    }
+
+    /// A sharer that dies and comes back with another code (a new one every launch) turns the reconnect away in the
+    /// handshake. The session ends and asks for the code instead of retrying forever: one failed handshake on the
+    /// sharer, not one every few seconds, three of which would rotate its code under whoever is typing it.
+    func testSessionEndsWhenTheSharerComesBackWithAnotherCode() async throws {
+        let first = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share), port: 47_214)
+        _ = try await first.start()
+        let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: 47_214), code: "1234", sharerName: "Sharer", hello: hello(.view))
+        let watcher = Task { () -> [LinkSession.State] in
+            var seen: [LinkSession.State] = []
+            for await s in session.states { seen.append(s) }
+            return seen
+        }
+        // Bounded: a session that kept retrying would never end its states.
+        let deadline = Task { try await Task.sleep(for: .seconds(15)); session.close() }
+        session.start()
+        var incoming = first.incoming.makeAsyncIterator()
+        guard let dropped = await incoming.next() else { return XCTFail("no connection") }
+        for await s in dropped.states { if s == .ready { break } }
+        dropped.abort(); first.stop()                    // the sharer dies without bye...
+        let relaunched = try await relaunch(code: "5678", port: 47_214)   // ...and comes back with a new code
+        let attempts = Task { () -> Int in var n = 0; for await _ in relaunched.incoming { n += 1 }; return n }
+        let seen = await watcher.value
+        deadline.cancel()
+        XCTAssertEqual(seen.last, .closed("The code on Sharer has changed. Enter the new code to connect again."))
+        XCTAssertTrue(seen.contains { if case .reconnecting(1, _) = $0 { return true }; return false })
+        try await Task.sleep(for: .seconds(2))           // longer than the next backoff: nothing tries again
+        relaunched.stop()
+        let tried = await attempts.value
+        XCTAssertEqual(tried, 1, "the sharer sees one failed handshake")
     }
 
     func testSilenceForThreeSecondsFailsTheLink() async throws {
