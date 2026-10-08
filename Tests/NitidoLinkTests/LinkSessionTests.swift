@@ -46,15 +46,38 @@ final class LinkSessionTests: XCTestCase {
         session.close(); advertiser.stop()
     }
 
+    /// A wrong code fails the first handshake on the keys: the session ends as `.codeRejected` (the viewer's "Wrong
+    /// code"), not as `.closed`, and does not retry.
     func testSessionDoesNotRetryWhenTheFirstHandshakeFails() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share), port: 47_212)
         _ = try await advertiser.start()
         let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: 47_212), code: "0000", sharerName: "Sharer", hello: hello(.view))
+        // Bounded: a session that kept retrying would never end its states.
+        let deadline = Task { try await Task.sleep(for: .seconds(15)); session.close() }
         session.start()
-        var closed: String?
-        for await s in session.states { if case .closed(let reason) = s { closed = reason; break } }
-        XCTAssertNotNil(closed)
+        var seen: [LinkSession.State] = []
+        for await s in session.states { seen.append(s) }
+        deadline.cancel()
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .codeRejected])
         advertiser.stop()
+    }
+
+    /// Nothing listens there (a Mac that has just stopped sharing): the connection is refused, which says nothing about
+    /// the code. The session ends as `.closed` with the reason the link gave, never as `.codeRejected`, and does not
+    /// retry. Before, every first failure read "Check the code", and the viewer called a right code wrong.
+    func testSessionThatCannotReachTheSharerSaysWhyInsteadOfBlamingTheCode() async throws {
+        let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: 1), code: "1234", sharerName: "Sharer",
+                                  hello: hello(.view), connectTimeout: 60, waitingTimeout: 0.5)
+        let deadline = Task { try await Task.sleep(for: .seconds(10)); session.close() }
+        session.start()
+        var seen: [LinkSession.State] = []
+        for await s in session.states { seen.append(s) }
+        deadline.cancel()
+        XCTAssertEqual(seen.count, 2, "one attempt, then the end: \(seen)")
+        XCTAssertEqual(seen.first, .connecting(attempt: 1))
+        XCTAssertFalse(seen.contains(.codeRejected), "a refused connection is not a wrong code")
+        guard case .closed(let reason?)? = seen.last else { return XCTFail("expected .closed with a reason, got \(seen)") }
+        XCTAssertTrue(reason.hasPrefix("Could not connect to Sharer. Could not reach the other Mac"), reason)
     }
 
     /// A sharer that dies and comes back with another code (a new one every launch) turns the reconnect away in the

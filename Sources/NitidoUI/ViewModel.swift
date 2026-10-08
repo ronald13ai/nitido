@@ -188,9 +188,10 @@ public final class ViewModel {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
         case .ready: state = .connected; connectionCount += 1; decodeFailures = 0; link?.send(.keyframeRequest)
         case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
-        case .closed(let reason?) where reason.contains("Check the code"):
-            // The handshake turned the code away: back to the code for that Mac, where the field shakes and says
-            // "Wrong code", instead of a failure screen.
+        case .codeRejected:
+            // The handshake failed on the keys: the code is wrong. Back to the code for that Mac, where the field
+            // shakes and says "Wrong code", instead of a failure screen. Every other way a first attempt fails
+            // (refused, unreachable, no answer) arrives as `.closed` with its reason, and says it on a failure screen.
             log.info("the sharer turned the code away")
             wrongCodeCount += 1
             state = .enteringCode(peer)

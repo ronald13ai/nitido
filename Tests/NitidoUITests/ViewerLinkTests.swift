@@ -612,6 +612,33 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A Mac that has just stopped sharing refuses the connection, and a refusal says nothing about the code: the viewer
+    /// shows a failure screen with the reason instead of "Wrong code", the field does not shake (`wrongCodeCount` stays
+    /// 0), and Try again goes back to the code for that Mac with the code kept.
+    @MainActor
+    func testAMacThatRefusesTheConnectionFailsWithTheReasonNotWrongCode() async throws {
+        let viewer = ViewModel()
+        // Nothing listens on loopback port 1: refused, as a stale Bonjour peer is.
+        let gone = Peer(id: "gone", name: "Gone", keyName: "Gone", endpoint: .hostPort(host: "127.0.0.1", port: 1))
+        viewer.select(gone)
+        viewer.code = "1234"
+        viewer.connect()
+        XCTAssertEqual(viewer.state, .connecting(gone))
+        // The link gives a refused connection its waiting timeout (5 s) before it fails.
+        try await waitUntil("the viewer stops connecting", timeout: 15) { viewer.state != .connecting(gone) }
+        guard case .failed(let text, let peer) = viewer.state else {
+            return XCTFail("expected .failed, got \(viewer.state)")
+        }
+        XCTAssertTrue(text.hasPrefix("Could not connect to Gone. Could not reach the other Mac"), text)
+        XCTAssertEqual(peer, gone)
+        XCTAssertEqual(viewer.wrongCodeCount, 0, "a refused connection is not a wrong code")
+        XCTAssertEqual(viewer.connectionCount, 0)
+        viewer.retry()
+        XCTAssertEqual(viewer.state, .enteringCode(gone))
+        XCTAssertEqual(viewer.code, "1234", "the code typed stays")
+        viewer.disconnect()
+    }
+
     /// Esc while connected asks first ("Disconnect?"): `escape()` raises the confirmation and leaves the viewer
     /// connected; only the confirmed stop lets it go. With nothing connected Esc stops at once (`AppModelTests`).
     @MainActor
