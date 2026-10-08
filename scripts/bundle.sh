@@ -2,6 +2,14 @@
 # Builds Nítido in release mode, assembles build/Nítido.app and signs it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The identity first, so a Mac without one is told how to make one and no unsigned app is left behind (macOS keeps a
+# Screen Recording grant only for a signed bundle). awk reads to the end: quitting at the first match could leave
+# `security` writing into a closed pipe, which pipefail turns into a silent exit.
+ID=$(security find-identity -v -p codesigning | awk '/Apple Development/ && !id { id = $2 } END { print id }')
+if [[ -z "$ID" ]]; then
+  echo "bundle.sh: no Apple Development signing identity in the keychain. In Xcode, Settings, Accounts, Manage Certificates, add one (a free Apple ID works), then run this again." >&2
+  exit 1
+fi
 swift build -c release --product nitido 2>&1 | tail -1
 APP="build/Nítido.app"
 rm -rf "$APP"
@@ -28,7 +36,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSHumanReadableCopyright</key><string>Ronald Rodríguez · RONAR AI · MIT License</string>
 </dict></plist>
 PLIST
-ID=$(security find-identity -v -p codesigning | grep "Apple Development" | head -1 | awk '{print $2}')
 codesign --force --deep --sign "$ID" "$APP"
 codesign --verify --strict "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority" | head -2
