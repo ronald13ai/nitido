@@ -5,11 +5,11 @@ import os
 
 private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 
-/// A viewer-side connection that survives drops: reconnects with backoff (0.5, 1, 2, 5 s) while open.
-/// A failure before the first ready state ends the session: as `.codeRejected` when the handshake failed because the
-/// sharer holds another key (the code typed is wrong), as `.closed` with the reason otherwise (refused, unreachable,
-/// Local Network denied, no answer), so a right code is never called wrong. A reconnect the sharer turns away with
-/// another key ends it too: its code changed (a new one every launch, or after three failed handshakes).
+/// A viewer-side connection that survives drops: reconnects with backoff (0.5, 1, 2 and 4 s, then every 5 s) while
+/// open. A failure before the first ready state ends the session: as `.codeRejected` when the handshake failed because
+/// the sharer holds another key (the code typed is wrong), as `.closed` with the reason otherwise (refused,
+/// unreachable, Local Network denied, no answer), so a right code is never called wrong. A reconnect the sharer turns
+/// away with another key ends it too: its code changed (a new one every launch, or after three failed handshakes).
 public final class LinkSession: @unchecked Sendable {
     public enum State: Sendable, Equatable {
         case connecting(attempt: Int)
@@ -130,7 +130,7 @@ public final class LinkSession: @unchecked Sendable {
             end(.closed("The code on \(sharerName) has changed. Enter the new code to connect again."))
             return
         }
-        let delay = min(5, 0.5 * pow(2, Double(max(0, n - 1))))
+        let delay = Self.retryDelay(attempt: n)
         log.info("link failed (\(reason)); retry \(n) in \(delay)s")
         stateOut.yield(.reconnecting(attempt: n, delay: delay))
         Task { [weak self] in
@@ -138,6 +138,9 @@ public final class LinkSession: @unchecked Sendable {
             self?.attemptConnection()
         }
     }
+
+    /// Seconds to wait before attempt `n` after a drop (1 is the first): 0.5, 1, 2 and 4 s, then every 5 s.
+    static func retryDelay(attempt n: Int) -> Double { min(5, 0.5 * pow(2, Double(max(0, n - 1)))) }
 
     /// Ends the session on its final state (`.codeRejected` or `.closed`).
     private func end(_ final: State) {

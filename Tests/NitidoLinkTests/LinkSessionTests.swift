@@ -111,6 +111,10 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertEqual(tried, 1, "the sharer sees one failed handshake")
     }
 
+    func testBackoffDoublesFromHalfASecondUpToFive() {
+        XCTAssertEqual((1...6).map { LinkSession.retryDelay(attempt: $0) }, [0.5, 1, 2, 4, 5, 5])
+    }
+
     func testSilenceForThreeSecondsFailsTheLink() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share), port: 47_213)
         _ = try await advertiser.start()
