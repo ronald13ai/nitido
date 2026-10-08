@@ -147,7 +147,13 @@ public final class VideoEncoder: @unchecked Sendable {
         tune(session, kVTCompressionPropertyKey_DataRateLimits, limits)
     }
 
+    /// The next frame `encode` takes is forced to be a keyframe. The request stands until a frame carrying it is
+    /// emitted: one that VideoToolbox refuses, fails or drops leaves it for the frame after (one cut short by
+    /// `invalidate()` does not, since nothing follows it).
     public func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
+
+    /// True while a keyframe request waits for a frame to carry it. Internal, for tests.
+    var isKeyframeRequested: Bool { lock.withLock { forceKey } }
 
     public var nextSeq: UInt32 { lock.lock(); defer { lock.unlock() }; return seq }
 
@@ -167,9 +173,15 @@ public final class VideoEncoder: @unchecked Sendable {
         let status = VTCompressionSessionEncodeFrame(session, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid,
                                                      frameProperties: props, infoFlagsOut: nil) { [weak self] status, flags, sample in
             guard let self else { return }
-            let live = self.lock.withLock { self.inFlight -= 1; return self.session != nil }
+            let live = self.lock.withLock {
+                self.inFlight -= 1
+                let live = self.session != nil
+                // Failed or dropped: a keyframe request this frame carried stands for the next frame.
+                if live, key, status != noErr || sample == nil { self.forceKey = true }
+                return live
+            }
             if status == noErr, let sample {
-                self.emit(sample, seq: n, captureHostTimeNs: captureHostTimeNs)
+                self.emit(sample, seq: n, captureHostTimeNs: captureHostTimeNs, carriesKeyRequest: key)
             } else if !live {
                 log.debug("frame \(n) ended by invalidate: \(status)")
             } else if status != noErr {
@@ -179,7 +191,12 @@ public final class VideoEncoder: @unchecked Sendable {
             }
         }
         if status != noErr {
-            let live = lock.withLock { inFlight -= 1; return self.session != nil }
+            let live = lock.withLock {
+                inFlight -= 1
+                let live = self.session != nil
+                if live, key { forceKey = true }   // refused: the request stands for the next frame
+                return live
+            }
             if live {
                 failures.report(.encode(status), "encode frame \(n)")
             } else {
@@ -190,14 +207,20 @@ public final class VideoEncoder: @unchecked Sendable {
         return true
     }
 
-    private func emit(_ sample: CMSampleBuffer, seq: UInt32, captureHostTimeNs: UInt64) {
+    /// `carriesKeyRequest`: the frame was forced to be a keyframe, so a frame that cannot be emitted leaves the request
+    /// standing for the next one, as a failed frame does.
+    private func emit(_ sample: CMSampleBuffer, seq: UInt32, captureHostTimeNs: UInt64, carriesKeyRequest: Bool) {
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[String: Any]]
         let notSync = attachments?.first?[kCMSampleAttachmentKey_NotSync as String] as? Bool ?? false
         let isKey = !notSync
         var sets: [Data] = []
         if isKey, let fd = CMSampleBufferGetFormatDescription(sample) { sets = Self.parameterSets(from: fd, codec: codec) }
+        func notEmitted(_ error: CodecError, _ context: String) {
+            if carriesKeyRequest { lock.withLock { if session != nil { forceKey = true } } }
+            failures.report(error, context)
+        }
         guard let block = CMSampleBufferGetDataBuffer(sample) else {
-            failures.report(.missingData, "encoded frame \(seq) has no data buffer")
+            notEmitted(.missingData, "encoded frame \(seq) has no data buffer")
             return
         }
         let length = CMBlockBufferGetDataLength(block)
@@ -205,7 +228,7 @@ public final class VideoEncoder: @unchecked Sendable {
         let status = data.withUnsafeMutableBytes { raw -> OSStatus in
             CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: raw.baseAddress!)
         }
-        guard status == noErr else { failures.report(.encode(status), "copy bytes of frame \(seq)"); return }
+        guard status == noErr else { notEmitted(.encode(status), "copy bytes of frame \(seq)"); return }
         onFrame?(EncodedFrame(seq: seq, captureHostTimeNs: captureHostTimeNs, isKey: isKey, data: data,
                               parameterSets: sets, codec: codec, width: width, height: height))
     }

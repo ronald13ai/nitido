@@ -86,6 +86,37 @@ final class CodecSafetyTests: XCTestCase {
         encoder.invalidate()
     }
 
+    /// A keyframe request stands until a frame carrying it is emitted (spec 14: a keyframe request produces a keyframe
+    /// within one frame). The frame that took it here is accepted, then failed by VideoToolbox, so the frame after it
+    /// is forced instead; otherwise the request would be used up and the next keyframe would come 120 frames later.
+    func testAForcedKeyframeThatFailsIsForcedAgain() throws {
+        let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+        let first = expectation(description: "first frame")
+        encoder.onFrame = { _ in first.fulfill() }
+        XCTAssertTrue(encoder.encode(solidFrame(), captureHostTimeNs: 0))
+        wait(for: [first], timeout: 5)
+
+        encoder.requestKeyframe()
+        let failed = expectation(description: "onError")
+        failed.assertForOverFulfill = false
+        encoder.onError = { _ in failed.fulfill() }
+        // A depth buffer has no conversion path into the HEVC encoder: accepted, then failed asynchronously.
+        XCTAssertTrue(encoder.encode(solidFrame(format: kCVPixelFormatType_DepthFloat32), captureHostTimeNs: 1))
+        wait(for: [failed], timeout: 5)
+        XCTAssertTrue(encoder.isKeyframeRequested, "the failed frame leaves the request standing")
+
+        let next = expectation(description: "next frame")
+        let after = Box<[EncodedFrame]>([])
+        encoder.onFrame = { after.append($0); next.fulfill() }
+        XCTAssertTrue(encoder.encode(solidFrame(), captureHostTimeNs: 2))
+        wait(for: [next], timeout: 5)
+        let frame = try XCTUnwrap(after.value.first)
+        XCTAssertTrue(frame.isKey, "the frame after the failed one carries the keyframe request")
+        XCTAssertFalse(frame.parameterSets.isEmpty, "a keyframe carries its parameter sets")
+        XCTAssertFalse(encoder.isKeyframeRequested, "the emitted keyframe used the request up")
+        encoder.invalidate()
+    }
+
     /// A bitrate VideoToolbox rejects at runtime reaches `onError` on the calling thread.
     func testRejectedBitrateReachesOnError() throws {
         let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
