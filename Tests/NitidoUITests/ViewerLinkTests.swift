@@ -326,32 +326,134 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// A decoder that keeps throwing is not a silent freeze on the viewer: each throw counts as a dropped frame, nine in
-    /// a row leave the link up (a fresh keyframe may bring it back), the tenth ends the link and says so. A frame decoded
-    /// in between starts the count again.
+    /// A decoder that keeps throwing is not a silent freeze on the viewer: each throw counts as a dropped frame, every
+    /// third lets the decoder go for a fresh one (made from the setup the keyframe it asked for carries), nine in a row
+    /// leave the link up, the tenth ends the link and says so. A frame decoded in between starts the count again.
     @MainActor
     func testADecoderThatKeepsThrowingEndsTheLinkAfterTenInARow() async throws {
         let (share, _) = try await listeningShare()
         let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
         viewer.select(peer(for: share))
         viewer.code = share.code
         viewer.connect()
         try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
         let key = try await realKeyframe()
-        viewer.handleIncoming(.videoConfig(try XCTUnwrap(key.videoConfig)))
+        let config = try XCTUnwrap(key.videoConfig)
+        viewer.handleIncoming(.videoConfig(config))
         XCTAssertEqual(viewer.pixelSize, CGSize(width: 320, height: 180))
         // Real parameter sets built a decoder that works; this data is not a picture, so `decode` throws.
         let unreadable = VideoFrame(seq: 1, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]))
-        for _ in 0..<9 { viewer.handleIncoming(.videoFrame(unreadable)) }
+        for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+        // The third throw let the decoder go: until the setup comes again, a keyframe decodes nothing and is no failure.
+        viewer.handleIncoming(.videoFrame(key.videoFrame))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(shown.count, 0, "the third throw lets the decoder go")
+        XCTAssertEqual(viewer.state, .connected)
+        // Stands in for the sharer's answer to each keyframe request: a keyframe carries its setup (`videoConfig`).
+        viewer.handleIncoming(.videoConfig(config))
+        for _ in 0..<2 {
+            for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+            viewer.handleIncoming(.videoConfig(config))
+        }
         XCTAssertEqual(viewer.state, .connected, "nine throws in a row leave the link up")
         viewer.handleIncoming(.videoFrame(key.videoFrame))
-        for _ in 0..<9 { viewer.handleIncoming(.videoFrame(unreadable)) }
+        try await waitUntil("the fresh decoder shows the keyframe") { shown.count >= 1 }
+        for _ in 0..<3 {
+            for _ in 0..<3 { viewer.handleIncoming(.videoFrame(unreadable)) }
+            viewer.handleIncoming(.videoConfig(config))
+        }
         XCTAssertEqual(viewer.state, .connected, "a frame decoded in between starts the count again")
         viewer.handleIncoming(.videoFrame(unreadable))
         XCTAssertEqual(viewer.state, .failed("Video decoding keeps failing.", nil))
         XCTAssertEqual(viewer.pixelSize, .zero)
         try await waitUntil("the strip counts every throw as dropped") { viewer.snapshot.droppedLastSecond >= 19 }
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
+        await share.stop()
+    }
+
+    /// A sharer that drops without saying bye (a cable pull, a process that died) puts the viewer in Reconnecting, and
+    /// the viewer pairs again by itself as soon as the sharer answers, asking for a keyframe.
+    @MainActor
+    func testTheViewerReconnectsWhenTheSharerDropsWithoutBye() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234",
+                                        hello: Hello(protocolVersion: protocolVersion, role: .share, name: "Sharer", pixelWidth: 320, pixelHeight: 180, scale: 2))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "loopback", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+        let viewer = ViewModel()
+        viewer.select(sharer)
+        viewer.code = "1234"
+        viewer.connect()
+        var incoming = advertiser.incoming.makeAsyncIterator()
+        guard let first = await incoming.next() else { return XCTFail("no connection") }
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        first.abort()
+        try await waitUntil("the viewer says it is reconnecting") { viewer.state == .reconnecting(sharer, attempt: 1) }
+        guard let second = await incoming.next() else { return XCTFail("no reconnect") }
+        try await waitUntil("the viewer is connected again") { viewer.state == .connected }
+        // Bounded, so a missing request fails the test instead of hanging it: cancelling the task ends the iteration.
+        let asked = Task { () -> Bool in
+            for await m in second.messages where m == .keyframeRequest { return true }
+            return false
+        }
+        let deadline = Task { try await Task.sleep(for: .seconds(5)); asked.cancel() }
+        let askedForKeyframe = await asked.value
+        deadline.cancel()
+        XCTAssertTrue(askedForKeyframe, "a viewer that pairs again asks for a keyframe")
+        viewer.disconnect()
+    }
+
+    /// Three connections that fail to prove the code mean someone is guessing: the sharer shows a new code and listens
+    /// with its key, the old code no longer pairs, and the viewer who had paired goes on as it was.
+    @MainActor
+    func testThreeFailedHandshakesRotateTheCodeAndLeaveTheViewerAlone() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        let sharer = peer(for: share)
+        viewer.select(sharer)
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer shows the picture") { viewer.state == .connected && shown.count >= 1 }
+        let original = share.code, listener = try XCTUnwrap(share.advertiser)
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Guess", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        for i in 1...3 {
+            XCTAssertEqual(share.code, original, "the code holds before the third failed handshake (guess \(i))")
+            let wrong = String(format: "%04d", (Int(original)! + i) % 10_000)
+            let guess = NitidoLink.Link.connect(to: sharer.endpoint, code: wrong, sharerName: sharer.keyName, hello: hello)
+            try await waitUntil("guess \(i) fails") { if case .failed = guess.state { return true }; return false }
+            try await waitUntil("the sharer lets guess \(i) go") { share.unpairedCount == 0 }
+        }
+        XCTAssertNotEqual(share.code, original, "three failed handshakes rotate the code")
+        XCTAssertFalse(share.advertiser === listener, "the new code listens with its own key")
+        try await waitUntil("the new listener is ready") { share.listeningPort != nil }
+
+        // The viewer who had paired goes on: the stopped listener does not end its connection.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(viewer.state, .connected)
+        XCTAssertTrue(share.isSending)
+        let before = shown.count
+        source.emit(frame: try stripedFrame(index: 1))
+        try await waitUntil("a new frame still reaches the viewer") { shown.count > before }
+
+        // The old code fails against the new listener; the new one pairs.
+        let renewed = peer(for: share)
+        let stale = ViewModel()
+        stale.select(renewed)
+        stale.code = original
+        stale.connect()
+        try await waitUntil("the old code no longer pairs") {
+            stale.state == .failed("Could not connect. Check the code and try again.", renewed)
+        }
+        let next = ViewModel()
+        next.select(renewed)
+        next.code = share.code
+        next.connect()
+        try await waitUntil("the new code pairs") { next.state == .connected }
+        next.disconnect(); stale.disconnect(); viewer.disconnect()
         await share.stop()
     }
 

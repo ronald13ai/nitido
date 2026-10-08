@@ -32,7 +32,8 @@ public final class ShareModel {
     public var showTelemetry = true
     public let sink = FrameSink()
     public let ink = InkController(role: .share)
-    public let code = Pairing.makeCode()
+    /// Rotates after three failed handshakes (`rotateCode`).
+    public private(set) var code = Pairing.makeCode()
     public let name = Host.current().localizedName ?? "Mac"
     /// True when the current failure most likely comes from a missing Screen Recording grant, so System Settings is the fix.
     public private(set) var failureNeedsPermission = false
@@ -85,6 +86,14 @@ public final class ShareModel {
     private var unpaired: [ObjectIdentifier: (link: NitidoLink.Link, states: Task<Void, Never>)] = [:]
     /// How many connections are still proving the code (tests check that none is left behind).
     var unpairedCount: Int { unpaired.count }
+    /// Adapts the viewer's bitrate every 250 ms (the snapshot loop), from the RTT and the send backlog.
+    private var controller = BitrateController(initial: 20_000_000)
+    /// The encoder's rate, which also sizes a frame for the backlog dropping rule (`handleEncoded`).
+    private var currentBitrate = 20_000_000
+    /// Frames were dropped for the backlog: once it drains, the encoder is asked for a keyframe.
+    private var needKeyAfterDrain = false
+    /// Connections that failed before they proved the code; three rotate it.
+    private var failedHandshakes = 0
 
     private var hello: Hello {
         Hello(protocolVersion: protocolVersion, role: .share, name: name,
@@ -222,6 +231,11 @@ public final class ShareModel {
                     try? await Task.sleep(for: .milliseconds(250))
                     guard let self else { return }
                     if let rtt = link?.lastRTTMs { telemetry.recordRTT(ms: rtt, at: CACurrentMediaTime()) }
+                    if isSending, !loopback, let link, let encoder {
+                        let bps = controller.update(rttMs: link.lastRTTMs, backlogBytes: link.backlogBytes, frameAgeMs: nil,
+                                                    fps: max(snapshot.captureFPS, 30), now: CACurrentMediaTime())
+                        if bps != currentBitrate { currentBitrate = bps; encoder.setBitrate(bps) }
+                    }
                     snapshot = telemetry.snapshot(now: CACurrentMediaTime())
                     codecMs = loopback ? codecWindow.stats(now: CACurrentMediaTime())?.p50 : nil
                 }
@@ -303,6 +317,7 @@ public final class ShareModel {
             // only this tells the sharer.
             e.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err) } }
             encoder = e
+            currentBitrate = bitsPerSecond; controller = BitrateController(initial: currentBitrate)
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
         } catch {
             log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
@@ -316,8 +331,14 @@ public final class ShareModel {
         encodeFailures = 0
         telemetry.recordBytes(f.data.count, at: now)
         if isSending, let link {
-            if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
-            link.send(.videoFrame(f.videoFrame))
+            let frameBytes = currentBitrate / 8 / 60
+            if !f.isKey, link.backlogBytes > 4 * frameBytes {
+                telemetry.recordDrop(at: now); needKeyAfterDrain = true
+            } else {
+                if needKeyAfterDrain, link.backlogBytes < frameBytes { needKeyAfterDrain = false; encoder?.requestKeyframe() }
+                if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
+                link.send(.videoFrame(f.videoFrame))
+            }
         }
         guard loopback else { return }
         if let cfg = f.videoConfig, cfg != decoderConfig {
@@ -533,8 +554,10 @@ public final class ShareModel {
             sendKeyframe()
         case .failed(let m):
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
-                // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was.
+                // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was. A link that was the
+                // viewer's had proved the code, so only these count as failed handshakes.
                 log.info("a connection ended before it proved the code: \(m)")
+                failedHandshakes += 1; if failedHandshakes >= 3 { rotateCode() }
                 return
             }
             guard l === link else { return }
@@ -545,6 +568,18 @@ public final class ShareModel {
             isSending = false; viewerName = nil; link = nil
         case .connecting: break
         }
+    }
+
+    /// Three failed handshakes in a row mean someone is guessing: new code, new key.
+    private func rotateCode() {
+        failedHandshakes = 0
+        // A new code, never the one being guessed (`makeCode` repeats one in 10,000 draws).
+        let old = code
+        repeat { code = Pairing.makeCode() } while code == old
+        log.info("three connections failed to prove the code; showing a new one")
+        advertiser?.stop(); advertiser = nil
+        listeningPort = nil   // the stopped listener's port; the new listener sets its own once ready
+        startAdvertising()
     }
 
     private func handleIncoming(_ m: Message) {

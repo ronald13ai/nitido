@@ -12,7 +12,8 @@ public struct ViewView: View {
             case .browsing: browsing
             case .enteringCode(let peer): codeEntry(peer)
             case .connecting(let peer): message("Connecting to \(peer.name)…", action: nil)
-            case .connected: connected
+            case .connected: connected(overlay: nil)
+            case .reconnecting(_, let attempt): connected(overlay: "Reconnecting… attempt \(attempt)")
             case .failed(let text, _): message(text, action: ("Try again", model.retry))
             }
         }
@@ -58,13 +59,20 @@ public struct ViewView: View {
     /// Laid out like `ShareView` (Task 8 fix round 3): the content is exactly as wide as the picture, to the whole
     /// point, so `.windowResizability(.contentSize)` fits the window to every stream size, smaller ones included,
     /// and the strip wraps instead of widening it. A half-point 1:1 picture keeps its exact size at the top left.
-    private var connected: some View {
+    private func connected(overlay: String?) -> some View {
         let size = model.fittedPointSize
         let area = CGSize(width: size.width.rounded(.up), height: size.height.rounded(.up))
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 VideoSurface(sink: model.sink).frame(width: size.width, height: size.height)
                 InkOverlay(controller: model.ink).frame(width: size.width, height: size.height)
+                if let overlay {
+                    Theme.Colors.background.opacity(0.55).frame(width: size.width, height: size.height)
+                    Text(overlay).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.Colors.text)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Theme.Colors.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+                        .frame(width: size.width, height: size.height)
+                }
                 if model.renderFailure != nil || model.codecNotice != nil {
                     VStack(alignment: .leading, spacing: 6) {
                         if let reason = model.renderFailure { notice("The picture cannot be drawn: \(reason)") }

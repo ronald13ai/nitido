@@ -9,8 +9,8 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "link")
 /// One encrypted connection. Frames messages, answers pings, measures RTT and clock offset, tracks send backlog.
 ///
 /// Threading: everything that changes the link runs on `queue` (Network.framework callbacks, the ping timer,
-/// the connect deadlines and `close()`). The values callers read from other threads (`state`, `peerHello`,
-/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`) and the ping bookkeeping live behind `lock`.
+/// the connect deadlines, `close()` and `abort()`). The values callers read from other threads (`state`, `peerHello`,
+/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`) and the ping bookkeeping live behind `lock`.
 public final class Link: @unchecked Sendable {
     public enum State: Sendable, Equatable { case connecting, ready, failed(String), cancelled }
 
@@ -23,6 +23,8 @@ public final class Link: @unchecked Sendable {
     /// Peer clock minus local clock, nanoseconds, estimated from ping/pong (nil until the first pong).
     public var clockOffsetNs: Int64? { lock.withLock { _clockOffsetNs } }
     public var backlogBytes: Int { lock.withLock { backlog } }
+    /// True once the link has been ready, even after it ended: it proved the code.
+    public var wasReady: Bool { lock.withLock { _wasReady } }
 
     private let connection: NWConnection
     private let hello: Hello
@@ -41,6 +43,7 @@ public final class Link: @unchecked Sendable {
     private var _lastRTTMs: Double?
     private var _clockOffsetNs: Int64?
     private var backlog = 0
+    private var _wasReady = false
     private var nextPing: UInt32 = 0
     /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
     private var pingSentAt: [UInt32: UInt64] = [:]
@@ -49,6 +52,12 @@ public final class Link: @unchecked Sendable {
     private var decoder = Wire.Decoder()
     private var pingTimer: DispatchSourceTimer?
     private var waitingDeadlineArmed = false
+    /// When the last pong came (`CACurrentMediaTime`); the ping timer fails a link that has heard none for 3 s.
+    private var lastPongAt: Double = 0
+    /// Test only: stops answering pings, as a peer that froze or lost its network would.
+    private var muted = false
+    /// Set by `close()`: the stream ending after it is this side's doing, not the other side gone.
+    private var closing = false
 
     private let messageOut: AsyncStream<Message>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
@@ -79,6 +88,7 @@ public final class Link: @unchecked Sendable {
             case .ready:
                 // A deadline or close() may already have ended this link while `.ready` was queued.
                 guard state == .connecting else { return }
+                lock.withLock { _wasReady = true }; lastPongAt = CACurrentMediaTime()
                 setState(.ready); send(.hello(hello)); receiveLoop(); startPings()
             case .failed(let e):
                 log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
@@ -126,12 +136,17 @@ public final class Link: @unchecked Sendable {
     public func close() {
         let connection = connection
         queue.async { [self] in
+            closing = true
             pingTimer?.cancel(); pingTimer = nil
             guard state == .ready else { connection.cancel(); return }
             connection.send(content: Wire.encode(.bye(reason: 0)), completion: .contentProcessed { _ in connection.cancel() })
             queue.asyncAfter(deadline: .now() + 1) { connection.cancel() }
         }
     }
+
+    /// Cancels without sending bye, like a cable pull. Used by tests and when the process dies.
+    public func abort() { queue.async { [self] in pingTimer?.cancel(); pingTimer = nil; connection.cancel() } }
+    func muteForTesting() { queue.async { [self] in muted = true } }
 
     /// On `queue`: fails a link that is still connecting; does nothing once it is ready or ended.
     private func giveUpConnecting(_ reason: String) {
@@ -154,7 +169,14 @@ public final class Link: @unchecked Sendable {
                 log.error("receive failed: \(error.localizedDescription, privacy: .public)")
                 finish(.failed(error.localizedDescription)); return
             }
-            if complete { finish(.cancelled); return }
+            if complete {
+                // `bye` ends a link as `.cancelled` (`handle`), and so does this side's own `close()`. A stream that
+                // ends without either is the other side gone (a process that died, a connection cut on the way): a
+                // failure, which a viewer's `LinkSession` answers by reconnecting.
+                if closing { finish(.cancelled); return }
+                log.error("\(self.role.logName, privacy: .public) link: the other side closed the connection without bye")
+                finish(.failed("The other side closed the connection without saying goodbye.")); connection.cancel(); return
+            }
             receiveLoop()
         }
     }
@@ -170,8 +192,10 @@ public final class Link: @unchecked Sendable {
             }
             messageOut.yield(m)
         case .ping(let id, let t):
+            guard !muted else { return }
             send(.pong(id: id, originalTNs: t, replyTNs: UInt64(now * 1e9)))
         case .pong(let id, let original, let reply):
+            lastPongAt = now
             let sent = lock.withLock { pingSentAt.removeValue(forKey: id) }
             guard let sent else { return }
             guard let sample = Self.pongSample(sentTNs: sent, originalTNs: original, replyTNs: reply, now: now) else {
@@ -203,6 +227,10 @@ public final class Link: @unchecked Sendable {
         timer.schedule(deadline: .now() + 0.1, repeating: 0.5)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            if CACurrentMediaTime() - lastPongAt > 3 {
+                log.error("\(self.role.logName, privacy: .public) link heard no pong for 3 seconds; failing it")
+                finish(.failed("No response from the other side for 3 seconds")); connection.cancel(); return
+            }
             let tNs = UInt64(CACurrentMediaTime() * 1e9)
             let id = lock.withLock { () -> UInt32 in
                 nextPing &+= 1; pingSentAt[nextPing] = tNs

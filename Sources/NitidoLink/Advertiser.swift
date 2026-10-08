@@ -20,8 +20,9 @@ public final class Advertiser: @unchecked Sendable {
     /// The `start()` call still waiting for its port; taken exactly once.
     private let pendingStart = OSAllocatedUnfairLock<CheckedContinuation<UInt16, Error>?>(initialState: nil)
 
-    public init(name: String, code: String, hello: Hello) throws {
-        listener = try NWListener(using: LinkTLS.parameters(code: code, sharerName: name))
+    public init(name: String, code: String, hello: Hello, port: UInt16? = nil) throws {
+        let params = LinkTLS.parameters(code: code, sharerName: name)
+        listener = try port.map { try NWListener(using: params, on: NWEndpoint.Port(rawValue: $0)!) } ?? NWListener(using: params)
         listener.service = NWListener.Service(name: name, type: "_nitido._tcp", txtRecord: NWTXTRecord(["v": "\(protocolVersion)", "name": name]))
         (incoming, out) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
