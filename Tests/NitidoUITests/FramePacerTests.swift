@@ -784,10 +784,11 @@ final class FramePacerTests: XCTestCase {
         }
     }
 
-    /// A raised cap is not for the rest of the session: ten seconds of drawable returns without a starved frame (600
-    /// at 60 Hz) lower it by one again, so a transient (a Space switch, Mission Control, a main-thread hitch) costs a
-    /// refresh of latency for ten seconds, not for good. A cap that has to rise again right after it was lowered waits
-    /// twice as long before the next try, so a display that needs the deeper queue is probed rarely.
+    /// A raised cap is not for the rest of the session: ten seconds on the pacer's clock without a starved frame lower it
+    /// by one again, so a transient (a Space switch, Mission Control, a main-thread hitch) costs a refresh of latency
+    /// for ten seconds, not for good. Ten seconds whatever the rate drawables come back at: a 120 Hz panel returns 1,200
+    /// in that time, a 30 fps source 300. A cap that has to rise again right after it was lowered waits twice as long
+    /// before the next try, so a display that needs the deeper queue is probed rarely.
     @MainActor
     func testCapStepsBackDownAfterTenSecondsWithoutStarving() throws {
         let host = FakeDrawing()
@@ -816,10 +817,12 @@ final class FramePacerTests: XCTestCase {
                 shownNs = ns
             }
         }
-        /// A drawable comes back before the next frame waited through a refresh: one return without starving each.
-        func healthy(_ count: Int) {
-            for _ in 0..<count {
-                clock += 0.010; ns += 1
+        /// For `seconds`, a frame every `interval` whose drawable comes back before the next one waited through a
+        /// refresh: returns without starving.
+        func healthy(for seconds: Double, every interval: Double) {
+            let end = clock + seconds
+            while clock + interval <= end {
+                clock += interval; ns += 1
                 pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
                 pacer.drawableReturned(kind: .live, captureHostTimeNs: shownNs, presentedAt: clock - 0.005)
                 shownNs = ns
@@ -828,18 +831,18 @@ final class FramePacerTests: XCTestCase {
 
         starve(FramePacer.starvedReturnsBeforeRaise)
         XCTAssertEqual(pacer.cap, 2)
-        healthy(FramePacer.healthyReturnsBeforeLower - 1)
-        XCTAssertEqual(pacer.cap, 2, "not before ten seconds without starving")
-        healthy(1)
+        healthy(for: 9.9, every: 1.0 / 120)
+        XCTAssertEqual(pacer.cap, 2, "not before ten seconds without starving, however many drawables came back")
+        healthy(for: 0.2, every: 1.0 / 120)
         XCTAssertEqual(pacer.cap, 1, "ten seconds without starving lower the cap")
 
         starve(FramePacer.starvedReturnsBeforeRaise)
         XCTAssertEqual(pacer.cap, 2, "starving again right away raises it again")
-        healthy(FramePacer.healthyReturnsBeforeLower)
+        healthy(for: 19.8, every: 1.0 / 30)
         XCTAssertEqual(pacer.cap, 2, "a cap that had to rise right after it was lowered waits twice as long")
-        healthy(FramePacer.healthyReturnsBeforeLower)
-        XCTAssertEqual(pacer.cap, 1)
-        healthy(2 * FramePacer.healthyReturnsBeforeLower)
+        healthy(for: 0.3, every: 1.0 / 30)
+        XCTAssertEqual(pacer.cap, 1, "twenty seconds without starving lower it")
+        healthy(for: 30, every: 1.0 / 60)
         XCTAssertEqual(pacer.cap, 1, "never below one")
     }
 

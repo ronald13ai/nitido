@@ -37,8 +37,8 @@ protocol FrameDrawing: AnyObject {
 /// comes, the source went still and the held-back frame is drawn then. A frame that waited only because the
 /// presented handler reached the main actor after it is drawn at once. If frames keep starving at the cap, the
 /// display keeps each drawable longer than a refresh, and the cap rises by one, up to the pool size minus one. It
-/// steps back down by one after ten seconds without starving, so a transient (a Space switch, Mission Control, a
-/// main-thread hitch) does not cost a refresh of latency for the rest of the session.
+/// steps back down by one after ten seconds without starving (on `now`, whatever the refresh rate), so a transient (a
+/// Space switch, Mission Control, a main-thread hitch) does not cost a refresh of latency for the rest of the session.
 @MainActor
 final class FramePacer {
     struct Frame {
@@ -62,9 +62,8 @@ final class FramePacer {
     static let lateFrameGrace: CFTimeInterval = 1.0 / 60
     /// Drawable returns in a row that find a frame starved before one more drawable may be in flight.
     static let starvedReturnsBeforeRaise = 6
-    /// Drawable returns in a row without a starved frame (about ten seconds at 60 Hz) before one drawable fewer may be
-    /// in flight again.
-    static let healthyReturnsBeforeLower = 600
+    /// Seconds without a starved frame before one drawable fewer may be in flight again.
+    static let calmBeforeLower: CFTimeInterval = 10
 
     weak var host: (any FrameDrawing)?
     var now: () -> CFTimeInterval = { CACurrentMediaTime() }
@@ -97,14 +96,14 @@ final class FramePacer {
     private var replacedSinceReturn = false
     /// Drawable returns in a row that found a live frame starved: late, or replacing another while it waited.
     private var starvedReturns = 0
-    /// Drawable returns in a row that found no live frame starved.
-    private var healthyReturns = 0
-    /// Healthy returns in a row that lower the cap. Doubles (up to `longestWaitBeforeLower`) each time the cap has to
-    /// rise again before this many returns have passed since it was lowered: that display needs the deeper queue.
-    private var lowerAfter = FramePacer.healthyReturnsBeforeLower
-    private static let longestWaitBeforeLower = 8 * FramePacer.healthyReturnsBeforeLower
-    /// Drawable returns since the cap was last lowered; nil until it first is.
-    private var returnsSinceLower: Int?
+    /// The last drawable return that found a live frame starved, or that lowered the cap: the calm counts from there.
+    private var calmSince: CFTimeInterval = 0
+    /// Seconds of calm that lower the cap. Doubles (up to `longestWaitBeforeLower`) each time the cap has to rise again
+    /// within this long of being lowered: that display needs the deeper queue.
+    private var lowerAfter = FramePacer.calmBeforeLower
+    private static let longestWaitBeforeLower = 8 * FramePacer.calmBeforeLower
+    /// When the cap was last lowered; nil until it first is.
+    private var loweredAt: CFTimeInterval?
     /// Presented time of the last drawable shown, for the spacing in the debug log.
     private var lastPresentedAt: Double = 0
     /// When the newest frame reached `present`: a divider move waits for the frame after it (`moveDivider`).
@@ -201,7 +200,8 @@ final class FramePacer {
     /// The presented handler of a committed drawable. `presentedAt` is 0 when the drawable was discarded.
     func drawableReturned(kind: Kind, captureHostTimeNs: UInt64, presentedAt: Double) {
         inFlight = max(0, inFlight - 1)
-        lastActivity = now()
+        let returnedAt = now()
+        lastActivity = returnedAt
         if presentedAt > 0 {
             videoSignposter.emitEvent("presented")
             let spacing = lastPresentedAt > 0 ? (presentedAt - lastPresentedAt) * 1000 : 0
@@ -219,7 +219,7 @@ final class FramePacer {
         let waitingLive = pending == .live
         // Shown after the waiting frame arrived: that frame waited through a refresh, not just for this handler.
         let late = waitingLive && presentedAt > waitingSince
-        noteReturn(starved: waitingLive && (late || replacedSinceReturn))
+        noteReturn(starved: waitingLive && (late || replacedSinceReturn), at: returnedAt)
         guard let waiting = pending else { return }
         if waiting == .live, late, !waitingHeldBack {
             holdBackLateFrame(waitedPastRefresh: presentedAt - waitingSince)
@@ -253,22 +253,22 @@ final class FramePacer {
         }
     }
 
-    /// Counts drawable returns that found a live frame starved; enough in a row raise the cap by one. Enough in a row
-    /// that found none (`lowerAfter`) lower it by one again, never below one.
-    private func noteReturn(starved: Bool) {
+    /// Counts drawable returns that found a live frame starved; enough in a row raise the cap by one. A return
+    /// `lowerAfter` seconds after the last starved one (or the last lowering) lowers it by one again, never below one.
+    /// The calm is measured on `now`, so it lasts as long at 120 Hz or with a 30 fps source as at 60 Hz.
+    private func noteReturn(starved: Bool, at now: CFTimeInterval) {
         replacedSinceReturn = false
-        returnsSinceLower = returnsSinceLower.map { $0 + 1 }
         starvedReturns = starved ? starvedReturns + 1 : 0
-        healthyReturns = starved ? 0 : healthyReturns + 1
+        if starved { calmSince = now }
         if starvedReturns >= Self.starvedReturnsBeforeRaise, let host, cap < max(1, host.drawableCount - 1) {
             cap += 1
             starvedReturns = 0
-            if let since = returnsSinceLower, since < lowerAfter { lowerAfter = min(2 * lowerAfter, Self.longestWaitBeforeLower) }
+            if let lowered = loweredAt, now - lowered < lowerAfter { lowerAfter = min(2 * lowerAfter, Self.longestWaitBeforeLower) }
             log.info("Frames kept waiting for a drawable: the display holds each one longer than a refresh. Allowing \(self.cap, privacy: .public) in flight")
-        } else if cap > 1, healthyReturns >= lowerAfter {
+        } else if cap > 1, now - calmSince >= lowerAfter {
             cap -= 1
-            healthyReturns = 0
-            returnsSinceLower = 0
+            calmSince = now
+            loweredAt = now
             log.info("Drawables come back in time again: allowing \(self.cap, privacy: .public) in flight")
         }
     }
