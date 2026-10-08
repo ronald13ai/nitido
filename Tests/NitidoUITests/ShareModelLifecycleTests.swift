@@ -167,6 +167,12 @@ private func realKeyframe() async throws -> EncodedFrame {
     throw XCTSkip("the hardware encoder emitted no keyframe within 5 s")
 }
 
+/// The capture times of the frames an encoder emitted, once a test has taken its outputs over.
+@MainActor
+private final class EncodedTimes {
+    var times: [UInt64] = []
+}
+
 @MainActor
 private final class WeakBox {
     weak var value: AnyObject?
@@ -739,6 +745,96 @@ final class ShareModelLifecycleTests: XCTestCase {
         XCTAssertEqual(held.captureHostTimeNs, newest.captureHostTimeNs, "the loop shows the newest frame captured")
         XCTAssertTrue(held.compareWith === newest.pixelBuffer, "against the newest raw frame")
         XCTAssertEqual(model.state, .capturing)
+        await model.stop()
+    }
+
+    /// The frames the encoder holds at its cap can end through `onError` instead of an output (VideoToolbox failed or
+    /// dropped them, `VideoEncoder.encode`). That frees their slots as well: the newest frame, turned away at the cap,
+    /// goes in then, rather than waiting for a capture frame that a still source never sends.
+    @MainActor
+    func testTheNewestFrameGetsThroughWhenTheFramesAheadOfItFail() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "u")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 1920, pixelHeight: 1080, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try solidFrame(index: 0, width: 1920, height: 1080))
+        var waits = 0
+        while model.encoder == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        let encoder = try XCTUnwrap(model.encoder, "the loop makes an encoder")
+        try await Task.sleep(for: .milliseconds(300))   // the first frame is through
+        // From here VideoToolbox fails every frame: none reaches the model as an output, and the test reports each one
+        // through the encoder's own `onError`, as VideoToolbox would.
+        let reportFailure = try XCTUnwrap(encoder.onError)
+        let emitted = EncodedTimes()
+        encoder.onFrame = { frame in
+            let time = frame.captureHostTimeNs
+            Task { @MainActor in emitted.times.append(time) }
+        }
+        var frames: [CapturedFrame] = []
+        for i in 1...4 { frames.append(try solidFrame(index: i, width: 1920, height: 1080)) }
+        for frame in frames { source.emit(frame: frame) }   // back to back: more than the two the encoder takes at once
+        let newest = try XCTUnwrap(frames.last)
+        try await Task.sleep(for: .milliseconds(300))   // the frames the encoder took are done; the source is still
+        XCTAssertFalse(emitted.times.isEmpty, "the encoder took frames")
+        XCTAssertFalse(emitted.times.contains(newest.captureHostTimeNs), "the cap turned the newest frame away")
+
+        for _ in emitted.times { reportFailure(.frameDropped) }
+        waits = 0
+        while !emitted.times.contains(newest.captureHostTimeNs), waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        XCTAssertTrue(emitted.times.contains(newest.captureHostTimeNs), "the newest frame reaches the encoder once a failure frees a slot")
+        XCTAssertEqual(model.state, .capturing)
+        await model.stop()
+    }
+
+    /// Stop Sharing in the menu bar ends the stream with an error, as does a stream that stops or cannot start: the
+    /// share fails and offers Retry. The session's system picker stays up, though, and a new pick starts a fresh stream
+    /// on the same session (`.started`): the share resumes as a fresh one, with the card gone, the listener back and a
+    /// new encoder made from the new stream's first frame.
+    @MainActor
+    func testANewPickAfterTheCaptureEndedResumesTheShare() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "v")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 0))
+        var waits = 0
+        while view.pacer.held?.compareWith == nil, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        let old = try XCTUnwrap(model.encoder)
+        XCTAssertNotNil(model.advertiser, "the share listens")
+
+        source.emit(.failed("The user stopped the stream"))
+        await drain()
+        XCTAssertEqual(model.state, .failed("The user stopped the stream"))
+        XCTAssertNil(model.advertiser, "a failed share stops listening")
+
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))   // a new pick, from the same session's picker
+        await drain()
+        XCTAssertEqual(model.state, .capturing, "a new pick resumes the share without Retry")
+        XCTAssertFalse(model.failureNeedsPermission)
+        XCTAssertNotNil(model.advertiser, "the resumed share listens again")
+        XCTAssertNil(model.encoder, "the ended stream's encoder is let go")
+        XCTAssertEqual(model.codecLabel, "raw")
+        let fresh = try capturedFrame(index: 1)
+        source.emit(frame: fresh)
+        waits = 0
+        while view.pacer.held?.compareWith !== fresh.pixelBuffer, waits < 40 { try await Task.sleep(for: .milliseconds(50)); waits += 1 }
+        XCTAssertTrue(view.pacer.held?.compareWith === fresh.pixelBuffer, "the loop shows the new stream's frame, encoded and decoded")
+        let made = try XCTUnwrap(model.encoder)
+        XCTAssertFalse(made === old, "a new encoder")
+        XCTAssertEqual(model.state, .capturing)
+        XCTAssertEqual(journal.lines, ["present v0"], "the same session")
         await model.stop()
     }
 

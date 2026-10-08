@@ -50,7 +50,8 @@ public final class ShareModel {
     public var dividerPosition: Double = 0.5 { didSet { if dividerPosition != oldValue { sink.moveDivider(to: dividerPosition) } } }
     public private(set) var codecMs: Double?
     public private(set) var codecLabel = "raw"
-    private var encoder: VideoEncoder?
+    /// Internal, not private, so a test can stand in for VideoToolbox's callbacks on the encoder the share made.
+    private(set) var encoder: VideoEncoder?
     private var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
     /// The newest captured frame, raw: the left of the comparison while the loop is on. While it is off it is the frame
@@ -62,8 +63,8 @@ public final class ShareModel {
     /// When the encoder last took a frame (`CACurrentMediaTime`): a frame it turned away carries no keyframe.
     @ObservationIgnored private var lastAcceptedAt: CFTimeInterval = 0
     /// The newest frame was turned away at the encoder's two-in-flight cap, and nothing newer has been taken since: the
-    /// next encoder output, which frees a slot, encodes it (`encodePendingNewest`). Spec sections 5 and 8: the newest
-    /// frame is the one that gets through, and a still source would send no other.
+    /// next encoder output or frame failure, either of which frees a slot, encodes it (`encodePendingNewest`). Spec
+    /// sections 5 and 8: the newest frame is the one that gets through, and a still source would send no other.
     @ObservationIgnored private var newestPending = false
     /// Bumped by every quality change, loop off and retire, so a pending `qualityRested` for an earlier one does nothing.
     @ObservationIgnored private var qualityRestToken: UInt64 = 0
@@ -75,6 +76,11 @@ public final class ShareModel {
     private var encodeFailures = 0
     /// Frames the decoder threw on in a row; ten fail the share (`handleEncoded`). Only a frame decoded resets it.
     private var decodeFailures = 0
+    /// The share failed because its capture ended (`CaptureEvent.failed`: Stop Sharing in the menu bar, a stream that
+    /// stopped, or one that could not start or change). The session's picker is still up, and a new pick from it
+    /// (`.started`) resumes the share without Retry. A codec or listener failure does not set it: the stream it leaves
+    /// running may report a new size, and that must not clear the failure (`handle`). Cleared once capturing again.
+    @ObservationIgnored private var captureFailed = false
 
     public private(set) var viewerName: String?
     public private(set) var isSending = false
@@ -338,8 +344,8 @@ public final class ShareModel {
         }
     }
 
-    /// After an encoder output, which frees a slot: the newest frame, turned away at the cap, goes in now with its own
-    /// capture time. Turned away again, it stays pending for the next output, so nothing builds a queue.
+    /// After an encoder output or a frame failure, which frees a slot: the newest frame, turned away at the cap, goes in
+    /// now with its own capture time. Turned away again, it stays pending for the next one, so nothing builds a queue.
     private func encodePendingNewest() {
         guard newestPending else { return }
         newestPending = false
@@ -440,7 +446,11 @@ public final class ShareModel {
             telemetry.recordDrop(at: now)
             encodeStarts = encodeStarts.filter { now - $0.value < 1 }   // a failed frame never decodes; drop its start
             encodeFailures += 1
-            if encodeFailures >= 10 { failCodec("encoder", message: "Video encoding keeps failing.") }
+            if encodeFailures >= 10 { failCodec("encoder", message: "Video encoding keeps failing."); return }
+            // The failed frame freed its slot, as an output does (`handleEncoded`): the newest frame, if the cap turned it
+            // away, goes in now; a still source would send no other. Not once the encoder is gone (the loop turned off,
+            // a share retired): a late failure from it makes no new one.
+            if encoder != nil { encodePendingNewest() }
         case .property(let key, let status):
             codecNotice = "The video \(part) rejected its \(key) setting (\(status)); the picture goes on without it."
         case .sessionCreate, .decode, .formatDescription, .prepare:
@@ -452,10 +462,16 @@ public final class ShareModel {
     /// (a fresh session and encoder).
     private func failCodec(_ part: String, message: String) {
         log.error("the video \(part, privacy: .public) failed 10 frames in a row")
-        encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
-        encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); newestPending = false
+        dropCodec()
         state = .failed(message)
         endViewers()
+    }
+
+    /// Lets the encoder and the decoder go, with their counts and figures: the next frame to encode makes a fresh
+    /// encoder (`encode`), which starts with a keyframe.
+    private func dropCodec() {
+        encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
+        encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); newestPending = false
     }
 
     private func handleDecoded(_ d: DecodedFrame) {
@@ -522,12 +538,20 @@ public final class ShareModel {
             // new size and scale to the viewer and to every viewer that pairs from now on.
             let resized = state == .capturing && (pixelSize != CGSize(width: w, height: h) || scale != s)
             pixelSize = CGSize(width: w, height: h); scale = s
-            // A codec or listener failure leaves the stream, and the raw picture, running until Retry: a new size from it
-            // resizes the picture and the failure stays.
             if case .failed = state {
-                log.info("the failed share's capture is now \(w, privacy: .public)×\(h, privacy: .public); waiting for Retry")
-                return
+                // A codec or listener failure leaves the stream, and the raw picture, running until Retry: a new size
+                // from it resizes the picture and the failure stays.
+                guard captureFailed else {
+                    log.info("the failed share's capture is now \(w, privacy: .public)×\(h, privacy: .public); waiting for Retry")
+                    return
+                }
+                // The capture had ended, and a new pick from the session's picker started it again: the share resumes as
+                // a fresh one. The card goes, the next frame makes a new encoder, and the listener starts again below.
+                log.info("the capture started again at \(w, privacy: .public)×\(h, privacy: .public) after it ended; the share resumes")
+                dropCodec()
+                failureNeedsPermission = false; codecNotice = nil
             }
+            captureFailed = false
             state = .capturing
             if resized {
                 log.info("the capture is now \(w, privacy: .public)×\(h, privacy: .public) @\(s, privacy: .public)x")
@@ -550,6 +574,7 @@ public final class ShareModel {
             // Before the first frame, a missing Screen Recording grant is the likely cause.
             failureNeedsPermission = state != .capturing && !screenRecordingGranted()
             state = .failed(message)
+            captureFailed = true
             endViewers()
         }
     }

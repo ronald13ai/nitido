@@ -382,6 +382,45 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Stop Sharing in the menu bar ends the stream, and the share fails and ends its viewer. The session's system picker
+    /// stays up, though: a new pick from it starts a fresh stream (`.started` on the same session), and the share
+    /// resumes without Retry, listens again with the same code, and a viewer that pairs sees the new stream's picture.
+    @MainActor
+    func testANewPickAfterStopSharingResumesTheShareForViewers() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        let first = ViewModel()
+        let sharer = peer(for: share)
+        first.select(sharer)
+        first.code = share.code
+        first.connect()
+        try await waitUntil("the viewer is connected") { first.state == .connected && share.isSending }
+
+        source.emit(.failed("The user stopped the stream"))
+        try await waitUntil("the viewer hears that the sharer stopped sharing") {
+            first.state == .failed("\(share.name) stopped sharing.", sharer)
+        }
+        XCTAssertNil(share.listeningPort)
+
+        let code = share.code
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the resumed share listens again") { share.listeningPort != nil }
+        XCTAssertEqual(share.state, .capturing)
+        XCTAssertEqual(share.code, code, "the same code")
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("a viewer pairs with the resumed share") { viewer.state == .connected && share.isSending }
+        source.emit(frame: try stripedFrame(index: 1))
+        try await waitUntil("the new stream's picture reaches the viewer") { shown.count >= 1 }
+        XCTAssertEqual(share.state, .capturing)
+        viewer.disconnect()
+        first.disconnect()
+        await share.stop()
+    }
+
     /// One viewer at a time: a second viewer that proves the code takes over, the first is told the session ended, and
     /// the sharer hears the new one.
     @MainActor
@@ -925,7 +964,7 @@ final class ViewerLinkTests: XCTestCase {
     /// one that waits says why over the picture.
     @MainActor
     func testListenerTroubleIsShown() async throws {
-        let (share, _) = try await listeningShare()
+        let (share, source) = try await listeningShare()
         let advertiser = try XCTUnwrap(share.advertiser)
         advertiser.listenerStateChanged(.waiting(.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))))
         try await waitUntil("the sharer shows why viewers cannot reach it") { share.networkNotice != nil }
@@ -934,6 +973,14 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the share fails") { if case .failed = share.state { return true }; return false }
         guard case .failed(let message) = share.state else { return }
         XCTAssertTrue(message.contains("local network"), message)
+        // The stream, and the raw picture, go on until Retry, and the stream may report a new size meanwhile (a window
+        // resized): the picture takes it, the failure stays, and nothing listens again. Only a capture that ended and
+        // started again resumes a share without Retry.
+        source.emit(.started(pixelWidth: 640, pixelHeight: 360, scale: 2))
+        await drain()
+        XCTAssertEqual(share.pixelSize, CGSize(width: 640, height: 360))
+        XCTAssertEqual(share.state, .failed(message), "only Retry ends a listener failure")
+        XCTAssertNil(share.advertiser)
         await share.stop()
     }
 

@@ -159,7 +159,7 @@ Motion, following the design engineering rules in use at RONAR:
 | Screen Recording not granted | Explain before the system prompt; after a denial, show the one-step path to System Settings and a Retry button. |
 | Picker cancelled | The first pick: back to Welcome, no error. A change of content cancelled mid-share keeps the current content. |
 | Display reconfigured mid-share, or the shared window resized | Once the new size holds for 150 ms, restart the stream at it, send a new `videoConfig` and a `hello` with the new size and scale, keyframe next. |
-| Capture stopped by the system (Stop Sharing in the menu bar) | The Share window offers Retry; the viewer is told with `bye(2)` and says the sharer stopped sharing; the listener stops until Retry. |
+| Capture stopped by the system (Stop Sharing in the menu bar) | The Share window offers Retry; the viewer is told with `bye(2)` and says the sharer stopped sharing; the listener stops until Retry, or until a new pick from the system's picker starts the capture again and resumes the share. |
 | Link drops | Both sides show "Reconnecting…": the viewer over the last frame (dimmed), the sharer next to the viewer's name in the pairing panel until the viewer pairs again (30 s at most). Backoff retries, keyframe on reconnect, strip shows the gap. |
 | Quit or window closed mid-session | The session stops first, so the other side hears `bye`; the app quits once it is out (2 s at most). |
 | Backlog grows | Skip non-key frames, lower bitrate, request keyframe; the strip shows the dropped count. |
