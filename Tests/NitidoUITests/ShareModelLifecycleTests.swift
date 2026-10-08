@@ -873,6 +873,48 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// Spec 9: a codec that cannot start is said in one plain sentence, what happened and what to do, with the status
+    /// for whoever reads the log alongside (the log names the case). No hardware encoder takes a picture 100,000 pixels
+    /// wide, so the loop's encoder cannot start here, as on a Mac whose encoder is not available.
+    @MainActor
+    func testAnEncoderThatCannotStartSaysSoInOneSentence() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "e")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 0, width: 100_000, height: 2))
+        try await waitUntil("the share fails") { model.state != .capturing }
+        guard case .failed(let message) = model.state else { return XCTFail("expected a failure, got \(model.state)") }
+        XCTAssertTrue(message.hasPrefix("This Mac's hardware video encoder could not start (error "), message)
+        XCTAssertTrue(message.hasSuffix("); press Retry to try again."), message)
+        XCTAssertFalse(message.contains("VideoToolbox"), message)
+        await model.stop()
+    }
+
+    /// The same for the loop's decoder: a setup it cannot read fails the share in one sentence.
+    @MainActor
+    func testALoopDecoderThatCannotStartSaysSoInOneSentence() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "f")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        model.handleEncoded(EncodedFrame(seq: 0, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 1, 2]),
+                                         parameterSets: [Data([0, 1, 2])], codec: .hevc, width: 320, height: 180))
+        guard case .failed(let message) = model.state else { return XCTFail("expected a failure, got \(model.state)") }
+        XCTAssertTrue(message.hasPrefix("The video decoder could not start (error "), message)
+        XCTAssertTrue(message.hasSuffix("); press Retry to try again."), message)
+        await model.stop()
+    }
+
     /// Spec 9: a setting VideoToolbox rejects is said over the picture in plain language, not with its key.
     @MainActor
     func testARejectedSettingIsSaidInPlainLanguage() async throws {

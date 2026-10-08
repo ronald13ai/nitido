@@ -25,14 +25,26 @@ public enum CodecError: Error, Equatable {
     /// end. Logs keep `String(describing:)`, which names the case.
     public var plainDescription: String {
         switch self {
-        case .sessionCreate(let status): "VideoToolbox could not start a hardware video session (error \(status))."
+        case .sessionCreate(let status): "The hardware video session could not start (error \(status))."
         case .encode(let status): "The hardware encoder could not encode a frame (error \(status))."
         case .decode(let status): "The video decoder could not read a frame (error \(status))."
         case .formatDescription(let status): "The video setup could not be read (error \(status))."
-        case .property(let key, let status): "VideoToolbox rejected the \(Self.settingName(key)) setting (error \(status))."
+        case .property(let key, let status): "The video codec rejected the \(Self.settingName(key)) setting (error \(status))."
         case .prepare(let status): "The hardware encoder could not get ready (error \(status))."
         case .frameDropped: "The hardware encoder dropped a frame."
         case .missingData: "The hardware encoder produced an empty frame."
+        }
+    }
+
+    /// VideoToolbox's status inside a sentence the app writes itself, " (error -12908)", for whoever reads the log
+    /// alongside; empty for a failure that has none.
+    public var statusNote: String {
+        switch self {
+        case .sessionCreate(let status), .encode(let status), .decode(let status), .formatDescription(let status),
+             .property(_, let status), .prepare(let status):
+            " (error \(status))"
+        case .frameDropped, .missingData:
+            ""
         }
     }
 

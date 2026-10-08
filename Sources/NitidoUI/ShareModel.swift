@@ -390,7 +390,7 @@ public final class ShareModel {
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
         } catch {
             log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
-            state = .failed("The hardware video encoder could not start. \(error.plainDescription)")
+            state = .failed("This Mac's hardware video encoder could not start\(error.statusNote); press Retry to try again.")
             endViewers()
         }
     }
@@ -429,7 +429,7 @@ public final class ShareModel {
                 d = try VideoDecoder(config: cfg)
             } catch {
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
-                state = .failed("The video decoder could not start. \(error.plainDescription)"); endViewers(); return
+                state = .failed("The video decoder could not start\(error.statusNote); press Retry to try again."); endViewers(); return
             }
             decoder?.invalidate()
             decoder = d; decoderConfig = cfg

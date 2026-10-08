@@ -162,8 +162,8 @@ final class CodecSafetyTests: XCTestCase {
         XCTAssertEqual(encoder.nextSeq, 1, "a frame turned away takes no sequence number")
     }
 
-    /// Spec 9: errors are shown in plain language. Every codec failure reads as one sentence, with no Swift case name
-    /// or VideoToolbox key in it, and the status at the end for whoever reads the log alongside.
+    /// Spec 9: errors are shown in plain language. Every codec failure reads as one sentence, with no Swift case name,
+    /// no VideoToolbox key and no API name in it, and the status at the end for whoever reads the log alongside.
     func testEveryCodecErrorReadsAsASentence() {
         let errors: [CodecError] = [
             .sessionCreate(-12908), .encode(-12902), .decode(-12909), .formatDescription(-12712), .prepare(-12903),
@@ -180,7 +180,7 @@ final class CodecSafetyTests: XCTestCase {
         ]
         let identifiers = ["sessionCreate", "formatDescription", "frameDropped", "missingData", "DataRateLimits", "AverageBitRate",
                            "ProfileLevel", "MaxKeyFrameInterval", "ExpectedFrameRate", "PrioritizeEncodingSpeedOverQuality",
-                           "AllowFrameReordering", "RealTime"]
+                           "AllowFrameReordering", "RealTime", "VideoToolbox"]
         for error in errors {
             let text = error.plainDescription
             XCTAssertTrue(text.hasSuffix("."), text)
@@ -191,13 +191,15 @@ final class CodecSafetyTests: XCTestCase {
             case .sessionCreate(let status), .encode(let status), .decode(let status), .formatDescription(let status),
                  .prepare(let status), .property(_, let status):
                 XCTAssertTrue(text.hasSuffix("(error \(status))."), text)
+                XCTAssertEqual(error.statusNote, " (error \(status))", "the status inside a sentence the app writes")
             case .frameDropped, .missingData:
                 XCTAssertFalse(text.contains("error"), text)
+                XCTAssertEqual(error.statusNote, "", "no status to give")
             }
         }
-        XCTAssertEqual(CodecError.sessionCreate(-12908).plainDescription, "VideoToolbox could not start a hardware video session (error -12908).")
+        XCTAssertEqual(CodecError.sessionCreate(-12908).plainDescription, "The hardware video session could not start (error -12908).")
         XCTAssertEqual(CodecError.property(kVTCompressionPropertyKey_AverageBitRate as String, -12900).plainDescription,
-                       "VideoToolbox rejected the average bitrate setting (error -12900).")
+                       "The video codec rejected the average bitrate setting (error -12900).")
     }
 
     func testFailureChannelHoldsUntilAHandlerIsSet() {

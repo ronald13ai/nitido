@@ -312,7 +312,7 @@ public final class ViewModel {
                 // Nothing on this link can be shown any more: end it, so it does not go on sending to nobody. A fresh
                 // session brings the setup again, so the failure offers to reconnect to the same Mac.
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
-                failForDecoder("The video decoder could not start. \(error.plainDescription)")
+                failForDecoder("The video decoder could not start\(error.statusNote); reconnect to try again.")
             }
         case .videoFrame(let f):
             // The strip's first figure on the viewer is frames received (`ViewView` labels it so), not captured.
