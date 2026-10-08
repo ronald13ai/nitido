@@ -44,6 +44,8 @@ public final class ViewModel {
     private var linkTasks: [Task<Void, Never>] = []
     private var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
+    /// Frames the decoder threw on in a row; ten end the link (`handleIncoming`). A frame decoded, or leaving, resets it.
+    private var decodeFailures = 0
     private var telemetry = Telemetry(now: CACurrentMediaTime())
     private var tasks: [Task<Void, Never>] = []
 
@@ -152,7 +154,7 @@ public final class ViewModel {
 
     public func disconnect() {
         link?.close(); link = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []
-        decoder?.invalidate(); decoder = nil; decoderConfig = nil
+        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0
         ink.clearRemote()
         pixelSize = .zero; codecLabel = "·"; codecNotice = nil; renderFailure = nil; sharerName = ""
         state = .browsing
@@ -210,7 +212,24 @@ public final class ViewModel {
         case .videoFrame(let f):
             telemetry.recordCapture(at: now); telemetry.recordBytes(f.data.count, at: now)
             guard let decoder else { link?.send(.keyframeRequest); return }
-            do { try decoder.decode(f) } catch { telemetry.recordDrop(at: now); link?.send(.keyframeRequest) }
+            do {
+                try decoder.decode(f)
+                decodeFailures = 0
+            } catch {
+                // `VideoDecoder.decode` does not log what it throws. A decoder that keeps throwing would freeze the
+                // picture without a word and ask for a keyframe on every frame: each throw is logged and counted as
+                // dropped, and ten in a row end the link and say so, as on the sharing side (`ShareModel.handleEncoded`).
+                log.error("the video decoder could not decode frame \(f.seq, privacy: .public): \(String(describing: error), privacy: .public)")
+                telemetry.recordDrop(at: now)
+                decodeFailures += 1
+                guard decodeFailures < 10 else {
+                    log.error("the video decoder failed 10 frames in a row; ending the link")
+                    disconnect()
+                    state = .failed("Video decoding keeps failing.", nil)
+                    return
+                }
+                link?.send(.keyframeRequest)
+            }
         case .stroke(let s): ink.applyRemote(s)
         case .undo(let id): ink.undoRemote(id: id)
         case .clear: ink.clearRemote()

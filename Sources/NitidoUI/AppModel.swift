@@ -24,7 +24,7 @@ public final class AppModel {
     }
 
     /// Shows the View screen. One viewer at a time: a viewer that exists already (browsing, connected or failed) is
-    /// kept, so ⌘V twice never leaves a replaced viewer's link open with nobody to close it.
+    /// kept, so ⌘⇧V twice never leaves a replaced viewer's link open with nobody to close it.
     public func startView() {
         if view == nil { view = ViewModel() }
         screen = .view

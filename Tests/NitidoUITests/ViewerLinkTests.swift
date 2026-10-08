@@ -6,6 +6,7 @@ import CoreVideo
 import QuartzCore
 import dnssd
 import NitidoCore
+import NitidoCodec
 @testable import NitidoCapture
 @testable import NitidoLink
 @testable import NitidoUI
@@ -70,6 +71,18 @@ private final class ShownCounter {
 }
 
 private struct TimedOut: Error {}
+
+/// A real keyframe from the hardware encoder: its parameter sets build a decoder that works.
+private func realKeyframe() async throws -> EncodedFrame {
+    let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+    defer { encoder.invalidate() }
+    let (frames, out) = AsyncStream<EncodedFrame>.makeStream()
+    encoder.onFrame = { out.yield($0) }
+    Task { try? await Task.sleep(for: .seconds(5)); out.finish() }
+    XCTAssertTrue(encoder.encode(try stripedFrame().pixelBuffer, captureHostTimeNs: 0))
+    for await frame in frames where frame.isKey { return frame }
+    throw XCTSkip("the hardware encoder emitted no keyframe within 5 s")
+}
 
 /// Both ends of a share in one process: a ShareModel fed by a fake capture source and a ViewModel, joined over the
 /// real TLS link on the loopback address (the sharer's own listener, so the code and the key are the real ones).
@@ -234,6 +247,114 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertNil(viewer.renderFailure)
     }
 
+    /// A connection that has not proved the code leaves the viewer alone: the listener hands it over before its TLS-PSK
+    /// handshake, so it may be a port scan or a mistyped code, and neither may end the session of the viewer who
+    /// paired. Both are let go once they end, and the picture still reaches the viewer.
+    @MainActor
+    func testAConnectionThatHasNotProvedTheCodeLeavesTheViewerAlone() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        let sharer = peer(for: share)
+        viewer.select(sharer)
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the sharer sends to the viewer") { share.isSending && share.viewerName == viewer.name }
+        try await waitUntil("the viewer shows the picture") { shown.count >= 1 }
+
+        // A port scan: plain TCP that never starts a handshake.
+        let probe = NWConnection(to: sharer.endpoint, using: .tcp)
+        probe.start(queue: DispatchQueue(label: "probe"))
+        try await waitUntil("the sharer holds the probe apart from the viewer") { share.unpairedCount == 1 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(viewer.state, .connected, "a port scan ended the viewer's session")
+        XCTAssertTrue(share.isSending)
+        XCTAssertEqual(share.viewerName, viewer.name)
+        probe.cancel()
+        try await waitUntil("the sharer lets the probe go", timeout: 20) { share.unpairedCount == 0 }
+
+        // A mistyped code: the handshake fails.
+        let wrong = String(format: "%04d", (Int(share.code)! + 1) % 10_000)
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Guess", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let guess = NitidoLink.Link.connect(to: sharer.endpoint, code: wrong, sharerName: sharer.keyName, hello: hello)
+        try await waitUntil("the wrong code fails") { if case .failed = guess.state { return true }; return false }
+        try await waitUntil("the sharer lets the guess go") { share.unpairedCount == 0 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(viewer.state, .connected, "a wrong code ended the viewer's session")
+        XCTAssertTrue(share.isSending)
+        XCTAssertEqual(share.viewerName, viewer.name)
+
+        let before = shown.count
+        source.emit(frame: try stripedFrame(index: 1))
+        try await waitUntil("a new frame still reaches the viewer") { shown.count > before }
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// One viewer at a time: a second viewer that proves the code takes over, the first is told the session ended, and
+    /// the sharer hears the new one.
+    @MainActor
+    func testASecondViewerThatProvesTheCodeTakesOver() async throws {
+        let (share, _) = try await listeningShare()
+        let sharer = peer(for: share)
+        let first = ViewModel()
+        first.select(sharer)
+        first.code = share.code
+        first.connect()
+        try await waitUntil("the first viewer is connected") { first.state == .connected && share.isSending }
+
+        let second = ViewModel()
+        second.select(sharer)
+        second.code = share.code
+        second.connect()
+        try await waitUntil("the second viewer is connected") { second.state == .connected }
+        try await waitUntil("the first viewer hears that its session ended") {
+            first.state == .failed("The sharer ended the session.", sharer)
+        }
+        XCTAssertTrue(share.isSending)
+        XCTAssertEqual(share.unpairedCount, 0)
+        let stroke = second.ink.beginLocal(StrokePoint(x: 0.5, y: 0.5, pressure: 1, tMs: 0))
+        second.ink.endLocal(stroke)
+        try await waitUntil("the second viewer's stroke reaches the sharer") {
+            share.ink.document.strokes.contains { $0.id == stroke && $0.isRemote }
+        }
+        second.disconnect()
+        try await waitUntil("the sharer lets the second viewer go") { !share.isSending && share.viewerName == nil }
+        first.disconnect()
+        await share.stop()
+    }
+
+    /// A decoder that keeps throwing is not a silent freeze on the viewer: each throw counts as a dropped frame, nine in
+    /// a row leave the link up (a fresh keyframe may bring it back), the tenth ends the link and says so. A frame decoded
+    /// in between starts the count again.
+    @MainActor
+    func testADecoderThatKeepsThrowingEndsTheLinkAfterTenInARow() async throws {
+        let (share, _) = try await listeningShare()
+        let viewer = ViewModel()
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        let key = try await realKeyframe()
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(key.videoConfig)))
+        XCTAssertEqual(viewer.pixelSize, CGSize(width: 320, height: 180))
+        // Real parameter sets built a decoder that works; this data is not a picture, so `decode` throws.
+        let unreadable = VideoFrame(seq: 1, captureHostTimeNs: 1, isKey: true, data: Data([0, 0, 0, 3, 1, 2, 3]))
+        for _ in 0..<9 { viewer.handleIncoming(.videoFrame(unreadable)) }
+        XCTAssertEqual(viewer.state, .connected, "nine throws in a row leave the link up")
+        viewer.handleIncoming(.videoFrame(key.videoFrame))
+        for _ in 0..<9 { viewer.handleIncoming(.videoFrame(unreadable)) }
+        XCTAssertEqual(viewer.state, .connected, "a frame decoded in between starts the count again")
+        viewer.handleIncoming(.videoFrame(unreadable))
+        XCTAssertEqual(viewer.state, .failed("Video decoding keeps failing.", nil))
+        XCTAssertEqual(viewer.pixelSize, .zero)
+        try await waitUntil("the strip counts every throw as dropped") { viewer.snapshot.droppedLastSecond >= 19 }
+        try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
+        await share.stop()
+    }
+
     /// Back on the viewer frees the sharer for the next viewer.
     @MainActor
     func testDisconnectEndsTheViewerOnTheSharer() async throws {
@@ -291,6 +412,22 @@ final class ViewerLinkTests: XCTestCase {
         }
         viewer.handleIncoming(.hello(Hello(protocolVersion: protocolVersion, role: .share, name: "Mac", pixelWidth: 640, pixelHeight: 360, scale: 1)))
         XCTAssertEqual(viewer.scale, 1)
+    }
+
+    /// Bonjour may show a sharer renamed ("Name (2)" for a second instance on the same Mac): the viewer pairs under the
+    /// name the sharer keyed its listener with, not the one on the list, or the right code would fail as a wrong one.
+    @MainActor
+    func testTheViewerPairsWithARenamedSharerUnderItsKeyName() async throws {
+        let (share, _) = try await listeningShare()
+        let listed = peer(for: share)
+        let renamed = Peer(id: listed.id, name: "\(share.name) (2)", keyName: share.name, endpoint: listed.endpoint)
+        let viewer = ViewModel()
+        viewer.select(renamed)
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer pairs with the renamed sharer") { viewer.state == .connected && share.isSending }
+        viewer.disconnect()
+        await share.stop()
     }
 
     /// Connect does nothing until the code is four digits.

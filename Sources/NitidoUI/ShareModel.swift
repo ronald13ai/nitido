@@ -77,8 +77,14 @@ public final class ShareModel {
     private(set) var advertiser: Advertiser?
     /// The port the listener bound, once it is ready (logged; tests connect to it directly).
     @ObservationIgnored private(set) var listeningPort: UInt16?
+    /// The viewer: a connection that proved the code. Only it is sent to and heard from.
     private var link: NitidoLink.Link?
     private var linkTasks: [Task<Void, Never>] = []
+    /// Connections the listener took that have not proved the code yet, each with the loop that follows its states
+    /// (`attach`). Until one does, it may be anybody on the network, so it never touches the viewer.
+    private var unpaired: [ObjectIdentifier: (link: NitidoLink.Link, states: Task<Void, Never>)] = [:]
+    /// How many connections are still proving the code (tests check that none is left behind).
+    var unpairedCount: Int { unpaired.count }
 
     private var hello: Hello {
         Hello(protocolVersion: protocolVersion, role: .share, name: name,
@@ -229,6 +235,7 @@ public final class ShareModel {
         tasks.forEach { $0.cancel() }
         tasks = []
         link?.close(); link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
+        unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         listeningPort = nil; networkNotice = nil
         loopback = false
         qualityRestToken &+= 1
@@ -490,35 +497,52 @@ public final class ShareModel {
         }
     }
 
-    /// One viewer at a time: a new connection replaces the old one.
+    /// One viewer at a time, and only one that proved the code. The listener hands a connection over before its
+    /// TLS-PSK handshake has run, so it could be anybody on the network: a port scan, or a viewer with a mistyped
+    /// code. It waits here, apart from the viewer, and takes over only once it is ready (`linkStateChanged`).
     private func attach(_ incoming: NitidoLink.Link) {
-        link?.close()
-        link = incoming; viewerName = nil; isSending = false
-        linkTasks.forEach { $0.cancel() }
-        // Two loops held weakly, as every ShareModel loop is (Task 8 fix round 1). Plain tasks rather than a task group:
+        // Weak on every state, as every ShareModel loop is (Task 8 fix round 1). Plain tasks rather than a task group:
         // Swift 6 rejects a weak capture of the model in a group's `@MainActor` child task.
-        linkTasks = [
-            Task { [weak self] in
-                for await s in incoming.states {
-                    guard let self else { return }
-                    linkStateChanged(s, for: incoming)
-                }
-            },
-            Task { [weak self] in
-                for await m in incoming.messages {
-                    guard let self else { return }
-                    handleIncoming(m)
-                }
-            },
-        ]
+        let states = Task { [weak self] in
+            for await s in incoming.states {
+                guard let self else { return }
+                linkStateChanged(s, for: incoming)
+            }
+        }
+        unpaired[ObjectIdentifier(incoming)] = (incoming, states)
     }
 
     private func linkStateChanged(_ s: NitidoLink.Link.State, for l: NitidoLink.Link) {
-        guard l === link else { return }
         switch s {
-        case .ready: isSending = true; sendKeyframe()
-        case .failed(let m): isSending = false; viewerName = nil; link = nil; log.info("viewer link failed: \(m)")
-        case .cancelled: isSending = false; viewerName = nil; link = nil
+        case .ready:
+            // The handshake proved the code: this viewer takes over from the current one, which is told the sharer
+            // ended its session. Its messages are heard from now on (they wait in the link's stream until then).
+            guard let pairing = unpaired.removeValue(forKey: ObjectIdentifier(l)) else { return }
+            link?.close()
+            linkTasks.forEach { $0.cancel() }
+            link = l; viewerName = l.peerHello?.name; isSending = true
+            linkTasks = [
+                pairing.states,
+                Task { [weak self] in
+                    for await m in l.messages {
+                        guard let self, link === l else { return }
+                        handleIncoming(m)
+                    }
+                },
+            ]
+            sendKeyframe()
+        case .failed(let m):
+            if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
+                // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was.
+                log.info("a connection ended before it proved the code: \(m)")
+                return
+            }
+            guard l === link else { return }
+            isSending = false; viewerName = nil; link = nil; log.info("viewer link failed: \(m)")
+        case .cancelled:
+            if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil { return }
+            guard l === link else { return }
+            isSending = false; viewerName = nil; link = nil
         case .connecting: break
         }
     }

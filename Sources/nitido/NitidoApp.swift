@@ -31,7 +31,9 @@ struct NitidoApp: App {
             CommandGroup(replacing: .undoRedo) {}
             CommandMenu("Nítido") {
                 Button("Share…") { app.startShare() }.keyboardShortcut("n")
-                Button("View…") { app.startView() }.keyboardShortcut("v")
+                // ⌘⇧V, not ⌘V: SwiftUI gives a shortcut to one menu item only, so ⌘V here would take Paste away from
+                // the whole app, the code field included.
+                Button("View…") { app.startView() }.keyboardShortcut("v", modifiers: [.command, .shift])
                 Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
                 Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
                 Button("Undo Stroke") { app.undo() }.keyboardShortcut("z")
