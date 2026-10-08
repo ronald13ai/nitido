@@ -38,7 +38,8 @@ struct NitidoApp: App {
                 Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
                 Button("Undo Stroke") { app.undo() }.keyboardShortcut("z")
                 Button("Clear Ink") { app.clearInk() }.keyboardShortcut(.delete)
-                // Listed for discoverability; while the window is key, Esc is handled inside it (RootView).
+                // Listed for discoverability; while the window is key, Esc is handled inside it (RootView). Both go
+                // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while something is live.
                 Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
             }
         }

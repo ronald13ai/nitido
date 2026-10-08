@@ -72,6 +72,10 @@ public final class ShareModel {
 
     public private(set) var viewerName: String?
     public private(set) var isSending = false
+    /// Viewers that proved the code so far: each one draws the gold ring once (`ConnectRing`).
+    public private(set) var connectionCount = 0
+    /// The picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
+    public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
     public private(set) var networkNotice: String?
     /// Internal, not private, so a test can drive the listener's states.
@@ -480,6 +484,7 @@ public final class ShareModel {
             startAdvertising()
         case .cancelled:
             state = .idle
+            onCancelled?()
         case .stopped:
             state = .idle
         case .failed(let message):
@@ -565,7 +570,7 @@ public final class ShareModel {
             guard let pairing = unpaired.removeValue(forKey: ObjectIdentifier(l)) else { return }
             link?.close()
             linkTasks.forEach { $0.cancel() }
-            link = l; viewerName = l.peerHello?.name; isSending = true
+            link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
             linkTasks = [
                 pairing.states,
                 Task { [weak self] in

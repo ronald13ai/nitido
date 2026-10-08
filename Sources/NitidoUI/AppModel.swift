@@ -7,10 +7,13 @@ public final class AppModel {
     public var screen: Screen = .welcome
     public private(set) var share: ShareModel?
     public private(set) var view: ViewModel?
+    /// Raises "Stop sharing?" or "Disconnect?" (`RootView`) before a live session ends.
+    public var confirmStop = false
     public init() {}
 
     /// Shows the Share screen and the picker. One share at a time: while a share is picking or capturing this
-    /// does nothing more; after a cancel or a failure it reuses the same model, which stops its old session first.
+    /// does nothing more; after a failure it reuses the same model, which stops its old session first. A cancelled
+    /// picker goes back to Welcome (`onCancelled`), which lets the model go.
     public func startShare() {
         let excluded = NSApp.windows.filter { $0.windowNumber > 0 }.map { CGWindowID($0.windowNumber) }
         screen = .share
@@ -20,6 +23,8 @@ public final class AppModel {
         }
         let model = ShareModel()
         share = model
+        // A cancelled picker goes back to Welcome instead of leaving an empty Share screen.
+        model.onCancelled = { [weak self] in Task { await self?.stop() } }
         model.start(excludingWindowIDs: excluded)
     }
 
@@ -48,10 +53,16 @@ public final class AppModel {
         await s?.stop()
     }
 
+    /// Asks first ("Stop sharing?" or "Disconnect?", `RootView`) while a picture is being shared or a viewer is
+    /// connected or reconnecting; with nothing live (a picker, a list of Macs, a failure) it stops at once.
+    public func requestStop() {
+        let active = (share?.state == .capturing) || (view.map { if case .connected = $0.state { return true }; if case .reconnecting = $0.state { return true }; return false } ?? false)
+        if active { confirmStop = true } else { Task { await stop() } }
+    }
+
     /// The one entry point for Esc: the invisible in-window button on the Share and View screens and the Stop
-    /// menu item both call it. It stops at once for now; Task 15 makes it call `requestStop()`, so Esc asks
-    /// "Stop sharing?" or "Disconnect?" first whether or not the window is key.
-    public func escape() { Task { await stop() } }
+    /// menu item both call it, so Esc asks first whether or not the window is key. Never `stop()` from an Esc path.
+    public func escape() { requestStop() }
 }
 
 public struct RootView: View {
@@ -70,12 +81,16 @@ public struct RootView: View {
             }
         }
         .background(KeepWindowOnScreen())
+        // Raised by `requestStop` (Esc, the Stop menu item) while something is live.
+        .confirmationDialog(app.screen == .view ? "Disconnect?" : "Stop sharing?", isPresented: $app.confirmStop) {
+            Button(app.screen == .view ? "Disconnect" : "Stop", role: .destructive) { Task { await app.stop() } }
+        }
     }
 }
 
 /// Esc inside the window. A menu item's Esc shortcut never fires while a window is key, so the Share and
 /// View screens carry this invisible button; Welcome does not, so Esc there does nothing. It must call
-/// `app.escape()`, never `app.stop()` directly, so the confirmation Task 15 adds also covers it.
+/// `app.escape()`, never `app.stop()` directly, so the confirmation (`requestStop`) also covers it.
 private struct EscapeStops: View {
     let action: () -> Void
     var body: some View {

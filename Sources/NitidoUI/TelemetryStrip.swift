@@ -33,8 +33,7 @@ public struct TelemetryStrip: View {
             Sparkline(values: snapshot.latencySeries).frame(width: 96, height: 18)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(Theme.Colors.surface)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.Colors.hairline).frame(height: 1) }
+        .modifier(GlassBar())
     }
 
     private func fps(_ v: Double) -> String { v > 0 ? "\(Int(v.rounded()))" : "·" }

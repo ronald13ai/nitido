@@ -34,6 +34,10 @@ public final class ViewModel {
     public private(set) var renderFailure: String?
     /// Why the list of Macs may be empty (Local Network off, discovery stopped), shown on the list.
     public private(set) var discoveryNotice: String?
+    /// Times the link became ready, the first time and after every reconnect: each draws the gold ring once (`ConnectRing`).
+    public private(set) var connectionCount = 0
+    /// Codes the chosen Mac turned away in a row: each shakes the code field once and shows "Wrong code".
+    public private(set) var wrongCodeCount = 0
     public var showTelemetry = true
     public let sink = FrameSink()
     public let ink = InkController(role: .view)
@@ -120,7 +124,9 @@ public final class ViewModel {
         return Fit.size(natural: natural, limit: CGSize(width: screen.visibleFrame.width - 40, height: screen.visibleFrame.height - 120))
     }
 
-    public func select(_ peer: Peer) { code = ""; state = .enteringCode(peer) }
+    /// A new Mac starts the wrong-code count again. The code field is not on screen here (the list is), so the reset
+    /// never shakes it; the same holds for `retry`, which comes from a failure screen.
+    public func select(_ peer: Peer) { code = ""; wrongCodeCount = 0; state = .enteringCode(peer) }
 
     public func connect() {
         guard case .enteringCode(let peer) = state, code.count == 4, code.allSatisfy(\.isNumber) else { return }
@@ -151,7 +157,10 @@ public final class ViewModel {
         session.start()
     }
 
-    public func retry() { if case .failed(_, let peer?) = state { state = .enteringCode(peer) } else { state = .browsing } }
+    public func retry() {
+        wrongCodeCount = 0
+        if case .failed(_, let peer?) = state { state = .enteringCode(peer) } else { state = .browsing }
+    }
 
     public func disconnect() {
         link?.close(); link = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []
@@ -177,8 +186,14 @@ public final class ViewModel {
     private func sessionStateChanged(_ s: LinkSession.State, peer: Peer) {
         switch s {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
-        case .ready: state = .connected; decodeFailures = 0; link?.send(.keyframeRequest)
+        case .ready: state = .connected; connectionCount += 1; decodeFailures = 0; link?.send(.keyframeRequest)
         case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
+        case .closed(let reason?) where reason.contains("Check the code"):
+            // The handshake turned the code away: back to the code for that Mac, where the field shakes and says
+            // "Wrong code", instead of a failure screen.
+            log.info("the sharer turned the code away")
+            wrongCodeCount += 1
+            state = .enteringCode(peer)
         case .closed(let reason): state = .failed(reason ?? "Disconnected.", peer)
         }
     }

@@ -323,12 +323,14 @@ final class ViewerLinkTests: XCTestCase {
         first.code = share.code
         first.connect()
         try await waitUntil("the first viewer is connected") { first.state == .connected && share.isSending }
+        XCTAssertEqual(share.connectionCount, 1)
 
         let second = ViewModel()
         second.select(sharer)
         second.code = share.code
         second.connect()
         try await waitUntil("the second viewer is connected") { second.state == .connected }
+        XCTAssertEqual(share.connectionCount, 2, "a viewer taking over is a new connection: the ring draws again")
         try await waitUntil("the first viewer hears that its session ended") {
             first.state == .failed("The sharer ended the session.", sharer)
         }
@@ -407,10 +409,13 @@ final class ViewerLinkTests: XCTestCase {
         var incoming = advertiser.incoming.makeAsyncIterator()
         guard let first = await incoming.next() else { return XCTFail("no connection") }
         try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        XCTAssertEqual(viewer.connectionCount, 1)
         first.abort()
         try await waitUntil("the viewer says it is reconnecting") { viewer.state == .reconnecting(sharer, attempt: 1) }
+        XCTAssertEqual(viewer.connectionCount, 1, "losing the link is not a connection")
         guard let second = await incoming.next() else { return XCTFail("no reconnect") }
         try await waitUntil("the viewer is connected again") { viewer.state == .connected }
+        XCTAssertEqual(viewer.connectionCount, 2, "pairing again is a new connection: the ring draws again")
         // Bounded, so a missing request fails the test instead of hanging it: cancelling the task ends the iteration.
         let asked = Task { () -> Bool in
             for await m in second.messages where m == .keyframeRequest { return true }
@@ -549,7 +554,7 @@ final class ViewerLinkTests: XCTestCase {
         stale.code = original
         stale.connect()
         try await waitUntil("the old code no longer pairs") {
-            stale.state == .failed("Could not connect. Check the code and try again.", renewed)
+            stale.wrongCodeCount == 1 && stale.state == .enteringCode(renewed)
         }
         let next = ViewModel()
         next.select(renewed)
@@ -574,20 +579,61 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// A wrong code fails the handshake: the viewer says so, and Try again goes back to the code for that Mac.
+    /// A wrong code fails the handshake: the viewer goes straight back to the code for that Mac, where the field shakes
+    /// and says "Wrong code" (`wrongCodeCount`), with the code typed kept to be corrected. Choosing a Mac starts the
+    /// count again; the right code connects, and both ends count the connection (the gold ring's trigger).
     @MainActor
-    func testWrongCodeSaysCouldNotConnectAndTryAgainKeepsTheMac() async throws {
+    func testAWrongCodeGoesBackToTheCodeForThatMacAndCountsIt() async throws {
         let (share, _) = try await listeningShare()
         let viewer = ViewModel()
         let sharer = peer(for: share)
         viewer.select(sharer)
-        viewer.code = String(format: "%04d", (Int(share.code)! + 1) % 10_000)
+        let wrong = String(format: "%04d", (Int(share.code)! + 1) % 10_000)
+        viewer.code = wrong
         viewer.connect()
-        try await waitUntil("the viewer reports the failed pairing") {
-            viewer.state == .failed("Could not connect. Check the code and try again.", sharer)
-        }
-        viewer.retry()
+        try await waitUntil("the viewer is back on the code for that Mac") { viewer.wrongCodeCount == 1 }
         XCTAssertEqual(viewer.state, .enteringCode(sharer))
+        XCTAssertEqual(viewer.code, wrong, "the code typed stays, to be corrected")
+        viewer.connect()
+        try await waitUntil("a second wrong code counts again") { viewer.wrongCodeCount == 2 }
+        XCTAssertEqual(viewer.state, .enteringCode(sharer))
+        XCTAssertEqual(viewer.connectionCount, 0)
+        XCTAssertEqual(share.connectionCount, 0, "a connection that never proved the code is no connection")
+
+        viewer.disconnect()
+        viewer.select(sharer)
+        XCTAssertEqual(viewer.wrongCodeCount, 0, "choosing a Mac starts the count again")
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the right code connects") { viewer.state == .connected && share.isSending }
+        XCTAssertEqual(viewer.connectionCount, 1)
+        XCTAssertEqual(share.connectionCount, 1)
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// Esc while connected asks first ("Disconnect?"): `escape()` raises the confirmation and leaves the viewer
+    /// connected; only the confirmed stop lets it go. With nothing connected Esc stops at once (`AppModelTests`).
+    @MainActor
+    func testEscapeWhileConnectedAsksBeforeDisconnecting() async throws {
+        let (share, _) = try await listeningShare()
+        let app = AppModel()
+        app.startView()
+        let viewer = try XCTUnwrap(app.view)
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        app.escape()
+        await drain()
+        XCTAssertTrue(app.confirmStop, "Esc asks before it disconnects")
+        XCTAssertEqual(app.screen, .view)
+        XCTAssertTrue(app.view === viewer)
+        XCTAssertEqual(viewer.state, .connected)
+        await app.stop()
+        XCTAssertEqual(app.screen, .welcome)
+        XCTAssertNil(app.view)
+        try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
         await share.stop()
     }
 

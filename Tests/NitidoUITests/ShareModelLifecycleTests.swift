@@ -233,6 +233,29 @@ final class ShareModelLifecycleTests: XCTestCase {
         XCTAssertNil(weakModel, "the model outlived Stop")
     }
 
+    /// Cancelling the picker tells the app (`onCancelled`), which goes back to Welcome instead of leaving an empty
+    /// Share screen; only the picker's cancel does, a failure does not.
+    @MainActor
+    func testACancelledPickerCallsOnCancelledOnce() async {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "k")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        var cancels = 0
+        model.onCancelled = { cancels += 1 }
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.failed("the stream stopped"))
+        await drain()
+        XCTAssertEqual(cancels, 0, "a failure is not a cancel")
+        model.retry()
+        await drain()
+        factory.made[1].emit(.cancelled)
+        await drain()
+        XCTAssertEqual(cancels, 1)
+        XCTAssertEqual(model.state, .idle)
+        await model.stop()
+    }
+
     /// A model dropped without Stop is still released: its loops do not hold it.
     @MainActor
     func testLoopsDoNotKeepTheModelAlive() async {

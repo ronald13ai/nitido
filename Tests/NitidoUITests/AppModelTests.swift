@@ -2,13 +2,15 @@ import XCTest
 @testable import NitidoUI
 
 final class AppModelTests: XCTestCase {
-    /// Esc (the in-window button and the Stop menu item) goes through `escape()`, which returns to Welcome.
+    /// Esc (the in-window button and the Stop menu item) goes through `escape()`, which returns to Welcome, without
+    /// asking when nothing is being shared or viewed.
     @MainActor
     func testEscapeReturnsToWelcome() async {
         let app = AppModel()
         app.screen = .view
         app.escape()
         for _ in 0..<50 { await Task.yield() }
+        XCTAssertFalse(app.confirmStop, "nothing to stop: no question")
         XCTAssertEqual(app.screen, .welcome)
         XCTAssertNil(app.share)
     }
@@ -29,6 +31,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(viewer?.showTelemetry, false)
         app.escape()
         for _ in 0..<50 { await Task.yield() }
+        XCTAssertFalse(app.confirmStop, "a viewer that is only looking for Macs goes without a question")
         XCTAssertEqual(app.screen, .welcome)
         XCTAssertNil(app.view)
         XCTAssertEqual(viewer?.state, .browsing)
