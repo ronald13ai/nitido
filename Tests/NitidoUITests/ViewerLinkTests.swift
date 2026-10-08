@@ -613,10 +613,16 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.state, .connected, "a frame decoded in between starts the count again")
         viewer.handleIncoming(.videoFrame(unreadable))
         try await waitUntil("the tenth failure lands") { viewer.state != .connected }
-        XCTAssertEqual(viewer.state, .failed("Video decoding keeps failing.", nil))
+        // Spec 12: "after ten, show an error with Reconnect", to the same Mac with the same code.
+        XCTAssertEqual(viewer.state, .failed("Video decoding keeps failing.", peer(for: share)))
+        XCTAssertTrue(viewer.failureOffersReconnect)
         XCTAssertEqual(viewer.pixelSize, .zero)
         try await waitUntil("the strip counts every throw as dropped") { viewer.snapshot.droppedLastSecond >= 19 }
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
+        viewer.reconnect()
+        try await waitUntil("Reconnect pairs again with the code typed") { viewer.state == .connected && share.isSending }
+        XCTAssertFalse(viewer.failureOffersReconnect)
+        viewer.disconnect()
         await share.stop()
     }
 
@@ -1063,9 +1069,14 @@ final class ViewerLinkTests: XCTestCase {
         viewer.connect()
         try await waitUntil("the sharer sends to the viewer") { share.isSending }
         viewer.handleIncoming(.videoConfig(VideoConfig(codec: .hevc, width: 320, height: 180, parameterSets: [Data([0, 1, 2])])))
-        guard case .failed(let message, nil) = viewer.state else { return XCTFail("expected a failure, got \(viewer.state)") }
+        guard case .failed(let message, let peer) = viewer.state else { return XCTFail("expected a failure, got \(viewer.state)") }
         XCTAssertTrue(message.hasPrefix("Could not start the video decoder"), message)
+        XCTAssertEqual(peer, self.peer(for: share), "Reconnect goes back to the same Mac")
+        XCTAssertTrue(viewer.failureOffersReconnect)
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
+        viewer.reconnect()
+        try await waitUntil("Reconnect pairs again with the code typed") { viewer.state == .connected && share.isSending }
+        viewer.disconnect()
         await share.stop()
     }
 

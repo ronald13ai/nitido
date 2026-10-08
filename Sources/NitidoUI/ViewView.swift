@@ -135,15 +135,19 @@ public struct ViewView: View {
             .background(Theme.Colors.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: Theme.controlRadius))
     }
 
+    /// A decoder failure offers Reconnect, to the same Mac with the same code (spec 12); any other, Try again, which goes
+    /// back to the code for that Mac (or the list).
     private func failure(_ text: String) -> some View {
-        VStack(spacing: 14) {
+        let reconnects = model.failureOffersReconnect
+        let action = reconnects ? model.reconnect : model.retry
+        return VStack(spacing: 14) {
             Text(text).font(.system(size: 13)).foregroundStyle(Theme.Colors.text).multilineTextAlignment(.center)
             HStack(spacing: 12) {
                 QuietButton("Back") { model.disconnect() }
-                QuietButton("Try again") { model.retry() }
+                QuietButton(reconnects ? "Reconnect" : "Try again", action: action)
             }
-            // ⏎ tries again, as the system button it replaces did.
-            .background(DefaultAction { model.retry() })
+            // ⏎ does the same, as the system button it replaces did.
+            .background(DefaultAction(action: action))
         }
         .padding(40).frame(width: 520)
     }

@@ -38,6 +38,9 @@ public final class ViewModel {
     public private(set) var connectionCount = 0
     /// Codes the chosen Mac turned away in a row: each shakes the code field once and shows "Wrong code".
     public private(set) var wrongCodeCount = 0
+    /// The failure is the decoder's (it could not start, or ten frames in a row failed), not the link's: the same Mac
+    /// with the same code is the fix, so the failure screen offers Reconnect (`reconnect`) instead of Try again.
+    public private(set) var failureOffersReconnect = false
     public var showTelemetry = true
     public let sink = FrameSink()
     public let ink = InkController(role: .view)
@@ -46,6 +49,8 @@ public final class ViewModel {
     /// Internal, not private, so a test can drive discovery's states.
     let browser = Browser()
     private var link: LinkSession?
+    /// The Mac of the current session, so a decoder failure can offer to reconnect to it (`reconnect`).
+    private var currentPeer: Peer?
     private var linkTasks: [Task<Void, Never>] = []
     private var decoder: VideoDecoder?
     private var decoderConfig: VideoConfig?
@@ -185,6 +190,8 @@ public final class ViewModel {
         let session = LinkSession(endpoint: peer.endpoint, code: code, sharerName: peer.keyName, hello: hello)
         link?.close()
         link = session
+        currentPeer = peer
+        failureOffersReconnect = false
         state = .connecting(peer)
         linkTasks.forEach { $0.cancel() }
         // As in Task 13: two plain loops (Swift 6.2 rejects a task group's `@MainActor` child tasks), weak on every
@@ -207,12 +214,22 @@ public final class ViewModel {
     }
 
     public func retry() {
-        wrongCodeCount = 0
+        wrongCodeCount = 0; failureOffersReconnect = false
         if case .failed(_, let peer?) = state { state = .enteringCode(peer) } else { state = .browsing }
     }
 
+    /// After a decoder failure (`failureOffersReconnect`): connects to the same Mac again with the code typed, without
+    /// going back to the list or the code. A code no longer right lands on the code for that Mac, as any wrong code does.
+    public func reconnect() {
+        guard case .failed(_, let peer?) = state else { return }
+        wrongCodeCount = 0
+        state = .enteringCode(peer)
+        connect()
+    }
+
     public func disconnect() {
-        link?.close(); link = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []
+        link?.close(); link = nil; currentPeer = nil; failureOffersReconnect = false
+        linkTasks.forEach { $0.cancel() }; linkTasks = []
         decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil; awaitingKeyframe = false
         ink.clearRemote()
         pixelSize = .zero; codecLabel = "·"; codecNotice = nil; renderFailure = nil; sharerName = ""
@@ -286,10 +303,10 @@ public final class ViewModel {
                 pixelSize = CGSize(width: Int(cfg.width), height: Int(cfg.height))
                 codecLabel = cfg.codec == .hevc ? "HEVC" : "H.264"
             } catch {
-                // Nothing on this link can be shown any more: end it, so it does not go on sending to nobody.
+                // Nothing on this link can be shown any more: end it, so it does not go on sending to nobody. A fresh
+                // session brings the setup again, so the failure offers to reconnect to the same Mac.
                 log.error("could not create the video decoder: \(String(describing: error), privacy: .public)")
-                disconnect()
-                state = .failed("Could not start the video decoder: \(error)", nil)
+                failForDecoder("Could not start the video decoder: \(error)")
             }
         case .videoFrame(let f):
             // The strip's first figure on the viewer is frames received (`ViewView` labels it so), not captured.
@@ -328,6 +345,14 @@ public final class ViewModel {
         }
     }
 
+    /// Ends the link over a decoder that cannot go on, and offers Reconnect to the same Mac (spec 12).
+    private func failForDecoder(_ message: String) {
+        let peer = currentPeer
+        disconnect()
+        state = .failed(message, peer)
+        failureOffersReconnect = peer != nil
+    }
+
     private func askForKeyframe() {
         keyframeAskedAt = CACurrentMediaTime()
         link?.send(.keyframeRequest)
@@ -352,8 +377,7 @@ public final class ViewModel {
         decodeFailures += 1
         guard decodeFailures < 10 else {
             log.error("the video decoder failed 10 frames in a row; ending the link")
-            disconnect()
-            state = .failed("Video decoding keeps failing.", nil)
+            failForDecoder("Video decoding keeps failing.")
             return
         }
         if decodeFailures % 3 == 0 { d.invalidate(); decoder = nil; decoderConfig = nil }
