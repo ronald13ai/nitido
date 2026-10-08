@@ -183,7 +183,8 @@ final class LinkFailureTests: XCTestCase {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
         advertiser.listenerStateChanged(.failed(.posix(.EADDRINUSE)))
-        let states = await collect(advertiser.states, within: 3)
+        // The Bonjour registration (`.advertised`) may land anywhere in between; it says nothing about the listener.
+        let states = await collect(advertiser.states, within: 3)?.filter { if case .advertised = $0 { return false }; return true }
         XCTAssertEqual(states?.first, .ready(port: port))
         guard case .failed(let message)? = states?.last else { return XCTFail("expected a final .failed, got \(String(describing: states))") }
         XCTAssertTrue(message.contains("Address already in use"), message)
@@ -196,7 +197,7 @@ final class LinkFailureTests: XCTestCase {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
         advertiser.stop()
-        let states = await collect(advertiser.states, within: 3)
+        let states = await collect(advertiser.states, within: 3)?.filter { if case .advertised = $0 { return false }; return true }
         XCTAssertEqual(states, [.ready(port: port), .stopped])
         var incoming = advertiser.incoming.makeAsyncIterator()
         let next = await incoming.next()

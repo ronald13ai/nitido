@@ -20,6 +20,31 @@ final class DiscoveryTests: XCTestCase {
         }
     }
 
+    /// Two Macs left at the default Computer Name share one name, and Bonjour registers the second as "Name (2)". Each
+    /// advertiser says the name it was registered under, so the sharer can show the name its viewers see in the list.
+    func testTwoSharersOfTheSameNameSayTheNameBonjourGaveThem() async throws {
+        let name = "Twin \(UInt32.random(in: 0..<1_000_000))"
+        let first = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
+        _ = try await first.start()
+        let second = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
+        _ = try await second.start()
+        defer { first.stop(); second.stop() }
+        func advertisedName(_ advertiser: Advertiser) async -> String? {
+            await withTaskGroup(of: String?.self) { group in
+                group.addTask {
+                    for await s in advertiser.states { if case .advertised(let n) = s { return n } }
+                    return nil
+                }
+                group.addTask { try? await Task.sleep(for: .seconds(10)); return nil }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first
+            }
+        }
+        let names = [await advertisedName(first), await advertisedName(second)]
+        XCTAssertEqual(Set(names.compactMap { $0 }), [name, "\(name) (2)"], "registered as \(names)")
+    }
+
     /// Bonjour renames a service whose name is taken on the network ("Twin (2)"), while the sharer keyed its listener
     /// with the name it asked for. A viewer that derived the key from the name Bonjour shows would always fail as if
     /// the code were wrong: it pairs with the name the sharer publishes in its TXT record.

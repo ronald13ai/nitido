@@ -9,7 +9,15 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "advertiser")
 public final class Advertiser: @unchecked Sendable {
     /// What the listener is doing, so the sharer UI never shows a live share on a dead listener.
     /// `.failed` and `.stopped` are final: `states` and `incoming` both end right after them.
-    public enum State: Sendable, Equatable { case ready(port: UInt16), waiting(String), failed(String), stopped }
+    public enum State: Sendable, Equatable {
+        case ready(port: UInt16)
+        /// Bonjour registered the service under `name`: the one asked for, or "Name (2)" when another service on the
+        /// network has it already. Viewers list it under this name. Not final; it comes again if the name changes.
+        case advertised(name: String)
+        case waiting(String)
+        case failed(String)
+        case stopped
+    }
 
     public let incoming: AsyncStream<Link>
     public let states: AsyncStream<State>
@@ -29,6 +37,7 @@ public final class Advertiser: @unchecked Sendable {
         (incoming, out) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
         self.hello = OSAllocatedUnfairLock(initialState: hello)
+        listener.serviceRegistrationUpdateHandler = { [weak self] change in self?.registrationChanged(change) }
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { return }
             let link = Link(connection: connection, role: .share, hello: self.hello.withLock { $0 })
@@ -79,6 +88,13 @@ public final class Advertiser: @unchecked Sendable {
             takePendingStart()?.resume(throwing: CancellationError())
         default: break
         }
+    }
+
+    /// Reacts to a change in the Bonjour registration. Called on `queue` by the listener (and directly by tests).
+    func registrationChanged(_ change: NWListener.ServiceRegistrationChange) {
+        guard case .add(.service(let name, _, _, _)) = change else { return }
+        log.info("registered on the local network as \(name, privacy: .public)")
+        stateOut.yield(.advertised(name: name))
     }
 
     private func takePendingStart() -> CheckedContinuation<UInt16, Error>? {
