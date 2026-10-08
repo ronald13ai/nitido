@@ -20,8 +20,10 @@ public final class Link: @unchecked Sendable {
     public let states: AsyncStream<State>
     public var state: State { lock.withLock { _state } }
     public var peerHello: Hello? { lock.withLock { _peerHello } }
+    /// The latest pong's RTT, milliseconds (nil until the first pong).
     public var lastRTTMs: Double? { lock.withLock { _lastRTTMs } }
-    /// Peer clock minus local clock, nanoseconds, estimated from ping/pong (nil until the first pong).
+    /// Peer clock minus local clock, nanoseconds, from the pong with the lowest RTT in the last 10 s, so queueing
+    /// behind video in one direction does not bias it (`ClockOffsetFilter`; nil until the first pong).
     public var clockOffsetNs: Int64? { lock.withLock { _clockOffsetNs } }
     public var backlogBytes: Int { lock.withLock { backlog } }
     /// True once the link has been ready, even after it ended: it proved the code.
@@ -48,6 +50,7 @@ public final class Link: @unchecked Sendable {
     private var _peerHello: Hello?
     private var _lastRTTMs: Double?
     private var _clockOffsetNs: Int64?
+    private var offsets = ClockOffsetFilter()
     private var backlog = 0
     private var _wasReady = false
     private var _keyMismatch = false
@@ -246,7 +249,11 @@ public final class Link: @unchecked Sendable {
                 log.error("dropped pong \(id): echoed time \(original) or reply time \(reply) out of range")
                 return
             }
-            lock.withLock { _lastRTTMs = sample.rttMs; _clockOffsetNs = sample.offsetNs }
+            lock.withLock {
+                _lastRTTMs = sample.rttMs
+                offsets.add(rttMs: sample.rttMs, offsetNs: sample.offsetNs, at: now)
+                _clockOffsetNs = offsets.offsetNs(now: now)
+            }
         case .bye(let reason):
             lock.withLock { _byeReason = reason }
             finish(.cancelled); connection.cancel()
