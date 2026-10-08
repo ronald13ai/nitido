@@ -69,6 +69,16 @@ final class LinkFailureTests: XCTestCase {
         silent.stop()
     }
 
+    /// A pair of ready links on loopback: the sharer's end and the viewer's.
+    private func readyPair(_ advertiser: Advertiser, port: UInt16) async throws -> (sharer: Link, viewer: Link) {
+        let viewer = Link.connect(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234", sharerName: "Sharer", hello: hello(.view))
+        var incoming = advertiser.incoming.makeAsyncIterator()
+        guard let sharer = await incoming.next() else { throw XCTSkip("no incoming link") }
+        for link in [sharer, viewer] { for await s in link.states where s == .ready { break } }
+        guard sharer.state == .ready, viewer.state == .ready else { throw XCTSkip("the pair never became ready") }
+        return (sharer, viewer)
+    }
+
     /// Network.framework expects `cancel()` after `.failed`; until then the connection holds on to what it uses, here
     /// until the link is freed. A wrong code fails the sharer's incoming link with the TLS error as `.failed`.
     func testAFailedConnectionIsCancelled() async throws {
@@ -86,6 +96,41 @@ final class LinkFailureTests: XCTestCase {
         XCTAssertEqual(sharer.connectionStateForTesting, .cancelled)
         if case .failed = sharer.state {} else { XCTFail("state is \(sharer.state)") }
         viewer.close(); advertiser.stop()
+    }
+
+    /// A link that has ended, or that this side is closing, drops what it is given: nothing waits in its backlog,
+    /// nothing goes to a dead connection, and nothing logs a 'send:' error per message. That covers the viewer's ink
+    /// and cursor while it reconnects after a drop, and the frames still leaving the encoder when the sharer says bye.
+    func testALinkThatEndedTakesNoMessageAndLogsNoSendError() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let stroke = Message.stroke(StrokeMessage(strokeId: 1, phase: .begin, color: .gold, baseWidth: 4,
+                                                  points: [StrokePoint(x: 0.5, y: 0.5, pressure: 1, tMs: 0)]))
+
+        // The sharer goes without bye; the viewer's link fails, and its ink keeps coming.
+        let dropped = try await readyPair(advertiser, port: port)
+        dropped.sharer.abort()
+        let viewerEnd = await outcome(of: dropped.viewer, within: 5)
+        guard case .ended(last: .failed?) = viewerEnd else { return XCTFail("expected .failed, got \(viewerEnd)") }
+        let afterDrop = LogMark()
+        for _ in 0..<20 { dropped.viewer.send(stroke) }
+        XCTAssertEqual(dropped.viewer.backlogBytes, 0, "a failed link took messages")
+        try await Task.sleep(for: .milliseconds(200))
+        let afterDropErrors = try afterDrop.entries("link").map(\.composedMessage).filter { $0.hasPrefix("send:") }
+        XCTAssertEqual(afterDropErrors, [], "sends on a failed link logged errors")
+
+        // The sharer says bye and sends right after it.
+        let closed = try await readyPair(advertiser, port: port)
+        let atClose = LogMark()
+        closed.sharer.close()
+        for _ in 0..<20 { closed.sharer.send(stroke) }
+        XCTAssertEqual(closed.sharer.backlogBytes, 0, "a closing link took messages")
+        _ = await outcome(of: closed.sharer, within: 3)
+        _ = await outcome(of: closed.viewer, within: 3)
+        try await Task.sleep(for: .milliseconds(200))
+        let atCloseErrors = try atClose.entries("link").map(\.composedMessage).filter { $0.hasPrefix("send:") }
+        XCTAssertEqual(atCloseErrors, [], "sends after a bye logged errors")
+        advertiser.stop()
     }
 
     func testPongSampleKeepsHonestSamplesAndDropsForgedOnes() {

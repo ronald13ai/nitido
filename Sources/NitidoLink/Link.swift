@@ -11,7 +11,8 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "link")
 ///
 /// Threading: everything that changes the link runs on `queue` (Network.framework callbacks, the ping timer,
 /// the connect deadlines, `close()` and `abort()`). The values callers read from other threads (`state`, `peerHello`,
-/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`) and the ping bookkeeping live behind `lock`.
+/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`), the ping bookkeeping and `closing`, which
+/// `close()` sets before it returns, live behind `lock`.
 public final class Link: @unchecked Sendable {
     public enum State: Sendable, Equatable { case connecting, ready, failed(String), cancelled }
 
@@ -58,6 +59,9 @@ public final class Link: @unchecked Sendable {
     private var nextPing: UInt32 = 0
     /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
     private var pingSentAt: [UInt32: UInt64] = [:]
+    /// Set by `close()` before it returns: the link takes no more messages, and the stream ending after it is this
+    /// side's doing, not the other side gone.
+    private var closing = false
 
     // Only touched on `queue`.
     private var decoder = Wire.Decoder()
@@ -67,8 +71,6 @@ public final class Link: @unchecked Sendable {
     private var lastPongAt: Double = 0
     /// Test only: stops answering pings, as a peer that froze or lost its network would.
     private var muted = false
-    /// Set by `close()`: the stream ending after it is this side's doing, not the other side gone.
-    private var closing = false
 
     private let messageOut: AsyncStream<Message>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
@@ -134,13 +136,20 @@ public final class Link: @unchecked Sendable {
         }
     }
 
+    /// Sends `m` while the link is up: ready, and not being closed by this side. A link that is still connecting, or
+    /// is closing or ended before the caller heard, drops it: a viewer's `LinkSession` reconnects, and the other side
+    /// asks then for what it needs (a keyframe). `backlogBytes` counts a message until its send completes.
     public func send(_ m: Message) {
+        guard isUp else { log.debug("not sent (type \(m.typeCode)): the link is not up"); return }
         let data = Wire.encode(m)
         lock.withLock { backlog += data.count }
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
             lock.withLock { backlog -= data.count }
-            if let error { log.error("send: \(error.localizedDescription)") }
+            guard let error else { return }
+            // Cut short by the link ending (a bye, `close()`, a failure logged already): no failure of its own.
+            if isUp { log.error("send: \(error.localizedDescription, privacy: .public)") }
+            else { log.debug("a send ended with the link: \(error.localizedDescription, privacy: .public)") }
         })
     }
 
@@ -158,6 +167,7 @@ public final class Link: @unchecked Sendable {
     }
 
     private func close(reason: UInt8, whenSent: (@Sendable () -> Void)?) {
+        lock.withLock { closing = true }
         let connection = connection
         // Taken once: by the send's completion or by the fallback, whichever comes first.
         let pending = OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: whenSent)
@@ -166,7 +176,6 @@ public final class Link: @unchecked Sendable {
             pending.withLock { waiter in defer { waiter = nil }; return waiter }?()
         }
         queue.async { [self] in
-            closing = true
             pingTimer?.cancel(); pingTimer = nil
             guard state == .ready else { cancel(); return }
             connection.send(content: Wire.encode(.bye(reason: reason)), completion: .contentProcessed { _ in cancel() })
@@ -216,7 +225,7 @@ public final class Link: @unchecked Sendable {
             // that, not a fault, and logs nothing. A stream that ends, or a receive that fails, while the link is still
             // up is the other side gone (a process that died, a connection cut on the way): a failure, which a viewer's
             // `LinkSession` answers by reconnecting.
-            let up = state == .ready && !closing
+            let up = isUp
             if let error {
                 guard up else { finish(.cancelled); return }
                 log.error("receive failed: \(error.localizedDescription, privacy: .public)")
@@ -297,6 +306,9 @@ public final class Link: @unchecked Sendable {
         timer.resume()
         pingTimer = timer
     }
+
+    /// Ready, and not being closed by this side.
+    private var isUp: Bool { lock.withLock { _state == .ready && !closing } }
 
     private func setState(_ s: State) { lock.withLock { _state = s }; stateOut.yield(s) }
 
