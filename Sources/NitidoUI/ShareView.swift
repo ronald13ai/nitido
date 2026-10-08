@@ -35,7 +35,9 @@ public struct ShareView: View {
                     .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
                     .allowsHitTesting(false)
                 }
-                PairingPanel(name: model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
+                // The name viewers see in their list ("Mac (2)" when another Mac has this one); the key stays derived
+                // from `name`, which the TXT record publishes.
+                PairingPanel(name: model.advertisedName ?? model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
                              connectionCount: model.connectionCount).padding(14)
                 LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }

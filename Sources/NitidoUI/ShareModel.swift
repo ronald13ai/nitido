@@ -106,6 +106,9 @@ public final class ShareModel {
     public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
     public private(set) var networkNotice: String?
+    /// The name Bonjour registered the share under, which viewers see in their list: `name`, or "Name (2)" when another
+    /// Mac on the network has that name. Nil while nothing is advertised.
+    public private(set) var advertisedName: String?
     /// Internal, not private, so a test can drive the listener's states.
     private(set) var advertiser: Advertiser?
     /// The port the listener bound, once it is ready (logged; tests connect to it directly).
@@ -299,7 +302,7 @@ public final class ShareModel {
         link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
         viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
-        listeningPort = nil; networkNotice = nil
+        listeningPort = nil; networkNotice = nil; advertisedName = nil
         loopback = false
         qualityRestToken &+= 1
         // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain. The model
@@ -677,6 +680,7 @@ public final class ShareModel {
         guard adv === advertiser else { return }
         switch s {
         case .ready: networkNotice = nil
+        case .advertised(let registered): advertisedName = registered
         case .waiting(let reason): networkNotice = "Viewers cannot reach this Mac: \(reason)"
         case .failed(let reason):
             networkNotice = nil
@@ -696,7 +700,7 @@ public final class ShareModel {
         linkTasks.forEach { $0.cancel() }; linkTasks = []
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
-        advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil
+        advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil; advertisedName = nil
     }
 
     /// One viewer at a time, and only one that proved the code. The listener hands a connection over before its

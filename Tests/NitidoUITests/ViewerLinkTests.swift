@@ -1125,6 +1125,19 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// The pairing panel shows the name viewers see in their list: the one Bonjour registered, "Mac (2)" when another
+    /// Mac already has the name, rather than the one the sharer asked for.
+    @MainActor
+    func testTheSharerKnowsTheNameBonjourRegisteredItUnder() async throws {
+        let (share, _) = try await listeningShare()
+        let advertiser = try XCTUnwrap(share.advertiser)
+        try await waitUntil("the sharer learns its registered name") { share.advertisedName != nil }
+        advertiser.registrationChanged(.add(.service(name: "Twin (2)", type: "_nitido._tcp", domain: "local.", interface: nil)))
+        try await waitUntil("the sharer shows the name Bonjour gave it") { share.advertisedName == "Twin (2)" }
+        await share.stop()
+        XCTAssertNil(share.advertisedName, "a stopped share advertises nothing")
+    }
+
     /// Connect does nothing until the code is four digits.
     @MainActor
     func testConnectNeedsFourDigits() async throws {
