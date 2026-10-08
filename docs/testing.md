@@ -16,3 +16,4 @@ Run before tagging a release. Each line is a pass/fail.
 12. Share the display that holds Nítido: neither the Share window nor the viewer shows a Nítido window, sheet (Esc's Stop sharing? included) or mirror tunnel.
 13. While sharing, open the system's screen-sharing menu in the menu bar, choose to change the shared content, then cancel: the share goes on with the same content and the viewer stays connected.
 14. With a viewer connected, click Stop Sharing in the menu bar's screen-sharing menu: the Share window offers Retry, the viewer says "<Mac> stopped sharing.", and after Retry the viewer can pair again with the same code.
+15. The menu bar shows Nítido once (the app menu); Share… and View… are in File, Undo Stroke and Clear Ink in Edit, Toggle Telemetry and Codec Loop in View, and every shortcut works from its menu.

@@ -35,27 +35,38 @@ struct NitidoApp: App {
                 .onAppear { NSApplication.shared.activate(ignoringOtherApps: true) }
         }
         .windowResizability(.contentSize)
+        // Every item sits in a standard menu, so the menu bar shows Nítido once, as the app menu (macOS HIG).
         .commands {
-            // The standard group owns ⌘H for Hide, which would swallow Toggle Telemetry's ⌘H.
+            // File. Share… and View… take the place of New, which a single window has no use for.
+            CommandGroup(replacing: .newItem) {
+                Button("Share…") { app.startShare() }.keyboardShortcut("n")
+                // ⌘⇧V, not ⌘V: SwiftUI gives a shortcut to one menu item only, so ⌘V here would take Paste away from
+                // the whole app, the code field included.
+                Button("View…") { app.startView() }.keyboardShortcut("v", modifiers: [.command, .shift])
+            }
+            CommandGroup(after: .newItem) {
+                Divider()
+                // Listed for discoverability; while the window is key, Esc is handled inside it (RootView). Both go
+                // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while something is live.
+                Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
+            }
+            // The app menu. The standard group owns ⌘H for Hide, which would swallow Toggle Telemetry's ⌘H.
             CommandGroup(replacing: .appVisibility) {
                 Button("Hide Nítido") { NSApp.hide(nil) }
                 Button("Hide Others") { NSApp.hideOtherApplications(nil) }.keyboardShortcut("h", modifiers: [.command, .option])
                 Button("Show All") { NSApp.unhideAllApplications(nil) }
             }
-            // The standard Undo owns ⌘Z, and SwiftUI then drops ⌘Z from Undo Stroke, so ⌘Z would do nothing.
-            CommandGroup(replacing: .undoRedo) {}
-            CommandMenu("Nítido") {
-                Button("Share…") { app.startShare() }.keyboardShortcut("n")
-                // ⌘⇧V, not ⌘V: SwiftUI gives a shortcut to one menu item only, so ⌘V here would take Paste away from
-                // the whole app, the code field included.
-                Button("View…") { app.startView() }.keyboardShortcut("v", modifiers: [.command, .shift])
-                Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
-                Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
+            // Edit. The standard Undo owns ⌘Z, and SwiftUI then drops ⌘Z from Undo Stroke, so ⌘Z would do nothing:
+            // the ink's own items take its place.
+            CommandGroup(replacing: .undoRedo) {
                 Button("Undo Stroke") { app.undo() }.keyboardShortcut("z")
                 Button("Clear Ink") { app.clearInk() }.keyboardShortcut(.delete)
-                // Listed for discoverability; while the window is key, Esc is handled inside it (RootView). Both go
-                // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while something is live.
-                Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
+            }
+            // View.
+            CommandGroup(before: .toolbar) {
+                Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
+                Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
+                Divider()
             }
         }
     }
