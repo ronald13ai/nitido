@@ -31,6 +31,7 @@ struct NitidoApp: App {
             CommandGroup(replacing: .undoRedo) {}
             CommandMenu("Nítido") {
                 Button("Share…") { app.startShare() }.keyboardShortcut("n")
+                Button("View…") { app.startView() }.keyboardShortcut("v")
                 Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
                 Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
                 Button("Undo Stroke") { app.undo() }.keyboardShortcut("z")

@@ -4,6 +4,7 @@ import QuartzCore
 import NitidoCore
 import NitidoCapture
 import NitidoCodec
+import NitidoLink
 import CoreVideo
 import os
 
@@ -68,6 +69,22 @@ public final class ShareModel {
     /// Frames the decoder threw on in a row; ten fail the share (`handleEncoded`). Only a frame decoded resets it.
     private var decodeFailures = 0
 
+    public private(set) var viewerName: String?
+    public private(set) var isSending = false
+    /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
+    public private(set) var networkNotice: String?
+    /// Internal, not private, so a test can drive the listener's states.
+    private(set) var advertiser: Advertiser?
+    /// The port the listener bound, once it is ready (logged; tests connect to it directly).
+    @ObservationIgnored private(set) var listeningPort: UInt16?
+    private var link: NitidoLink.Link?
+    private var linkTasks: [Task<Void, Never>] = []
+
+    private var hello: Hello {
+        Hello(protocolVersion: protocolVersion, role: .share, name: name,
+              pixelWidth: UInt16(min(pixelSize.width, 65535)), pixelHeight: UInt16(min(pixelSize.height, 65535)), scale: Float(scale))
+    }
+
     private let makeSource: @MainActor () -> any CaptureSource
     /// `CGPreflightScreenCaptureAccess` in the app; tests pass a fixed answer.
     private let screenRecordingGranted: @MainActor () -> Bool
@@ -92,6 +109,7 @@ public final class ShareModel {
          screenRecordingGranted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() }) {
         self.makeSource = makeSource
         self.screenRecordingGranted = screenRecordingGranted
+        ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }
             let latencyMs = (presentedAt - Double(captureNs) / 1e9) * 1000
@@ -197,6 +215,7 @@ public final class ShareModel {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(250))
                     guard let self else { return }
+                    if let rtt = link?.lastRTTMs { telemetry.recordRTT(ms: rtt, at: CACurrentMediaTime()) }
                     snapshot = telemetry.snapshot(now: CACurrentMediaTime())
                     codecMs = loopback ? codecWindow.stats(now: CACurrentMediaTime())?.p50 : nil
                 }
@@ -209,6 +228,8 @@ public final class ShareModel {
     private func retireSession() {
         tasks.forEach { $0.cancel() }
         tasks = []
+        link?.close(); link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
+        listeningPort = nil; networkNotice = nil
         loopback = false
         qualityRestToken &+= 1
         // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain. The model
@@ -228,18 +249,21 @@ public final class ShareModel {
         telemetry.recordCapture(at: Double(frame.captureHostTimeNs) / 1e9)
         lastCaptureAt = CACurrentMediaTime()
         latestRaw = frame
-        // Encode only while capturing: after a failure (the encoder's included) the raw picture goes on until Retry,
-        // and no encoder is made again for every frame.
-        guard loopback, state == .capturing else { sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs); return }
+        // Encode for the loop or a viewer, and only while capturing: after a failure (the encoder's included) the raw
+        // picture goes on until Retry, and no encoder is made again for every frame. The sharer sees the raw picture
+        // unless the loop shows the decoded one.
+        let encoding = (loopback || isSending) && state == .capturing
+        if !(loopback && encoding) { sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs) }
+        guard encoding else { return }
         encode(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
     }
 
-    /// A still source sends no frame (`CaptureSession` forwards only changed ones), so the loop would show nothing
-    /// until the content changed: the newest raw frame is encoded again. It is stamped now, as it reaches the encoder,
-    /// so the capture→display figure counts the codec and the display, not how long the source has been still (which
-    /// could be seconds, and over five would be logged as the clocks disagreeing). It is not a new capture.
+    /// A still source sends no frame (`CaptureSession` forwards only changed ones), so the loop or a viewer would show
+    /// nothing until the content changed: the newest raw frame is encoded again. It is stamped now, as it reaches the
+    /// encoder, so the capture→display figure counts the codec and the display, not how long the source has been still
+    /// (which could be seconds, and over five would be logged as the clocks disagreeing). It is not a new capture.
     private func encodeNewestAgain() {
-        guard loopback, state == .capturing, let raw = latestRaw else { return }
+        guard loopback || isSending, state == .capturing, let raw = latestRaw else { return }
         encode(raw.pixelBuffer, captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9))
     }
 
@@ -249,7 +273,8 @@ public final class ShareModel {
         if encoder == nil || encoder?.width != width || encoder?.height != height { makeEncoder(width: width, height: height) }
         guard let encoder else { return }
         let n = encoder.nextSeq
-        encodeStarts[n] = CACurrentMediaTime()
+        // The loop's codec time; only a decoded loop frame takes its start back, so a frame for the viewer alone has none.
+        if loopback { encodeStarts[n] = CACurrentMediaTime() }
         if !encoder.encode(pixelBuffer, captureHostTimeNs: captureHostTimeNs) {
             encodeStarts.removeValue(forKey: n)
             // `nextSeq` moves only once the encoder has taken the frame. A refusal after that went to `onError`, which
@@ -262,10 +287,13 @@ public final class ShareModel {
         encoder?.invalidate(); decoder?.invalidate(); decoder = nil; decoderConfig = nil
         codecNotice = nil; encodeFailures = 0; decodeFailures = 0
         do {
-            let e = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: Int(qualityMbps * 1_000_000))
+            let bitsPerSecond = loopback ? Int(qualityMbps * 1_000_000) : BitrateController.initialBitrate(width: width, height: height)
+            let e = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: bitsPerSecond)
             e.onFrame = { [weak self] f in Task { @MainActor in self?.handleEncoded(f) } }
             // Set before the first encode. It runs on a VideoToolbox queue, or on this thread inside `encode` and
             // `setBitrate`, and a setting rejected inside `init` arrives the moment it is set: so it hops to the main actor.
+            // The encoder feeds the viewer too, so a frame it fails or drops freezes the viewer's picture as well, and
+            // only this tells the sharer.
             e.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err) } }
             encoder = e
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
@@ -280,6 +308,11 @@ public final class ShareModel {
         let now = CACurrentMediaTime()
         encodeFailures = 0
         telemetry.recordBytes(f.data.count, at: now)
+        if isSending, let link {
+            if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
+            link.send(.videoFrame(f.videoFrame))
+        }
+        guard loopback else { return }
         if let cfg = f.videoConfig, cfg != decoderConfig {
             do {
                 decoder = try VideoDecoder(config: cfg); decoderConfig = cfg
@@ -392,6 +425,7 @@ public final class ShareModel {
         switch event {
         case .started(let w, let h, let s):
             pixelSize = CGSize(width: w, height: h); scale = s; state = .capturing
+            startAdvertising()
         case .cancelled:
             state = .idle
         case .stopped:
@@ -400,6 +434,118 @@ public final class ShareModel {
             // Before the first frame, a missing Screen Recording grant is the likely cause.
             failureNeedsPermission = state != .capturing && !screenRecordingGranted()
             state = .failed(message)
+        }
+    }
+
+    // MARK: Viewers
+
+    private func startAdvertising() {
+        guard advertiser == nil else { return }
+        do {
+            let adv = try Advertiser(name: name, code: code, hello: hello)
+            advertiser = adv
+            // Weak on every connection, as in every ShareModel loop: a whole-loop `guard let self` keeps the model
+            // alive for as long as the listener lives (Task 8 fix round 1).
+            tasks.append(Task { [weak self] in
+                // Retired before it ran: the listener is stopped already, and starting it now would wait forever.
+                guard !Task.isCancelled else { return }
+                do {
+                    let port = try await adv.start()
+                    log.info("listening for viewers on port \(port, privacy: .public)")
+                    self?.listeningPort = port
+                } catch {
+                    // A failure is also on `adv.states`, which fails the share (`advertiserStateChanged`). A listener
+                    // stopped before it was ready throws too, and that is a retired session, not a failure.
+                    return
+                }
+                for await incoming in adv.incoming {
+                    guard let self else { return }
+                    attach(incoming)
+                }
+            })
+            // A listener that fails after it started ends `incoming` without a word: its states say why.
+            tasks.append(Task { [weak self] in
+                for await s in adv.states {
+                    guard let self else { return }
+                    advertiserStateChanged(s, of: adv)
+                }
+            })
+        } catch {
+            log.error("could not create the network listener: \(String(describing: error), privacy: .public)")
+            state = .failed("Could not start the network listener: \(error.localizedDescription)")
+        }
+    }
+
+    /// A wait says why viewers cannot reach this Mac yet (Local Network off, for one). A failure, before or after the
+    /// listener was ready, fails the share with Retry: nobody could join it any more. A retired listener says nothing.
+    private func advertiserStateChanged(_ s: Advertiser.State, of adv: Advertiser) {
+        guard adv === advertiser else { return }
+        switch s {
+        case .ready: networkNotice = nil
+        case .waiting(let reason): networkNotice = "Viewers cannot reach this Mac: \(reason)"
+        case .failed(let reason):
+            networkNotice = nil
+            state = .failed("Could not listen on the local network: \(reason)")
+        case .stopped: break
+        }
+    }
+
+    /// One viewer at a time: a new connection replaces the old one.
+    private func attach(_ incoming: NitidoLink.Link) {
+        link?.close()
+        link = incoming; viewerName = nil; isSending = false
+        linkTasks.forEach { $0.cancel() }
+        // Two loops held weakly, as every ShareModel loop is (Task 8 fix round 1). Plain tasks rather than a task group:
+        // Swift 6 rejects a weak capture of the model in a group's `@MainActor` child task.
+        linkTasks = [
+            Task { [weak self] in
+                for await s in incoming.states {
+                    guard let self else { return }
+                    linkStateChanged(s, for: incoming)
+                }
+            },
+            Task { [weak self] in
+                for await m in incoming.messages {
+                    guard let self else { return }
+                    handleIncoming(m)
+                }
+            },
+        ]
+    }
+
+    private func linkStateChanged(_ s: NitidoLink.Link.State, for l: NitidoLink.Link) {
+        guard l === link else { return }
+        switch s {
+        case .ready: isSending = true; sendKeyframe()
+        case .failed(let m): isSending = false; viewerName = nil; link = nil; log.info("viewer link failed: \(m)")
+        case .cancelled: isSending = false; viewerName = nil; link = nil
+        case .connecting: break
+        }
+    }
+
+    private func handleIncoming(_ m: Message) {
+        switch m {
+        case .hello(let h): viewerName = h.name
+        case .stroke(let s): ink.applyRemote(s)
+        case .undo(let id): ink.undoRemote(id: id)
+        case .clear: ink.clearRemote()
+        case .cursor(let c): ink.remoteCursor(c, name: viewerName ?? "Viewer")
+        case .keyframeRequest: sendKeyframe()
+        default: break
+        }
+    }
+
+    /// The next frame the viewer gets is a keyframe. A still source sends no next frame (`CaptureSession` forwards only
+    /// changed ones), so a viewer that just connected, or lost its decoder, would see nothing until the content moved:
+    /// when no frame comes within `stillAfter`, the newest one is encoded again (a fresh encoder's first frame is a
+    /// keyframe, a running one's is after the request).
+    private func sendKeyframe() {
+        encoder?.requestKeyframe()
+        let requestedAt = CACurrentMediaTime()
+        Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(Self.stillAfter)) } catch { return }
+            guard let self, lastCaptureAt < requestedAt else { return }   // a newer frame carried the keyframe
+            encodeNewestAgain()
         }
     }
 

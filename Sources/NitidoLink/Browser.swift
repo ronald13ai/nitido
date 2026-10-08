@@ -6,7 +6,10 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "browser")
 
 public struct Peer: Identifiable, Hashable, Sendable {
     public let id: String
+    /// The service name Bonjour shows. On a clash with another service it is renamed, as "Name (2)".
     public let name: String
+    /// The name the sharer derived its key from (`Pairing.presharedKey`), from its TXT record; `name` without one.
+    public let keyName: String
     public let endpoint: NWEndpoint
 }
 
@@ -25,13 +28,17 @@ public final class Browser: @unchecked Sendable {
 
     public init() {
         let params = NWParameters(); params.includePeerToPeer = true
-        browser = NWBrowser(for: .bonjour(type: "_nitido._tcp", domain: nil), using: params)
+        // With the TXT record: Bonjour renames a service whose name is taken, but the key stays derived from the name
+        // the sharer asked for, which `Advertiser` publishes there.
+        browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_nitido._tcp", domain: nil), using: params)
         (peers, out) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             let list = results.compactMap { r -> Peer? in
                 guard case .service(let name, _, _, _) = r.endpoint else { return nil }
-                return Peer(id: "\(r.endpoint)", name: name, endpoint: r.endpoint)
+                var keyName = name
+                if case .bonjour(let txt) = r.metadata, let published = txt["name"], !published.isEmpty { keyName = published }
+                return Peer(id: "\(r.endpoint)", name: name, keyName: keyName, endpoint: r.endpoint)
             }.sorted { $0.name < $1.name }
             self?.out.yield(list)
         }

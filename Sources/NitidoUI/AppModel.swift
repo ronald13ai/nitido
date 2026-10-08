@@ -6,6 +6,7 @@ public final class AppModel {
     public enum Screen: Equatable { case welcome, share, view }
     public var screen: Screen = .welcome
     public private(set) var share: ShareModel?
+    public private(set) var view: ViewModel?
     public init() {}
 
     /// Shows the Share screen and the picker. One share at a time: while a share is picking or capturing this
@@ -22,21 +23,29 @@ public final class AppModel {
         model.start(excludingWindowIDs: excluded)
     }
 
-    public func toggleTelemetry() { share?.showTelemetry.toggle() }
+    /// Shows the View screen. One viewer at a time: a viewer that exists already (browsing, connected or failed) is
+    /// kept, so ⌘V twice never leaves a replaced viewer's link open with nobody to close it.
+    public func startView() {
+        if view == nil { view = ViewModel() }
+        screen = .view
+    }
+
+    public func toggleTelemetry() { share?.showTelemetry.toggle(); view?.showTelemetry.toggle() }
 
     public func toggleLoopback() { share?.loopback.toggle() }
 
-    public func undo() { share?.ink.undoLocal() }
+    public func undo() { share?.ink.undoLocal(); view?.ink.undoLocal() }
 
-    public func clearInk() { share?.ink.clearLocal() }
+    public func clearInk() { share?.ink.clearLocal(); view?.ink.clearLocal() }
 
-    /// Back to Welcome. The share is detached before the await, so a Share that lands while the old one is
-    /// still stopping gets a model of its own instead of being cleared when this stop resumes.
+    /// Detach before the await (Task 8 fix): a Share or View that lands while the old one is still stopping
+    /// keeps its own model instead of being cleared when this stop resumes.
     public func stop() async {
-        let model = share
-        share = nil
+        let s = share, v = view
+        share = nil; view = nil
         screen = .welcome
-        await model?.stop()
+        v?.disconnect()
+        await s?.stop()
     }
 
     /// The one entry point for Esc: the invisible in-window button on the Share and View screens and the Stop
@@ -51,14 +60,13 @@ public struct RootView: View {
     public var body: some View {
         Group {
             switch app.screen {
-            case .welcome: WelcomeView(onShare: { app.startShare() }, onView: {})
+            case .welcome: WelcomeView(onShare: { app.startShare() }, onView: { app.startView() })
             case .share:
                 if let share = app.share {
                     ShareView(model: share).background(EscapeStops { app.escape() })
                 }
             case .view:
-                Text("View").foregroundStyle(Theme.Colors.text)   // Task 13
-                    .background(EscapeStops { app.escape() })
+                if let view = app.view { ViewView(model: view).background(EscapeStops { app.escape() }) }
             }
         }
         .background(KeepWindowOnScreen())

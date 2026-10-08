@@ -25,16 +25,17 @@ public struct ShareView: View {
                 if model.loopback { DividerHandle(position: $model.dividerPosition).frame(width: pointSize.width, height: pointSize.height) }
                 if model.state == .picking { placeholder("Choose a window or a display in the picker.", note: screenRecordingNote) }
                 if case .failed(let message) = model.state { failure(message) }
-                if model.state == .capturing, model.renderFailure != nil || model.codecNotice != nil {
+                if model.state == .capturing, model.renderFailure != nil || model.codecNotice != nil || model.networkNotice != nil {
                     VStack(alignment: .leading, spacing: 6) {
                         if let reason = model.renderFailure { notice("The picture cannot be drawn: \(reason)") }
                         if let text = model.codecNotice { notice(text) }
+                        if let text = model.networkNotice { notice(text) }
                     }
                     .padding(14)
                     .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
                     .allowsHitTesting(false)
                 }
-                PairingPanel(name: model.name, code: model.code).padding(14)
+                PairingPanel(name: model.name, code: model.code, viewer: model.viewerName).padding(14)
                 LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
@@ -100,12 +101,18 @@ public struct ShareView: View {
 }
 
 struct PairingPanel: View {
-    let name: String, code: String
+    let name: String, code: String, viewer: String?
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             Text(name).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.Colors.text)
             Text("CODE").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.muted).tracking(1.5)
             Text(code).font(Theme.Fonts.figures(26)).foregroundStyle(Theme.Colors.gold).tracking(4)
+            if let viewer {
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.Colors.success).frame(width: 6, height: 6)
+                    Text(viewer).font(.system(size: 11)).foregroundStyle(Theme.Colors.text)
+                }.padding(.top, 2)
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Theme.Colors.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: Theme.cardRadius))

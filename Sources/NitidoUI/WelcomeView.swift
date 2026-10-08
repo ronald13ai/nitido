@@ -12,7 +12,7 @@ public struct WelcomeView: View {
                 .font(.system(size: 13)).foregroundStyle(Theme.Colors.muted)
             HStack(spacing: 12) {
                 Button("Share", action: onShare).keyboardShortcut("n")
-                Button("View", action: onView).disabled(true)   // enabled in Task 13
+                Button("View", action: onView)
             }
             .padding(.top, 6)
             Text("BY RONALD RODRÍGUEZ · RONAR AI").font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.gold).tracking(2).padding(.top, 10)
