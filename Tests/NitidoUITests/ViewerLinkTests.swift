@@ -307,6 +307,22 @@ final class ViewerLinkTests: XCTestCase {
         viewer.disconnect()
     }
 
+    /// Spec 17 and docs/testing.md item 3: a picture too large for the viewer's screen is scaled down, and the viewer's
+    /// strip says by how much, as the sharer's does; at 1:1 it says nothing more.
+    @MainActor
+    func testAScaledDownPictureSaysItsScaleOnTheViewer() async throws {
+        let viewer = ViewModel()
+        let key = try await realKeyframe()
+        viewer.handleIncoming(.hello(Hello(protocolVersion: protocolVersion, role: .share, name: "Mac", pixelWidth: 320, pixelHeight: 180, scale: 2)))
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(key.videoConfig)))
+        // 160 x 90 pt at 1:1 on a 2x display; a 200 x 200 pt screen leaves 160 x 80 pt for it: 80/90.
+        viewer.sink.displayChanged(scale: 2, visibleFrame: CGRect(x: 0, y: 0, width: 200, height: 200))
+        XCTAssertEqual(viewer.resolutionLabel, "320×180 @2x · 89%")
+        viewer.sink.displayChanged(scale: 2, visibleFrame: CGRect(x: 0, y: 0, width: 2000, height: 1200))
+        XCTAssertEqual(viewer.resolutionLabel, "320×180 @2x")
+        viewer.disconnect()
+    }
+
     /// A frame the viewer cannot draw is said over the picture and counted as dropped, until a frame reaches the
     /// screen again, as on the sharing side.
     @MainActor

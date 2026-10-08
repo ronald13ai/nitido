@@ -183,12 +183,7 @@ public final class ShareModel {
         }
     }
 
-    public var resolutionLabel: String {
-        guard pixelSize != .zero else { return "·" }
-        let base = "\(Int(pixelSize.width))×\(Int(pixelSize.height)) @\(Int(scale))x"
-        let f = fitFactor
-        return f < 1 ? "\(base) · \(Int((f * 100).rounded()))%" : base
-    }
+    public var resolutionLabel: String { Fit.resolutionLabel(pixelSize: pixelSize, scale: scale, factor: fitFactor) }
 
     /// The content's point size at 1:1 on the display the picture is on. The sink says which (SwiftUI observes it, so
     /// the window takes the new size when it moves to a display of another scale); the main display until the view is

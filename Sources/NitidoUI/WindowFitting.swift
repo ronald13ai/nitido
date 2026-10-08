@@ -21,6 +21,14 @@ enum Fit {
         return CGSize(width: (natural.width * f).rounded(.down), height: (natural.height * f).rounded(.down))
     }
 
+    /// The strip's size figure: pixels and display scale, and the scale the picture is shown at when it is fitted
+    /// below 1:1 (spec 17), as a whole percentage. "·" before the first frame.
+    static func resolutionLabel(pixelSize: CGSize, scale: CGFloat, factor: CGFloat) -> String {
+        guard pixelSize != .zero else { return "·" }
+        let base = "\(Int(pixelSize.width))×\(Int(pixelSize.height)) @\(Int(scale))x"
+        return factor < 1 ? "\(base) · \(Int((factor * 100).rounded()))%" : base
+    }
+
     /// `frame` moved, not resized, so it lies inside `visible`. A frame larger than `visible` keeps its
     /// top-left corner (title bar) inside it.
     static func constrained(_ frame: CGRect, in visible: CGRect) -> CGRect {

@@ -27,6 +27,14 @@ final class FitTests: XCTestCase {
         XCTAssertEqual(size.width, (1352 * f).rounded(.down))
     }
 
+    /// Spec 17: a picture scaled down says its scale in the strip; at 1:1 it says nothing more.
+    func testTheResolutionLabelSaysTheScaleOnlyWhenScaledDown() {
+        XCTAssertEqual(Fit.resolutionLabel(pixelSize: .zero, scale: 2, factor: 1), "·")
+        XCTAssertEqual(Fit.resolutionLabel(pixelSize: CGSize(width: 3024, height: 1890), scale: 2, factor: 1), "3024×1890 @2x")
+        XCTAssertEqual(Fit.resolutionLabel(pixelSize: CGSize(width: 5120, height: 2880), scale: 2, factor: 0.5), "5120×2880 @2x · 50%")
+        XCTAssertEqual(Fit.resolutionLabel(pixelSize: CGSize(width: 320, height: 180), scale: 1, factor: 80.0 / 90.0), "320×180 @1x · 89%")
+    }
+
     func testFrameInsideStaysPut() {
         let visible = CGRect(x: 0, y: 0, width: 1352, height: 853)
         let frame = CGRect(x: 100, y: 100, width: 560, height: 392)

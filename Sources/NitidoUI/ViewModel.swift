@@ -113,8 +113,11 @@ public final class ViewModel {
         ]
     }
 
+    /// The size figure of the strip, with the scale the picture is shown at when it does not fit the screen (spec 17):
+    /// the viewer is where a picture larger than the screen is most common.
     public var resolutionLabel: String {
-        pixelSize == .zero ? "·" : "\(Int(pixelSize.width))×\(Int(pixelSize.height)) @\(Int(scale))x"
+        let factor = pictureLimit.map { Fit.factor(natural: naturalPointSize, limit: $0) } ?? 1
+        return Fit.resolutionLabel(pixelSize: pixelSize, scale: scale, factor: factor)
     }
 
     /// 1:1 when it fits the screen, scaled down otherwise, never up. The same rule as `ShareModel.fittedPointSize`
