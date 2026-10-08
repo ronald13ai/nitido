@@ -26,9 +26,10 @@ final class DiscoveryTests: XCTestCase {
         let name = "Twin \(UInt32.random(in: 0..<1_000_000))"
         let first = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
         _ = try await first.start()
+        defer { first.stop() }
         let second = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
         _ = try await second.start()
-        defer { first.stop(); second.stop() }
+        defer { second.stop() }
         func advertisedName(_ advertiser: Advertiser) async -> String? {
             await withTaskGroup(of: String?.self) { group in
                 group.addTask {
@@ -52,9 +53,10 @@ final class DiscoveryTests: XCTestCase {
         let name = "Twin \(UInt32.random(in: 0..<1_000_000))"
         let first = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
         _ = try await first.start()
+        defer { first.stop() }
         let second = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
         _ = try await second.start()
-        defer { first.stop(); second.stop() }
+        defer { second.stop() }
 
         let browser = Browser()
         browser.start()

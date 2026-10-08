@@ -70,13 +70,28 @@ final class LinkFailureTests: XCTestCase {
         silent.stop()
     }
 
-    /// A pair of ready links on loopback: the sharer's end and the viewer's.
-    private func readyPair(_ advertiser: Advertiser, port: UInt16) async throws -> (sharer: Link, viewer: Link) {
+    /// A pair of ready links on loopback, the sharer's end and the viewer's, with the hello each sends on `.ready` gone
+    /// out, so a test starts from an empty backlog. Nil, with the test failed, when the pair never gets there: a
+    /// regression that keeps links from `.ready` must fail the tests that need a pair, not skip them.
+    private func readyPair(_ advertiser: Advertiser, port: UInt16) async -> (sharer: Link, viewer: Link)? {
         let viewer = Link.connect(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234", sharerName: "Sharer", hello: hello(.view))
         var incoming = advertiser.incoming.makeAsyncIterator()
-        guard let sharer = await incoming.next() else { throw XCTSkip("no incoming link") }
+        guard let sharer = await incoming.next() else { XCTFail("no incoming link"); viewer.close(); return nil }
         for link in [sharer, viewer] { for await s in link.states where s == .ready { break } }
-        guard sharer.state == .ready, viewer.state == .ready else { throw XCTSkip("the pair never became ready") }
+        guard sharer.state == .ready, viewer.state == .ready else {
+            XCTFail("the pair never became ready: sharer \(sharer.state), viewer \(viewer.state)")
+            sharer.close(); viewer.close()
+            return nil
+        }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while sharer.backlogBytes + viewer.backlogBytes > 0 {
+            guard ContinuousClock.now < deadline else {
+                XCTFail("the hellos were not sent within 2 s")
+                sharer.close(); viewer.close()
+                return nil
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
         return (sharer, viewer)
     }
 
@@ -109,7 +124,7 @@ final class LinkFailureTests: XCTestCase {
                                                   points: [StrokePoint(x: 0.5, y: 0.5, pressure: 1, tMs: 0)]))
 
         // The sharer goes without bye; the viewer's link fails, and its ink keeps coming.
-        let dropped = try await readyPair(advertiser, port: port)
+        guard let dropped = await readyPair(advertiser, port: port) else { return advertiser.stop() }
         dropped.sharer.abort()
         let viewerEnd = await outcome(of: dropped.viewer, within: 5)
         guard case .ended(last: .failed?) = viewerEnd else { return XCTFail("expected .failed, got \(viewerEnd)") }
@@ -121,7 +136,7 @@ final class LinkFailureTests: XCTestCase {
         XCTAssertEqual(afterDropErrors, [], "sends on a failed link logged errors")
 
         // The sharer says bye and sends right after it.
-        let closed = try await readyPair(advertiser, port: port)
+        guard let closed = await readyPair(advertiser, port: port) else { return advertiser.stop() }
         let atClose = LogMark()
         closed.sharer.close()
         for _ in 0..<20 { closed.sharer.send(stroke) }

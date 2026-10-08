@@ -72,7 +72,7 @@ final class LinkTests: XCTestCase {
     private func readyPair(_ advertiser: Advertiser, port: UInt16) async throws -> (sharer: Link, viewer: Link) {
         let viewer = Link.connect(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234", sharerName: "Sharer", hello: hello(.view))
         var iterator = advertiser.incoming.makeAsyncIterator()
-        guard let sharer = await iterator.next() else { throw XCTSkip("no incoming link") }
+        guard let sharer = await iterator.next() else { throw NSError(domain: "test", code: 3, userInfo: [NSLocalizedDescriptionKey: "no incoming link"]) }
         try await waitReady(sharer); try await waitReady(viewer)
         return (sharer, viewer)
     }
