@@ -70,7 +70,7 @@ public final class VideoDecoder: @unchecked Sendable {
     private let format: CMVideoFormatDescription
     private let queue = DispatchQueue(label: "ai.ronar.nitido.decoder", qos: .userInteractive)
 
-    public init(config: VideoConfig) throws {
+    public init(config: VideoConfig) throws(CodecError) {
         let sets = config.parameterSets
         let pointers = sets.map { set -> UnsafeMutablePointer<UInt8> in
             let p = UnsafeMutablePointer<UInt8>.allocate(capacity: max(set.count, 1))

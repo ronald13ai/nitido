@@ -20,6 +20,36 @@ public enum CodecError: Error, Equatable {
     case frameDropped
     /// VideoToolbox emitted an encoded frame with no data.
     case missingData
+
+    /// One sentence for the person using the app (spec 9: errors in plain language), with VideoToolbox's status at the
+    /// end. Logs keep `String(describing:)`, which names the case.
+    public var plainDescription: String {
+        switch self {
+        case .sessionCreate(let status): "VideoToolbox could not start a hardware video session (error \(status))."
+        case .encode(let status): "The hardware encoder could not encode a frame (error \(status))."
+        case .decode(let status): "The video decoder could not read a frame (error \(status))."
+        case .formatDescription(let status): "The video setup could not be read (error \(status))."
+        case .property(let key, let status): "VideoToolbox rejected the \(Self.settingName(key)) setting (error \(status))."
+        case .prepare(let status): "The hardware encoder could not get ready (error \(status))."
+        case .frameDropped: "The hardware encoder dropped a frame."
+        case .missingData: "The hardware encoder produced an empty frame."
+        }
+    }
+
+    /// What a VideoToolbox property key is called in a sentence: "average bitrate" for "AverageBitRate"; a key not
+    /// listed is said as it is.
+    public static func settingName(_ key: String) -> String { settingNames[key] ?? key }
+
+    private static let settingNames: [String: String] = [
+        kVTCompressionPropertyKey_AverageBitRate as String: "average bitrate",
+        kVTCompressionPropertyKey_DataRateLimits as String: "data rate limit",
+        kVTCompressionPropertyKey_RealTime as String: "real-time",   // the decoder's key is the same string
+        kVTCompressionPropertyKey_ProfileLevel as String: "profile",
+        kVTCompressionPropertyKey_MaxKeyFrameInterval as String: "keyframe interval",
+        kVTCompressionPropertyKey_ExpectedFrameRate as String: "frame rate",
+        kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String: "speed priority",
+        kVTCompressionPropertyKey_AllowFrameReordering as String: "frame reordering",
+    ]
 }
 
 public struct EncodedFrame: Sendable {
@@ -73,7 +103,7 @@ public final class VideoEncoder: @unchecked Sendable {
     private var forceKey = true
     private var inFlight = 0
 
-    public init(width: Int, height: Int, preferred: Codec = .hevc, bitsPerSecond: Int) throws {
+    public init(width: Int, height: Int, preferred: Codec = .hevc, bitsPerSecond: Int) throws(CodecError) {
         self.width = width; self.height = height
         let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
         func create(_ type: CMVideoCodecType) -> (OSStatus, VTCompressionSession?) {
@@ -92,7 +122,7 @@ public final class VideoEncoder: @unchecked Sendable {
         guard status == noErr, let s = created else { throw CodecError.sessionCreate(status) }
         codec = chosen
         session = s
-        do {
+        do throws(CodecError) {
             try configure(s, codec: chosen, bitsPerSecond: bitsPerSecond)
         } catch {
             invalidate()
@@ -104,7 +134,7 @@ public final class VideoEncoder: @unchecked Sendable {
     /// back (lookahead, B-frames), which stalls the two-in-flight cap and breaks in-order decoding,
     /// so a rejection throws, and so does a failed prepare. The rest are tuning: a rejection leaves
     /// VideoToolbox's default in place and goes to `onError`.
-    private func configure(_ s: VTCompressionSession, codec: Codec, bitsPerSecond: Int) throws {
+    private func configure(_ s: VTCompressionSession, codec: Codec, bitsPerSecond: Int) throws(CodecError) {
         try require(s, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         try require(s, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
         tune(s, kVTCompressionPropertyKey_ProfileLevel,
@@ -120,7 +150,7 @@ public final class VideoEncoder: @unchecked Sendable {
         }
     }
 
-    private func require(_ s: VTCompressionSession, _ key: CFString, _ value: CFTypeRef?) throws {
+    private func require(_ s: VTCompressionSession, _ key: CFString, _ value: CFTypeRef?) throws(CodecError) {
         let status = VTSessionSetProperty(s, key: key, value: value)
         guard status == noErr else {
             log.error("required property \(key as String, privacy: .public) rejected: \(status)")
