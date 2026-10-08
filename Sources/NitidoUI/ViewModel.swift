@@ -61,8 +61,8 @@ public final class ViewModel {
     /// (`decodeFailed`). A frame decoded, the session ready again, or leaving, resets it. Internal, not private, so a
     /// test can wait for a failure to land.
     private(set) var decodeFailures = 0
-    /// When the viewer last asked the sharer for a keyframe: a decoder that keeps skipping asks again only once a
-    /// second has passed (`handleIncoming`).
+    /// When the viewer last asked the sharer for a keyframe. Frames that keep arriving without one (a delta before it,
+    /// no decoder, a skip under way) ask again only once a second has passed (`askForKeyframeAtMostOnceASecond`).
     @ObservationIgnored private var keyframeAskedAt: CFTimeInterval?
     /// The link is ready, the first time or again, and no keyframe has come since: the decoder has nothing a delta could
     /// refer to, or only the frame from before the drop, so deltas wait for the keyframe asked for (`handleIncoming`).
@@ -327,13 +327,12 @@ public final class ViewModel {
             if awaitingKeyframe {
                 // Decoded against the frame from before the drop, it would show a corrupted picture until the keyframe.
                 // The keyframe was asked for on `.ready`; again only if a second passes without it.
-                guard f.isKey else {
-                    if keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
-                    return
-                }
+                guard f.isKey else { askForKeyframeAtMostOnceASecond(now: now); return }
                 awaitingKeyframe = false
             }
-            guard let decoder else { askForKeyframe(); return }
+            // No decoder: a decode error let it go and asked for the keyframe whose setup makes the next one, which has
+            // not come yet. Asked again once a second, not for every frame that arrives meanwhile.
+            guard let decoder else { askForKeyframeAtMostOnceASecond(now: now); return }
             // Decoded off the main actor (`decoded`, `decodeFailed`), so ink, cursor and the presented handlers the
             // pacer depends on never wait behind a hardware decode.
             if case .skipped(let first) = decoder.submit(f) {
@@ -341,8 +340,12 @@ public final class ViewModel {
                 // that keyframe drops the frames still waiting (`superseded`). The first one asks for that keyframe; a
                 // later one asks again once a second has passed, so a lost request cannot freeze the picture.
                 telemetry.recordDrop(at: now)
-                if first { log.info("the video decoder fell behind with \(VideoDecoder.maxPending, privacy: .public) frames waiting; skipping to the next keyframe") }
-                if first || keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
+                if first {
+                    log.info("the video decoder fell behind with \(VideoDecoder.maxPending, privacy: .public) frames waiting; skipping to the next keyframe")
+                    askForKeyframe()
+                } else {
+                    askForKeyframeAtMostOnceASecond(now: now)
+                }
             }
         case .stroke(let s): ink.applyRemote(s)
         case .undo(let id): ink.undoRemote(id: id)
@@ -363,6 +366,12 @@ public final class ViewModel {
     private func askForKeyframe() {
         keyframeAskedAt = CACurrentMediaTime()
         link?.send(.keyframeRequest)
+    }
+
+    /// Asks unless the last request is under a second old: it may still be on its way, and a sharer that gets several
+    /// in a row can send a keyframe for each. Lost, it is asked for again once the second has passed.
+    private func askForKeyframeAtMostOnceASecond(now: CFTimeInterval) {
+        if keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
     }
 
     /// A picture from the decoder, in decode order. A decoder let go since (a new setup, every third failure, the link

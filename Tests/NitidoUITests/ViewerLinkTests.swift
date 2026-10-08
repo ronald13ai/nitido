@@ -666,6 +666,42 @@ final class ViewerLinkTests: XCTestCase {
         viewer.disconnect()
     }
 
+    /// With no decoder (a decode error let it go, and the setup that makes the next one has not come yet), every frame
+    /// that arrives used to ask the sharer for a keyframe, 60 requests a second, and a sharer that gets several in a row
+    /// can send a keyframe for each. The viewer asks at most once a second, as its other keyframe requests do.
+    @MainActor
+    func testAViewerWithNoDecoderAsksForAKeyframeAtMostOnceASecond() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234",
+                                        hello: Hello(protocolVersion: protocolVersion, role: .share, name: "Sharer", pixelWidth: 320, pixelHeight: 180, scale: 2))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "loopback", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+        let viewer = ViewModel()
+        viewer.select(sharer)
+        viewer.code = "1234"
+        viewer.connect()
+        var incoming = advertiser.incoming.makeAsyncIterator()
+        guard let link = await incoming.next() else { return XCTFail("no connection") }
+        let received = ReceivedMessages()
+        let reader = Task { @MainActor in for await m in link.messages { received.messages.append(m) } }
+        defer { reader.cancel() }
+        func requests() -> Int { received.messages.filter { $0 == .keyframeRequest }.count }
+        try await waitUntil("the viewer is connected and asks for its first keyframe") { viewer.state == .connected && requests() == 1 }
+        func frame(_ seq: UInt32) -> Message {
+            .videoFrame(VideoFrame(seq: seq, captureHostTimeNs: 1, isKey: seq == 0, data: Data([0, 0, 0, 1, 2])))
+        }
+        // The keyframe ends the wait for one; no setup came, so there is no decoder, and the frames keep coming.
+        for seq in 0..<30 { viewer.handleIncoming(frame(UInt32(seq))) }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(requests(), 1, "the request from .ready is under a second old")
+        try await Task.sleep(for: .seconds(1))
+        for seq in 30..<40 { viewer.handleIncoming(frame(UInt32(seq))) }
+        try await waitUntil("a second later the viewer asks again") { requests() == 2 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(requests(), 2, "once for those ten frames")
+        viewer.disconnect()
+    }
+
     /// A sharer that died and came back with a new code (every launch makes one) turns the viewer's reconnect away in
     /// the handshake: the viewer asks for the new code instead of saying Reconnecting forever, which would also cost
     /// the sharer a failed handshake every few seconds and rotate its code under whoever is typing it.
