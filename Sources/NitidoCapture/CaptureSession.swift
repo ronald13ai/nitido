@@ -277,17 +277,16 @@ public final class CaptureSession: NSObject {
     /// the application leaves out every window it has or opens later (the Stop sharing? sheet included).
     private func withoutNitido(_ picked: SCContentFilter) async throws -> (SCContentFilter, CGDirectDisplayID?) {
         let content = try await Self.shareableContent().value
-        let match: SCDisplay?
-        if #available(macOS 15.2, *), let pickedDisplay = picked.includedDisplays.first {
-            match = content.displays.first { $0.displayID == pickedDisplay.displayID }
-        } else {
-            match = Self.matchingDisplay(frames: content.displays.map(\.frame), contentRect: picked.contentRect).map { content.displays[$0] }
-        }
-        guard let display = match else {
+        let pickedID: CGDirectDisplayID?
+        if #available(macOS 15.2, *) { pickedID = picked.includedDisplays.first?.displayID } else { pickedID = nil }
+        let displays = content.displays.map { (id: $0.displayID, frame: $0.frame) }
+        guard let match = Self.matchingDisplay(displays: displays, pickedID: pickedID, contentRect: picked.contentRect) else {
             // Shared as picked, which may show Nítido's own windows; said in the log rather than refusing the share.
-            log.error("No display matches the pick (\(String(describing: picked.contentRect), privacy: .public)); sharing it as picked, Nítido's windows included")
+            log.error("No display matches the pick (\(String(describing: picked.contentRect), privacy: .public), among \(String(describing: displays), privacy: .public)); sharing it as picked, Nítido's windows included")
             return (picked, nil)
         }
+        let display = content.displays[match.index]
+        log.info("The pick (\(String(describing: picked.contentRect), privacy: .public)) is display \(display.displayID, privacy: .public) (\(String(describing: display.frame), privacy: .public)), found by \(match.how, privacy: .public)")
         let own = getpid()
         if let app = content.applications.first(where: { $0.processID == own }) {
             return (SCContentFilter(display: display, excludingApplications: [app], exceptingWindows: []), display.displayID)
@@ -304,11 +303,30 @@ public final class CaptureSession: NSObject {
         Handed(value: try await SCShareableContent.current)
     }
 
-    /// The display whose frame is the picked content's rectangle (both in global points), or the only one of that size.
-    nonisolated static func matchingDisplay(frames: [CGRect], contentRect: CGRect) -> Int? {
-        if let exact = frames.firstIndex(where: { $0.equalTo(contentRect) }) { return exact }
-        let sameSize = frames.indices.filter { frames[$0].size.equalTo(contentRect.size) }
-        return sameSize.count == 1 ? sameSize[0] : nil
+    /// How far, in points, a display's frame may be from a pick's content rectangle, in origin and in size, and still be
+    /// its display (`matchingDisplay`).
+    nonisolated static let frameTolerance: CGFloat = 4
+
+    /// The display a pick shows, and how it was found (for the log). The one with the pick's display ID, when the pick
+    /// names one (macOS 15.2 and later) and it is listed; else the display whose frame is within `frameTolerance` of the
+    /// pick's content rectangle in origin and size, the nearest if several are (the rectangle's coordinate space is not
+    /// documented: global points are assumed, as `SCDisplay.frame` uses); else the only display of that size, wherever
+    /// the rectangle is; else none, and the caller shares the pick as picked.
+    nonisolated static func matchingDisplay(displays: [(id: CGDirectDisplayID, frame: CGRect)], pickedID: CGDirectDisplayID?,
+                                            contentRect: CGRect) -> (index: Int, how: String)? {
+        if let pickedID, let index = displays.firstIndex(where: { $0.id == pickedID }) { return (index, "its display ID") }
+        func close(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= frameTolerance }
+        let sameSize = displays.indices.filter {
+            close(displays[$0].frame.width, contentRect.width) && close(displays[$0].frame.height, contentRect.height)
+        }
+        func distance(_ index: Int) -> CGFloat {
+            let frame = displays[index].frame
+            return abs(frame.minX - contentRect.minX) + abs(frame.minY - contentRect.minY)
+                + abs(frame.width - contentRect.width) + abs(frame.height - contentRect.height)
+        }
+        let near = sameSize.filter { close(displays[$0].frame.minX, contentRect.minX) && close(displays[$0].frame.minY, contentRect.minY) }
+        if let nearest = near.min(by: { distance($0) < distance($1) }) { return (nearest, "its frame") }
+        return sameSize.count == 1 ? (sameSize[0], "its size, the only display of it") : nil
     }
 
     // MARK: Size changes

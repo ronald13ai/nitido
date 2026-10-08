@@ -157,14 +157,28 @@ final class CaptureSessionResizeTests: XCTestCase {
         XCTAssertNil(SizeWatch.nativeSize(contentRect: CGRect(x: 0, y: 0, width: 10, height: 10), contentScale: .nan, scaleFactor: 2))
     }
 
-    /// Before macOS 15.2 a display pick names no display: the one whose frame is the pick's rectangle, or the only one
-    /// of that size, is the one captured without Nítido's windows.
-    func testTheDisplayOfAPickIsTheOneWithItsFrame() {
-        let frames = [CGRect(x: 0, y: 0, width: 1512, height: 982), CGRect(x: 1512, y: 0, width: 2560, height: 1440)]
-        XCTAssertEqual(CaptureSession.matchingDisplay(frames: frames, contentRect: CGRect(x: 1512, y: 0, width: 2560, height: 1440)), 1)
-        XCTAssertEqual(CaptureSession.matchingDisplay(frames: frames, contentRect: CGRect(x: 0, y: 0, width: 2560, height: 1440)), 1, "same size, only one")
-        let twins = [CGRect(x: 0, y: 0, width: 1920, height: 1080), CGRect(x: 1920, y: 0, width: 1920, height: 1080)]
-        XCTAssertNil(CaptureSession.matchingDisplay(frames: twins, contentRect: CGRect(x: 0, y: 500, width: 1920, height: 1080)), "two of that size: no guess")
-        XCTAssertNil(CaptureSession.matchingDisplay(frames: frames, contentRect: CGRect(x: 0, y: 0, width: 800, height: 600)))
+    /// A display pick is known by its display ID on macOS 15.2 and later, and before that only by its content
+    /// rectangle, in a coordinate space no documentation states. Its display is the one with that ID; else the display
+    /// whose frame is within a few points of the rectangle in origin and size, the nearest; else the only display of
+    /// that size, wherever the rectangle is; else none, and the pick is shared as picked.
+    func testTheDisplayOfAPickIsTheOneWithItsIDOrNearestToItsFrame() {
+        let laptop = (id: CGDirectDisplayID(1), frame: CGRect(x: 0, y: 0, width: 1512, height: 982))
+        let monitor = (id: CGDirectDisplayID(5), frame: CGRect(x: 1512, y: 0, width: 2560, height: 1440))
+        let twins = [(id: CGDirectDisplayID(2), frame: CGRect(x: 0, y: 0, width: 1920, height: 1080)),
+                     (id: CGDirectDisplayID(3), frame: CGRect(x: 1920, y: 0, width: 1920, height: 1080))]
+        func match(_ rect: CGRect, id: CGDirectDisplayID? = nil,
+                   in displays: [(id: CGDirectDisplayID, frame: CGRect)] = [laptop, monitor]) -> Int? {
+            CaptureSession.matchingDisplay(displays: displays, pickedID: id, contentRect: rect)?.index
+        }
+        XCTAssertEqual(match(monitor.frame), 1, "the same frame")
+        XCTAssertEqual(match(CGRect(x: 1513.5, y: -1, width: 2559, height: 1440.5)), 1, "a frame a point or two off")
+        XCTAssertEqual(match(CGRect(x: 0, y: 0, width: 2560, height: 1440)), 1, "elsewhere, but the only display of that size")
+        XCTAssertEqual(match(laptop.frame, id: 5), 1, "the pick's display ID decides over its frame")
+        XCTAssertEqual(match(monitor.frame, id: 9), 1, "an ID no display has: the frame decides")
+        XCTAssertEqual(match(CGRect(x: 1921, y: 1, width: 1920, height: 1080), in: twins), 1, "two of that size: the near one")
+        XCTAssertEqual(match(CGRect(x: 2, y: 0, width: 1920, height: 1080), in: twins), 0)
+        XCTAssertNil(match(CGRect(x: 0, y: 500, width: 1920, height: 1080), in: twins), "two of that size, neither near: no guess")
+        XCTAssertNil(match(CGRect(x: 0, y: 0, width: 800, height: 600)), "no display of that size")
+        XCTAssertNil(match(CGRect(x: 1512, y: 0, width: 2540, height: 1440)), "20 points narrower is another size")
     }
 }
