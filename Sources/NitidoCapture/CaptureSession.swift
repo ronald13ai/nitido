@@ -318,8 +318,10 @@ public final class CaptureSession: NSObject {
     /// The display a pick shows, and how it was found (for the log). The one with the pick's display ID, when the pick
     /// names one (macOS 15.2 and later) and it is listed; else the display whose frame is within `frameTolerance` of the
     /// pick's content rectangle in origin and size, the nearest if several are (the rectangle's coordinate space is not
-    /// documented: global points are assumed, as `SCDisplay.frame` uses); else the only display of that size, wherever
-    /// the rectangle is; else none, and the caller shares the pick as picked.
+    /// documented: global points are assumed, as `SCDisplay.frame` uses); else, only for a pick that names no display
+    /// (before macOS 15.2), the only display of that size, wherever the rectangle is; else none, and the caller shares
+    /// the pick as picked. A pick that names a display no longer listed is never matched by size alone: the only
+    /// display of that size may be its twin, which the user did not pick.
     nonisolated static func matchingDisplay(displays: [(id: CGDirectDisplayID, frame: CGRect)], pickedID: CGDirectDisplayID?,
                                             contentRect: CGRect) -> (index: Int, how: String)? {
         if let pickedID, let index = displays.firstIndex(where: { $0.id == pickedID }) { return (index, "its display ID") }
@@ -334,6 +336,7 @@ public final class CaptureSession: NSObject {
         }
         let near = sameSize.filter { close(displays[$0].frame.minX, contentRect.minX) && close(displays[$0].frame.minY, contentRect.minY) }
         if let nearest = near.min(by: { distance($0) < distance($1) }) { return (nearest, "its frame") }
+        guard pickedID == nil else { return nil }
         return sameSize.count == 1 ? (sameSize[0], "its size, the only display of it") : nil
     }
 

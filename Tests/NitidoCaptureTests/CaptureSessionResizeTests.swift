@@ -159,8 +159,8 @@ final class CaptureSessionResizeTests: XCTestCase {
 
     /// A display pick is known by its display ID on macOS 15.2 and later, and before that only by its content
     /// rectangle, in a coordinate space no documentation states. Its display is the one with that ID; else the display
-    /// whose frame is within a few points of the rectangle in origin and size, the nearest; else the only display of
-    /// that size, wherever the rectangle is; else none, and the pick is shared as picked.
+    /// whose frame is within a few points of the rectangle in origin and size, the nearest; else, for a pick that names
+    /// no display, the only display of that size, wherever the rectangle is; else none, and the pick is shared as picked.
     func testTheDisplayOfAPickIsTheOneWithItsIDOrNearestToItsFrame() {
         let laptop = (id: CGDirectDisplayID(1), frame: CGRect(x: 0, y: 0, width: 1512, height: 982))
         let monitor = (id: CGDirectDisplayID(5), frame: CGRect(x: 1512, y: 0, width: 2560, height: 1440))
@@ -180,5 +180,16 @@ final class CaptureSessionResizeTests: XCTestCase {
         XCTAssertNil(match(CGRect(x: 0, y: 500, width: 1920, height: 1080), in: twins), "two of that size, neither near: no guess")
         XCTAssertNil(match(CGRect(x: 0, y: 0, width: 800, height: 600)), "no display of that size")
         XCTAssertNil(match(CGRect(x: 1512, y: 0, width: 2540, height: 1440)), "20 points narrower is another size")
+
+        // A pick that names a display (macOS 15.2 and later) no longer listed: only a display at its frame is it. The
+        // only display of that size elsewhere may be its twin, which the user did not pick, so the pick is shared as
+        // picked instead.
+        XCTAssertNil(match(CGRect(x: 0, y: 0, width: 2560, height: 1440), id: 99), "an unlisted ID: no guess by size")
+        let atFrame = CaptureSession.matchingDisplay(displays: [laptop, monitor], pickedID: 99, contentRect: monitor.frame)
+        XCTAssertEqual(atFrame?.index, 1)
+        XCTAssertEqual(atFrame?.how, "its frame")
+        let bySize = CaptureSession.matchingDisplay(displays: [laptop, monitor], pickedID: nil, contentRect: CGRect(x: 0, y: 0, width: 2560, height: 1440))
+        XCTAssertEqual(bySize?.index, 1, "a pick without an ID (before macOS 15.2) is still found by its size")
+        XCTAssertEqual(bySize?.how, "its size, the only display of it")
     }
 }
