@@ -47,8 +47,8 @@ nitido (app)  ->  NitidoUI  ->  NitidoCapture, NitidoCodec, NitidoLink  ->  Niti
 - `Pairing`: 4-digit code generation and the HKDF derivation of the TLS pre-shared key from code + sharer name.
 
 ### NitidoCapture (ScreenCaptureKit)
-- `CaptureSession`: wraps `SCContentSharingPicker` and `SCStream`. Emits `CapturedFrame { pixelBuffer, captureHostTime, contentRect, scale }` on an `AsyncStream`. Configured at native pixel size, 60 fps, BGRA, excluding Nítido's own windows, cursor shown.
-- Handles picker cancel, stream stop by the system, display reconfiguration (resolution change restarts the stream and emits a new `videoConfig`).
+- `CaptureSession`: wraps `SCContentSharingPicker` and `SCStream`. Emits `CapturedFrame { pixelBuffer, captureHostTime, contentRect, scale }` on an `AsyncStream`. Configured at native pixel size, 60 fps, BGRA, excluding Nítido's own windows (from the picker's choices; for a display, from the capture itself, by excluding the application), cursor shown.
+- Handles picker cancel, stream stop by the system, display reconfiguration and a resized window (a new content size restarts the stream at that size and emits a new `videoConfig`).
 
 ### NitidoCodec (VideoToolbox)
 - `VideoEncoder`: HEVC Main (H.264 High if HEVC hardware encode is unavailable), realtime, no frame reordering, keyframe every 120 frames or on request, `expectedFrameRate` 60, `averageBitRate` set from `BitrateController`. Emits `EncodedFrame { data (NAL units with 4-byte length prefixes, as VideoToolbox produces them), isKey, parameterSets?, captureHostTime, seq }`.
@@ -97,7 +97,7 @@ Byte order big-endian. Every message: `u32 length` (payload bytes, excluding the
 | 10 | clear | empty |
 | 11 | bye | u8 reason |
 
-`hello` is the first message in both directions; mismatched protocol versions end with `bye(1)`. Unknown types are skipped by length, so the protocol can grow.
+`hello` is the first message in both directions; mismatched protocol versions end with `bye(1)`. The sharer sends `hello` again when the capture's size or scale changes. `bye` reasons: 0 the session ended (Esc, Back, Stop, quit), 1 protocol mismatch, 2 the sharer stopped capturing and listening (a failure, or Stop Sharing in the menu bar). Unknown types are skipped by length, so the protocol can grow.
 
 ## 7. Codec settings
 
@@ -135,7 +135,7 @@ A single row under the picture (when the picture is narrower than that row, the 
 
 Apple-grade restraint with the RONAR maison signature. Everything is quiet except the gold.
 
-Colors (from maison.ronar.ai): background `#08090c`, surface `#0e1015`, hairline `#2b2e38`, muted `#3a3e4a`, text `#f2f3f5`, gold `#c9a86a`, gold highlight `#d8ba7e`, cream `#f3e3ba`, success `#62c37e`, soft red `#e08f8f` reserved for destructive confirmation only.
+Colors (from maison.ronar.ai): background `#08090c`, surface `#0e1015`, hairline `#2b2e38`, muted `#3a3e4a`, text `#f2f3f5`, gold `#c9a86a`, gold highlight `#d8ba7e`, cream `#f3e3ba`, success `#62c37e`, soft red `#e08f8f` reserved for destructive confirmation only. Secondary text `#8a8f9c` (subtitles, small-caps captions, the strip's labels and units) keeps 4.5:1 or better on the background and the surface; muted (about 1.9:1) is for hairlines and inactive states only.
 
 Type: SF Pro for all interface text (native feel on macOS), SF Mono for figures, Cormorant Garamond Italic only for the wordmark, Marcellus for small-caps labels (pairing code caption, section labels). Both fonts bundled under the SIL Open Font License.
 
@@ -157,9 +157,11 @@ Motion, following the design engineering rules in use at RONAR:
 | Situation | Behavior |
 |---|---|
 | Screen Recording not granted | Explain before the system prompt; after a denial, show the one-step path to System Settings and a Retry button. |
-| Picker cancelled | Back to Welcome, no error. |
-| Display reconfigured mid-share | Restart the stream, send a new `videoConfig`, keyframe next. |
-| Link drops | Both sides show "Reconnecting…" over the last frame (dimmed), backoff retries, keyframe on reconnect, strip shows the gap. |
+| Picker cancelled | The first pick: back to Welcome, no error. A change of content cancelled mid-share keeps the current content. |
+| Display reconfigured mid-share, or the shared window resized | Once the new size holds for 150 ms, restart the stream at it, send a new `videoConfig` and a `hello` with the new size and scale, keyframe next. |
+| Capture stopped by the system (Stop Sharing in the menu bar) | The Share window offers Retry; the viewer is told with `bye(2)` and says the sharer stopped sharing; the listener stops until Retry. |
+| Link drops | Both sides show "Reconnecting…": the viewer over the last frame (dimmed), the sharer next to the viewer's name in the pairing panel until the viewer pairs again (30 s at most). Backoff retries, keyframe on reconnect, strip shows the gap. |
+| Quit or window closed mid-session | The session stops first, so the other side hears `bye`; the app quits once it is out (2 s at most). |
 | Backlog grows | Skip non-key frames, lower bitrate, request keyframe; the strip shows the dropped count. |
 | Decode error | Request keyframe; after three failures rebuild the decoder; after ten, show an error with Reconnect. |
 | Wrong code | Reject with a shake of the code field (one 180 ms shake, respects reduce motion); three wrong codes regenerate the sharer's code. |
@@ -213,5 +215,5 @@ Manual checklist (documented in `docs/testing.md`): first-run permission flow, l
 - Screen Recording permission is granted per signed bundle: an unsigned or re-signed binary loses it. Mitigation: build the bundle and sign from day one.
 - TLS PSK through Network.framework has sparse documentation. Mitigation: integration test on day three morning; if blocked by noon, fall back to TLS with a self-signed certificate pinned by fingerprint and keep the code as an application-level check.
 - HEVC decode of another Mac's stream depends on matching parameter sets. Mitigation: `videoConfig` always precedes the first keyframe, and the decoder is rebuilt on every `videoConfig`.
-- ScreenCaptureKit excluding Nítido's own windows needs the app's window list at stream start; windows created later must be added to the exclusion. Mitigation: refresh the filter on window creation.
+- ScreenCaptureKit excluding Nítido's own windows needs the app's window list at stream start; windows created later must be added to the exclusion. Mitigation: a display is captured with a filter that excludes the Nítido application, which covers windows and sheets opened later; a window pick captures only that window.
 - Display scale mismatch between Macs makes 1:1 impossible. Mitigation: scale down with Lanczos, show the scale in the strip, never scale up.

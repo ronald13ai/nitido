@@ -6,12 +6,12 @@ Share a screen or a window to another Mac on the local network with crisp text, 
 
 ## What it does
 
-- Pick a window or display with the system picker; see it in a window at native Retina scale, 1:1.
+- Pick a window or display with the system picker; see it in a window at native Retina scale, 1:1, also after the shared window is resized or the display changes mode.
 - Flip the codec loop: HEVC encode and decode on the same Mac with a quality slider and a before/after divider, so you can see exactly where small text starts to smear and how many milliseconds the codec costs.
 - Pair a second Mac with a 4-digit code (TLS with a pre-shared key derived from it) and stream at 60 fps.
 - Draw on the picture from either side; strokes fade after four seconds; ⌘Z undoes on both.
 - Read the numbers: capture and display fps, capture-to-display or glass-to-glass latency, RTT, bitrate, drops.
-- Pull the cable: the viewer reconnects with backoff and recovers with a keyframe; the bitrate adapts to backlog and RTT.
+- Pull the cable: both sides say Reconnecting, the viewer reconnects with backoff and recovers with a keyframe; the bitrate adapts to backlog and RTT.
 
 ![Welcome](docs/screenshots/01-welcome.png)
 
@@ -27,19 +27,19 @@ Share a screen or a window to another Mac on the local network with crisp text, 
 | Codec loop at 20 Mbps, HEVC | codec (fill in) ms, total (fill in) ms |
 | Two Macs on Wi-Fi, glass to glass (estimated) | (fill in) ms, RTT (fill in) ms |
 
-Replace every "(fill in)" with the figures you read from the strip while recording the video; do not publish the README with placeholders.
+Replace every "(fill in)" with the figures you read from the strip while recording the video, and add the four screenshots this README shows (`docs/screenshots/01-welcome.png`, `02-share-loopback.png`, `03-viewer.png`, `04-strip.png`; delete the link to any you skip, then delete `docs/screenshots/.gitkeep`). Do not publish the README with placeholders or broken images.
 
 ## How it works
 
 One Swift package: five library targets and a thin app target that only wires them together.
 
 - `NitidoCore` is pure Swift and fully unit-tested: the wire protocol (big-endian, a `u32 length · u8 type` header, 11 message types, payloads capped at 16 MiB, unknown types skipped by length), rolling one-second telemetry with p50/p95, a deterministic bitrate controller, ink geometry (Catmull-Rom smoothing, speed-to-width, fade, undo) and the HKDF pairing key.
-- `NitidoCapture` wraps `SCContentSharingPicker` and `SCStream`: native pixel size, up to 60 fps, BGRA, Nítido's own windows excluded. Start, update and stop run one at a time, so a quick re-pick never races a stream being torn down.
+- `NitidoCapture` wraps `SCContentSharingPicker` and `SCStream`: native pixel size, up to 60 fps, BGRA. Nítido's own windows are left out of the picker's choices, and a shared display is captured without the Nítido application, so its windows and sheets never appear in it. When the content changes size (a window resized, a display's mode changed), the stream restarts at the new size once it holds for 150 ms. Start, update and stop run one at a time, so a quick re-pick never races a stream being torn down.
 - `NitidoCodec` wraps VideoToolbox in realtime mode with no frame reordering: HEVC Main, or H.264 High when there is no hardware HEVC encoder, a keyframe every 120 frames or on request.
 - `NitidoLink` wraps Network.framework: a Bonjour `_nitido._tcp` listener and browser, one TLS connection per peer that carries both directions, a ping every 500 ms for RTT and an NTP-style clock offset, and the send backlog: bytes handed to the connection whose send has not completed yet. On the viewer a session reconnects after a drop with backoff (0.5, 1, 2, 5 s).
-- `NitidoUI` holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` decides when it draws. It keeps exactly one frame, the newest, and one drawable in flight, because every drawable queued ahead of a frame delays it by a refresh and a source that changes at the display rate never drains that queue on its own. A frame that had to wait through a refresh is held back for one capture interval so a newer frame can replace it; the cap rises by one only when the display keeps starving. The held frame is drawn again after a resize or when the window comes back on screen, and that redraw never counts as a displayed frame, so the fps and latency figures stay honest. `InkLayer` draws strokes as variable-width ribbons above the video; `TelemetryStrip` reads a snapshot four times a second.
+- `NitidoUI` holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` decides when it draws. It keeps one frame, the newest, and one drawable in flight to start, because every drawable queued ahead of a frame delays it by a refresh and a source that changes at the display rate never drains that queue on its own. A frame that had to wait through a refresh is held back for one capture interval so a newer frame can replace it; the cap rises by one only when the display keeps starving. The held frame is drawn again after a resize or when the window comes back on screen, and that redraw never counts as a displayed frame, so the fps and latency figures stay honest. `InkOverlay` (an `InkCanvasView`) draws strokes as variable-width ribbons above the video; `TelemetryStrip` reads a snapshot four times a second.
 
-Every stage drops work instead of queueing it: capture keeps only the newest frame, the encoder refuses a frame while two are already being encoded, the sharer skips non-key frames while the backlog is over four frames' worth and sends a keyframe once it drains, and the viewer draws only the newest decoded frame. Every 250 ms the bitrate controller reads RTT and backlog: it cuts 25% when the backlog passes two frames' worth or RTT climbs 40 ms above its 10-second minimum, adds 10% while both stay low, changes at most once every 2 s, and stays between 2 and 60 Mbps. The design spec and the implementation plan are in `docs/superpowers/`.
+Every stage drops work instead of queueing it: capture keeps only the newest frame, the encoder works on at most two frames at once and the newest frame it turns away goes in as soon as one finishes (unless a newer one got in first), the sharer skips non-key frames while the backlog is over four frames' worth and sends a keyframe once it drains, and the viewer draws only the newest decoded frame. Every 250 ms the bitrate controller reads RTT and backlog: it cuts 25% when the backlog passes two frames' worth or RTT climbs 40 ms above its 10-second minimum, adds 10% while both stay low, changes at most once every 2 s, and stays between 2 and 60 Mbps. The design spec and the implementation plan are in `docs/superpowers/`.
 
 ## Run it
 

@@ -7,9 +7,12 @@ Run before tagging a release. Each line is a pass/fail.
 3. Window smaller than the content (big display shared to a small screen): downscaled, no horizontal blur bands, scale shown in the strip.
 4. Two instances on one Mac: discover, pair, stream, ink both ways, ⌘Z both ways, ⌘⌫ both ways.
 5. Two Macs on Wi-Fi: glass-to-glass under 100 ms at the sharer's native size; rtt shown; bitrate climbs to the ceiling within 10 s on a good network.
-6. Wi-Fi off on the viewer for 10 s: Reconnecting overlay with growing attempts; Wi-Fi on: recovery with a keyframe, no restart.
-7. Quit the sharer while connected: viewer shows "The sharer ended the session."; kill -9 the sharer: viewer reconnects when it comes back.
+6. Wi-Fi off on the viewer for 10 s: Reconnecting overlay with growing attempts, and the sharer's pairing panel shows the viewer as Reconnecting…; Wi-Fi on: recovery with a keyframe, no restart.
+7. Quit the sharer with ⌘Q, and again by closing its window, while connected: viewer shows "The sharer ended the session." each time. kill -9 the sharer: viewer shows "Reconnecting… attempt n" with growing gaps; relaunch the sharer: it has a new code, so the viewer says "The code on <Mac> has changed. Enter the new code to connect again."
 8. Three wrong codes: the sharer's code changes.
-9. Display resolution change mid-share: the picture restarts at the new size on both sides.
+9. Display resolution change mid-share (share the display), then share a TextEdit window and drag it larger and smaller: each time the picture restarts at the new size on both sides, 1:1 again, with the new size and scale in both strips.
 10. Reduce Motion on: no scale, ring or shake; fades still happen; nothing feels broken.
-11. ⌘H never animates. Esc asks before disconnecting, not before leaving Welcome.
+11. ⌘H never animates. Esc asks before disconnecting, not before leaving Welcome; with a share running behind the View screen it asks "Stop sharing and disconnect?".
+12. Share the display that holds Nítido: neither the Share window nor the viewer shows a Nítido window, sheet (Esc's Stop sharing? included) or mirror tunnel.
+13. While sharing, open the system's screen-sharing menu in the menu bar, choose to change the shared content, then cancel: the share goes on with the same content and the viewer stays connected.
+14. With a viewer connected, click Stop Sharing in the menu bar's screen-sharing menu: the Share window offers Retry, the viewer says "<Mac> stopped sharing.", and after Retry the viewer can pair again with the same code.
