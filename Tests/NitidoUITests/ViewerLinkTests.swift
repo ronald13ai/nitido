@@ -820,9 +820,10 @@ final class ViewerLinkTests: XCTestCase {
 
     /// Spec section 8: once frames are dropped for the send backlog, no delta goes out (it would refer to frames the
     /// viewer never got) until a keyframe has, and that keyframe follows as soon as the backlog drains under one frame,
-    /// even from a source that went still and sends no frame that could check the drain. A backlog over a second's worth
-    /// starts the skip at its first reading (`testABacklogThatLastsAHundredMillisecondsSkipsDeltasUntilOneKeyframeAndCutsTheRateAtOnce`
-    /// has the rule for one under that).
+    /// even from a source that went still and sends no frame that could check the drain. A backlog over a second's
+    /// worth starts the skip at its first reading
+    /// (`testABacklogThatLastsAHundredMillisecondsSkipsDeltasUntilOneKeyframeAndCutsTheRateAtOnce` has the rule for one
+    /// under that).
     @MainActor
     func testAfterABacklogDropOnlyAKeyframeGoesOutEvenFromAStillSource() async throws {
         let (share, source) = try await listeningShare()
@@ -869,12 +870,13 @@ final class ViewerLinkTests: XCTestCase {
     }
 
     /// Spec section 8 and the two-Mac test of 2026-10-09: a keyframe still being sent is not congestion, and neither is
-    /// a burst that drains within 100 ms. At 2 Mbps (a 320×180 picture) 150 kB is 600 ms worth, four times the threshold
-    /// and under the second's worth that skips at once. A 150 kB keyframe that takes 50 ms to go out, a burst of other
-    /// bytes as large that drains as fast, then a keyframe as large that takes 200 ms (only its own bytes held, so only
-    /// leaving it out of the backlog keeps that one from counting): every delta goes out, none counts as dropped, no
-    /// keyframe is asked for after them and the log says nothing of a skip. The rule before skipped the deltas after
-    /// each and sent a keyframe once each drained: the slideshow of keyframes the Pro's log showed while text scrolled.
+    /// a burst that drains within 100 ms. At 2 Mbps (a 320×180 picture) 150 kB is 600 ms worth, four times the
+    /// threshold and under the second's worth that skips at once. A 150 kB keyframe that takes 50 ms to go out, a burst
+    /// of other bytes as large that drains as fast, then a keyframe as large that takes 200 ms (only its own bytes
+    /// held, so only leaving it out of the backlog keeps that one from counting): every delta goes out, none counts as
+    /// dropped, no keyframe is asked for after them and the log says nothing of a skip. The rule before skipped the
+    /// deltas after each and sent a keyframe once each drained: the slideshow of keyframes the Pro's log showed while
+    /// text scrolled.
     @MainActor
     func testAKeyframeOrABurstThatDrainsWithinFiftyMillisecondsSkipsNothing() async throws {
         let (share, source) = try await listeningShare()
@@ -922,10 +924,10 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// Spec section 8: a backlog over 150 ms worth that lasts 100 ms skips the deltas from then on, until the one keyframe
-    /// asked for once it drains, every skipped delta counts as dropped, and the bitrate controller cuts for the skip at its
-    /// next update although it cut less than 2 s before. At 20 Mbps (a 1920×1080 picture) a megabyte is 400 ms worth:
-    /// over the threshold, under a second's worth, and still so after both cuts.
+    /// Spec section 8: a backlog over 150 ms worth that lasts 100 ms skips the deltas from then on, until the one
+    /// keyframe asked for once it drains, every skipped delta counts as dropped, and the bitrate controller cuts for
+    /// the skip at its next update although it cut less than 2 s before. At 20 Mbps (a 1920×1080 picture) a megabyte is
+    /// 400 ms worth: over the threshold, under a second's worth, and still so after both cuts.
     @MainActor
     func testABacklogThatLastsAHundredMillisecondsSkipsDeltasUntilOneKeyframeAndCutsTheRateAtOnce() async throws {
         let (share, source) = try await listeningShare(width: 1920, height: 1080)
@@ -982,9 +984,9 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// Spec section 8: a backlog over a second's worth skips at its first reading, and for 500 ms after the keyframe that
-    /// ends a skip only that does: a backlog over 150 ms worth that lasts longer than 100 ms in that time skips nothing,
-    /// so the keyframe and the link get their time. At 2 Mbps a second's worth is 250 kB.
+    /// Spec section 8: a backlog over a second's worth skips at its first reading, and for 500 ms after the keyframe
+    /// that ends a skip only that does: a backlog over 150 ms worth that lasts longer than 100 ms in that time skips
+    /// nothing, so the keyframe and the link get their time. At 2 Mbps a second's worth is 250 kB.
     @MainActor
     func testOnlyABacklogOverASecondsWorthSkipsAtOnceOrJustAfterAKeyframe() async throws {
         let (share, source) = try await listeningShare()

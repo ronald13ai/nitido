@@ -548,11 +548,11 @@ public final class ShareModel {
         telemetry.recordBytes(f.data.count, at: now)
     }
 
-    /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode again
-    /// (`BacklogPolicy.keyframeDue`). `sendKeyframe` covers a still source too (it encodes the newest frame again), so the
-    /// viewer never keeps a damaged or stale picture until the content moves. Asks again only if no keyframe went out
-    /// within a second. With no encoder there is nothing to ask: the next frame makes one, and a fresh encoder starts
-    /// with a keyframe.
+    /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode
+    /// again (`BacklogPolicy.keyframeDue`). `sendKeyframe` covers a still source too (it encodes the newest frame
+    /// again), so the viewer never keeps a damaged or stale picture until the content moves. Asks again only if no
+    /// keyframe went out within a second. With no encoder there is nothing to ask: the next frame makes one, and a
+    /// fresh encoder starts with a keyframe.
     private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
         guard encoder != nil, backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }
         let skipped = backlogPolicy.skipped

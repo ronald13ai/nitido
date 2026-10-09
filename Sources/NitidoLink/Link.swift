@@ -28,9 +28,10 @@ public final class Link: @unchecked Sendable {
     public var clockOffsetNs: Int64? { lock.withLock { _clockOffsetNs } }
     /// Bytes handed to the connection whose send has not completed yet.
     public var backlogBytes: Int { lock.withLock { backlog } }
-    /// The backlog without the keyframes still in it: what the sharer's dropping rule and bitrate controller judge (spec
-    /// section 8). A keyframe is one burst the encoder makes on purpose, so its own bytes are never taken for congestion
-    /// while it is being sent; the frames queued behind it are. Read under one lock, so it is never below zero.
+    /// The backlog without the keyframes still in it: what the sharer's dropping rule and bitrate controller judge
+    /// (spec section 8). A keyframe is one burst the encoder makes on purpose, so its own bytes are never taken for
+    /// congestion while it is being sent; the frames queued behind it are. Read under one lock, so it is never below
+    /// zero.
     public var backlogBytesExcludingKeyframes: Int { lock.withLock { backlog - keyframeBacklog } }
     /// True once the link has been ready, even after it ended: it proved the code.
     public var wasReady: Bool { lock.withLock { _wasReady } }

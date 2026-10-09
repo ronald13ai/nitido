@@ -47,8 +47,8 @@ final class BacklogPolicyTests: XCTestCase {
         XCTAssertFalse(p.takeTrip())
     }
 
-    /// Over the threshold for 100 ms: the delta that finds it so is skipped and starts the skip, every delta after it is
-    /// skipped, the bitrate controller hears of it once, and the keyframe is asked for once the backlog is under a
+    /// Over the threshold for 100 ms: the delta that finds it so is skipped and starts the skip, every delta after it
+    /// is skipped, the bitrate controller hears of it once, and the keyframe is asked for once the backlog is under a
     /// frame, then again only after a second without one; the keyframe ends the skip.
     func testABacklogOverTheThresholdForAHundredMillisecondsSkipsUntilAKeyframe() {
         var p = BacklogPolicy()
@@ -82,8 +82,8 @@ final class BacklogPolicyTests: XCTestCase {
         assertTrip(p.delta(backlogBytes: 500_000, bitsPerSecond: rate, now: 10.17), after: 0.1)
     }
 
-    /// A reading of the 250 ms loop starts the 100 ms too: a source that changed again after a pause skips its first delta
-    /// when the backlog has been over the threshold since the loop saw it.
+    /// A reading of the 250 ms loop starts the 100 ms too: a source that changed again after a pause skips its first
+    /// delta when the backlog has been over the threshold since the loop saw it.
     func testTheLoopsReadingCountsTowardsTheHundredMilliseconds() {
         var p = BacklogPolicy()
         p.observe(backlogBytes: 500_000, bitsPerSecond: rate, now: 10)
@@ -99,9 +99,9 @@ final class BacklogPolicyTests: XCTestCase {
     }
 
     /// For half a second after the keyframe that ended a skip, a backlog over the threshold skips nothing, however long
-    /// it stays (the keyframe's own bytes are not in it, and a link that is still recovering gets the time to); one over
-    /// the ceiling still skips at once. After the half second the 100 ms rule is back, counted from the first reading
-    /// over the threshold, in the half second or not.
+    /// it stays (the keyframe's own bytes are not in it, and a link that is still recovering gets the time to); one
+    /// over the ceiling still skips at once. After the half second the 100 ms rule is back, counted from the first
+    /// reading over the threshold, in the half second or not.
     func testAfterTheKeyframeOnlyTheCeilingSkipsForHalfASecond() {
         func recovered(at t: Double) -> BacklogPolicy {
             var p = BacklogPolicy()
@@ -131,8 +131,8 @@ final class BacklogPolicyTests: XCTestCase {
         assertTrip(p.delta(backlogBytes: 500_000, bitsPerSecond: rate, now: 10.11), after: 0.1)
     }
 
-    /// The rule follows the rate: at 2 Mbps, where the codec loop's floor and a small window sit, 150 KB is 600 ms worth,
-    /// over the threshold and under the ceiling, so it skips only once it has lasted 100 ms.
+    /// The rule follows the rate: at 2 Mbps, where the codec loop's floor and a small window sit, 150 KB is 600 ms
+    /// worth, over the threshold and under the ceiling, so it skips only once it has lasted 100 ms.
     func testTheThresholdFollowsTheRate() {
         var p = BacklogPolicy()
         XCTAssertEqual(p.delta(backlogBytes: 150_000, bitsPerSecond: 2_000_000, now: 10), .send)

@@ -18,7 +18,8 @@ import Foundation
 ///   Once the backlog is under one frame's worth, `keyframeDue` asks for that keyframe, once, and again only if none
 ///   went out within `keyframeRetry`.
 /// - For `holdOff` after the keyframe that ends a skip, only the ceiling starts another: the link gets the time to
-///   recover with the rate the bitrate controller just cut (`takeTrip`), instead of the keyframe starting the next skip.
+///   recover with the rate the bitrate controller just cut (`takeTrip`), instead of the keyframe starting the next
+///   skip.
 public struct BacklogPolicy: Sendable {
     /// Over this many seconds' worth of bytes the backlog starts to count against the link.
     public static let thresholdSeconds = 0.15
