@@ -954,6 +954,7 @@ final class ViewerLinkTests: XCTestCase {
         let delta = try await realDelta()
         let mark = LogMark()
         let sent = received.frames.count
+        let droppedBefore = share.droppedFramesTotal
         let congestion = 1_000_000
 
         // Over the threshold from here on. The first delta goes out, and the next update cuts the rate for the backlog.
@@ -980,7 +981,8 @@ final class ViewerLinkTests: XCTestCase {
         share.handleEncoded(delta)
         try await waitUntil("a keyframe follows the drain") { received.frames.count > sent + 2 }
         XCTAssertTrue(received.frames[sent + 2].isKey, "the first frame after the skip is a keyframe")
-        try await waitUntil("the strip counts the three skipped deltas") { share.snapshot.droppedLastSecond == 3 }
+        // Counted over the whole share, not the strip's last second, which a slow run can slide past the first skips.
+        XCTAssertEqual(share.droppedFramesTotal - droppedBefore, 3, "the strip counts the three skipped deltas")
         try await Task.sleep(for: .milliseconds(600))
         XCTAssertEqual(received.frames[(sent + 2)...].filter(\.isKey).count, 1, "one keyframe after the drain")
 
@@ -1991,7 +1993,8 @@ final class ViewerLinkTests: XCTestCase {
     /// Discovery that is denied or dies says so on the list instead of looking for Macs forever.
     @MainActor
     func testDiscoveryTroubleIsShown() async throws {
-        let viewer = ViewModel()
+        // The real browser is not started: its own `.ready` could land after the state handed in and clear the notice.
+        let viewer = ViewModel(startingDiscovery: false)
         viewer.browser.browserStateChanged(.waiting(.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))))
         try await waitUntil("the list shows that Local Network is off") { viewer.discoveryNotice?.contains("Local Network") == true }
         viewer.browser.browserStateChanged(.failed(.dns(DNSServiceErrorType(kDNSServiceErr_ServiceNotRunning))))

@@ -77,7 +77,11 @@ public final class ViewModel {
     /// encoder starts at 0), so frames lost with a drop never count.
     @ObservationIgnored private var lastSeq: UInt32?
 
-    public init() {
+    public convenience init() { self.init(startingDiscovery: true) }
+
+    /// `startingDiscovery` false leaves the Bonjour browser unstarted, so a test that hands it states (`browser`) is
+    /// not raced by the real browser's own (its `.ready` clearing a notice the test just set).
+    init(startingDiscovery: Bool) {
         ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }
@@ -108,7 +112,7 @@ public final class ViewModel {
                 if renderFailure != reason { renderFailure = reason }
             }
         }
-        browser.start()
+        if startingDiscovery { browser.start() }
         let peerUpdates = browser.peers, discovery = browser.states
         tasks = [
             // Weak on every update (Task 8 fix round 1): a whole-loop `guard let self` would keep the model, and
