@@ -58,8 +58,8 @@ private func stripedFrame(index: Int = 0, width: Int = 320, height: Int = 180) t
                          contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
 }
 
-/// Counts the decoded frames the viewer hands to its sink: with no view on screen each one is reported as hidden.
-/// The viewer's own handler still runs first.
+/// Counts the decoded frames that reach the viewer's sink: with no view on screen each one is reported as hidden, the
+/// ones a newer frame replaced on the way included (`FrameSink.dropped`). The viewer's own handler still runs first.
 @MainActor
 private final class ShownCounter {
     var count = 0
@@ -950,15 +950,16 @@ final class ViewerLinkTests: XCTestCase {
     /// The two-Mac test: the viewer's main thread fell behind the decoder (it presented 33 frames a second of 58), and
     /// every decoded frame waited for it in the main queue with its pixel buffer. Here the main thread is held for half
     /// a second while 29 frames reach the decoder at 58 fps: the decoder keeps up (nothing is skipped), and once the
-    /// main thread runs again the view gets one frame, the newest, and the 28 decoded before it count as dropped
-    /// without ever reaching the view.
+    /// main thread runs again the view, in a window on screen (`ShowingDisplay`), gets one frame, the newest, and the 28
+    /// decoded before it count as dropped without ever reaching the view.
     @MainActor
     func testAViewerWhoseMainThreadStallsGetsOnlyTheNewestDecodedFrame() async throws {
         let (share, _) = try await listeningShare()
         let frames = try await realFrames(30)
         let viewer = ViewModel()
-        let shown = ShownCounter(viewer.sink)
         let view = VideoView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let display = ShowingDisplay()
+        display.show(view)
         viewer.sink.view = view
         viewer.select(peer(for: share))
         viewer.code = share.code
@@ -966,7 +967,7 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
         viewer.handleIncoming(.videoConfig(try XCTUnwrap(frames[0].videoConfig)))
         viewer.handleIncoming(.videoFrame(frames[0].videoFrame))
-        try await waitUntil("the keyframe is shown") { shown.count == 1 }
+        try await waitUntil("the keyframe is shown") { display.drawn.count == 1 }
         let decoder = try XCTUnwrap(viewer.decoder)
         decoder.drainForTesting()
 
@@ -974,13 +975,44 @@ final class ViewerLinkTests: XCTestCase {
         let results = feedAtFiftyEightFpsWhileTheCallingThreadStalls(deltas, to: decoder)
         XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count), "the decoder never fell behind")
         try await waitUntil("the stalled main thread hands the view the newest frame") {
-            view.pacer.held?.captureHostTimeNs == frames.last?.captureHostTimeNs
+            display.drawn.last == frames.last?.captureHostTimeNs
         }
         await drain()
-        XCTAssertEqual(shown.count, 2, "one frame after the stall, not one per decoded frame")
+        XCTAssertEqual(display.drawn.count, 2, "one frame after the stall, not one per decoded frame")
         try await waitUntil("the frames the newest replaced count as dropped") {
             viewer.snapshot.droppedLastSecond == deltas.count - 1
         }
+        XCTAssertEqual(viewer.decodeFailures, 0)
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// The same stall with no view to show the picture (the window not on screen yet, or gone): the frames the newest
+    /// replaced are a pause, as every frame pushed then is (`.hidden`), not dropped frames. All 30 reach the sink as
+    /// hidden, and the dropped figure stays at 0.
+    @MainActor
+    func testDecodedFramesReplacedWhileTheViewerHasNoViewAreAPauseNotDrops() async throws {
+        let (share, _) = try await listeningShare()
+        let frames = try await realFrames(30)
+        let viewer = ViewModel()
+        let hidden = ShownCounter(viewer.sink)
+        XCTAssertNil(viewer.sink.view)
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(frames[0].videoConfig)))
+        viewer.handleIncoming(.videoFrame(frames[0].videoFrame))
+        try await waitUntil("the keyframe reaches the sink") { hidden.count == 1 }
+        let decoder = try XCTUnwrap(viewer.decoder)
+        decoder.drainForTesting()
+
+        let deltas = frames[1...].map(\.videoFrame)
+        let results = feedAtFiftyEightFpsWhileTheCallingThreadStalls(deltas, to: decoder)
+        XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count))
+        try await waitUntil("the newest frame and the 28 it replaced reach the sink as hidden") { hidden.count == frames.count }
+        try await Task.sleep(for: .milliseconds(300))   // the 250 ms loop publishes the figures
+        XCTAssertEqual(viewer.snapshot.droppedLastSecond, 0, "a pause, not dropped frames")
         XCTAssertEqual(viewer.decodeFailures, 0)
         viewer.disconnect()
         await share.stop()

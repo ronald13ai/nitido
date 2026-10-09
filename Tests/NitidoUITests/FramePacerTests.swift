@@ -1306,6 +1306,25 @@ final class VideoViewHeldFrameTests: XCTestCase {
         XCTAssertNil(view.pacer.held)
     }
 
+    /// A frame that never reached the view (`FrameSink.dropped`: a decoded picture a newer one replaced) is a dropped
+    /// frame only while the view can show frames. With no view, or a view outside any window, it is a pause, `.hidden`,
+    /// as a frame pushed then is (`FrameSink.push`, the pacer), so the dropped figure counts only frames a visible window
+    /// lost.
+    @MainActor
+    func testAFrameThatNeverReachedTheViewIsDroppedOnlyWhileTheViewCanShowFrames() throws {
+        let sink = FrameSink()
+        let drops = DropLog()
+        sink.onDropped = { drops.items.append($0) }
+        sink.dropped(.replaced)
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        sink.view = view
+        sink.dropped(.replaced)
+        let display = ShowingDisplay()
+        display.show(view)
+        sink.dropped(.replaced)
+        XCTAssertEqual(drops.items, [.hidden, .hidden, .replaced], "no view, a view in no window, a view on screen")
+    }
+
     /// Stop releases the frame the view keeps for redraws.
     @MainActor
     func testShareStopReleasesTheHeldFrame() async throws {

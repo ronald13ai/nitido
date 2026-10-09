@@ -480,8 +480,9 @@ public final class ShareModel {
     }
 
     /// A loop picture a newer one replaced before the main actor took it (`DecoderOutbox`): it was decoded, so the
-    /// failure count starts again, as for a picture shown, but it never reaches the screen, so it counts as dropped and
-    /// its encode start goes. A decoder let go already, or a loop turned off, says nothing.
+    /// failure count starts again, as for a picture shown, but it never reaches the screen, so it counts as dropped (a
+    /// pause while the view cannot show frames, `FrameSink.dropped`) and its encode start goes. A decoder let go
+    /// already, or a loop turned off, says nothing.
     private func loopReplaced(_ seq: UInt32, by d: VideoDecoder) {
         guard d === decoder else { return }
         decodeFailures = 0

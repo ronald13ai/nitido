@@ -125,6 +125,13 @@ final class FramePacer {
     /// Bumped whenever the scheduled divider redraw becomes moot, so it then does nothing.
     private var dividerRedrawToken: UInt64 = 0
 
+    /// The host can draw a frame now: its window can show the picture and the drawable has a size. A frame that arrives
+    /// while it cannot is kept and reported as a pause (`.hidden`), not a drop.
+    var canDraw: Bool {
+        guard let host else { return false }
+        return drawableSize.width > 0 && drawableSize.height > 0 && host.canShowFrames
+    }
+
     /// The drawable's pixel size. A real change draws the held frame again at the new size.
     var drawableSize: CGSize = .zero {
         didSet { if drawableSize != oldValue { redraw() } }
@@ -317,7 +324,7 @@ final class FramePacer {
 
     private func submit(_ frame: Frame, kind: Kind) {
         guard let host else { return }
-        guard drawableSize.width > 0, drawableSize.height > 0, host.canShowFrames else {
+        guard canDraw else {
             // Kept in `held`: drawn when the window shows again or gets its size.
             if kind == .live { host.frameDropped(.hidden) }
             return

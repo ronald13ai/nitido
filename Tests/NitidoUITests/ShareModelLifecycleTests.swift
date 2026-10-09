@@ -150,7 +150,8 @@ private func meanError(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double {
     return Double(total) / Double(width * height * 3)
 }
 
-/// Counts the frames the model hands to the view: a view outside a window reports each one as hidden.
+/// Counts the frames the model hands to the view: a view outside a window reports each one as hidden, and so does a
+/// decoded picture a newer one replaced on the way (`FrameSink.dropped`).
 @MainActor
 private final class PushCounter {
     var count = 0
@@ -903,14 +904,53 @@ final class ShareModelLifecycleTests: XCTestCase {
     }
 
     /// The codec loop hands its decoded pictures to the main thread as the viewer does: with the main thread held for
-    /// half a second while 29 frames decode at 58 fps, the decoder keeps up, and the view then gets one picture, the
-    /// newest, while the 28 decoded before it count as dropped without reaching it.
+    /// half a second while 29 frames decode at 58 fps, the decoder keeps up, and the view, in a window on screen
+    /// (`ShowingDisplay`), then gets one picture, the newest, while the 28 decoded before it count as dropped without
+    /// reaching it.
     @MainActor
     func testTheCodecLoopWhoseMainThreadStallsShowsOnlyTheNewestDecodedFrame() async throws {
         let journal = Journal()
         let factory = Factory(journal: journal, prefix: "m")
         let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
-        let pushed = PushCounter(model.sink)
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let display = ShowingDisplay()
+        display.show(view)
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        let frames = try await realFrames(30)
+        model.handleEncoded(frames[0])
+        try await waitUntil("the keyframe reaches the screen") { display.drawn.count == 1 }
+        let decoder = try XCTUnwrap(model.decoder)
+        decoder.drainForTesting()
+
+        let deltas = frames[1...].map(\.videoFrame)
+        let results = feedAtFiftyEightFpsWhileTheCallingThreadStalls(deltas, to: decoder)
+        XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count), "the decoder never fell behind")
+        try await waitUntil("the newest decoded frame reaches the view") {
+            display.drawn.last == frames.last?.captureHostTimeNs
+        }
+        await drain()
+        XCTAssertEqual(display.drawn.count, 2, "one picture after the stall, not one per decoded frame")
+        try await waitUntil("the pictures the newest replaced count as dropped", timeout: 2) {
+            model.snapshot.droppedLastSecond == deltas.count - 1
+        }
+        XCTAssertEqual(model.decodeFailures, 0)
+        await model.stop()
+    }
+
+    /// The same stall with the view outside any window (it cannot show frames: the Share window minimized or covered
+    /// is the same): the pictures the newest replaced are a pause, as every picture pushed then is (`.hidden`), not
+    /// dropped frames. All 30 reach the view as hidden, and the dropped figure stays at 0.
+    @MainActor
+    func testLoopPicturesReplacedWhileTheViewCannotShowThemAreAPauseNotDrops() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "h")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let hidden = PushCounter(model.sink)
         let view = VideoView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
         model.sink.view = view
         model.start(excludingWindowIDs: [])
@@ -920,21 +960,18 @@ final class ShareModelLifecycleTests: XCTestCase {
         model.loopback = true
         let frames = try await realFrames(30)
         model.handleEncoded(frames[0])
-        try await waitUntil("the keyframe reaches the screen") { pushed.count == 1 }
+        try await waitUntil("the keyframe reaches the view") { hidden.count == 1 }
         let decoder = try XCTUnwrap(model.decoder)
         decoder.drainForTesting()
 
         let deltas = frames[1...].map(\.videoFrame)
         let results = feedAtFiftyEightFpsWhileTheCallingThreadStalls(deltas, to: decoder)
-        XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count), "the decoder never fell behind")
-        try await waitUntil("the newest decoded frame reaches the view") {
-            view.pacer.held?.captureHostTimeNs == frames.last?.captureHostTimeNs
+        XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count))
+        try await waitUntil("the newest picture and the 28 it replaced reach the view as hidden", timeout: 2) {
+            hidden.count == frames.count
         }
-        await drain()
-        XCTAssertEqual(pushed.count, 2, "one picture after the stall, not one per decoded frame")
-        try await waitUntil("the pictures the newest replaced count as dropped", timeout: 2) {
-            model.snapshot.droppedLastSecond == deltas.count - 1
-        }
+        try await Task.sleep(for: .milliseconds(300))   // the 250 ms loop publishes the figures
+        XCTAssertEqual(model.snapshot.droppedLastSecond, 0, "a pause, not dropped frames")
         XCTAssertEqual(model.decodeFailures, 0)
         await model.stop()
     }

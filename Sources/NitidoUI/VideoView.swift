@@ -291,6 +291,10 @@ extension VideoView: FrameDrawing {
     }
 
     func frameDropped(_ drop: Drop) { dropped(drop) }
+
+    /// A frame that never reached the view (`FrameSink.dropped`): dropped while the pacer could draw it, a pause
+    /// (`.hidden`) while it could not, as the pacer counts a frame presented then.
+    func frameNeverReached(_ drop: Drop) { dropped(pacer.canDraw ? drop : .hidden) }
 }
 
 /// Lets a model push frames straight to the view, bypassing SwiftUI's update cycle. It also says which display the
@@ -322,13 +326,14 @@ public final class FrameSink {
     }
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }
-    /// A frame that never reached the view (`.replaced`): the view logs it with its own drops and tells `onDropped`;
-    /// with no view, `onDropped` hears it alone.
+    /// A frame that never reached the view (`.replaced`): the view logs it with its own drops and tells `onDropped`.
+    /// While there is no view, or the view cannot show frames (its window minimized, fully covered, hidden or not laid
+    /// out yet), it is a pause, `.hidden`, as a frame `push` hands over then is, not a dropped frame.
     public func dropped(_ drop: VideoView.Drop) {
-        guard let view else { onDropped?(drop); return }
+        guard let view else { onDropped?(.hidden); return }
         view.onPresented = onPresented
         view.onDropped = onDropped
-        view.frameDropped(drop)
+        view.frameNeverReached(drop)
     }
     /// Moves the divider of the comparison on screen. A still source sends no new frame to carry the move, so the
     /// view draws the frame it keeps again once a frame is overdue; nothing when that frame shows no comparison.
