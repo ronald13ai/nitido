@@ -26,7 +26,12 @@ public final class Link: @unchecked Sendable {
     /// Peer clock minus local clock, nanoseconds, from the pong with the lowest RTT in the last 10 s, so queueing
     /// behind video in one direction does not bias it (`ClockOffsetFilter`; nil until the first pong).
     public var clockOffsetNs: Int64? { lock.withLock { _clockOffsetNs } }
+    /// Bytes handed to the connection whose send has not completed yet.
     public var backlogBytes: Int { lock.withLock { backlog } }
+    /// The backlog without the keyframes still in it: what the sharer's dropping rule and bitrate controller judge (spec
+    /// section 8). A keyframe is one burst the encoder makes on purpose, so its own bytes are never taken for congestion
+    /// while it is being sent; the frames queued behind it are. Read under one lock, so it is never below zero.
+    public var backlogBytesExcludingKeyframes: Int { lock.withLock { backlog - keyframeBacklog } }
     /// True once the link has been ready, even after it ended: it proved the code.
     public var wasReady: Bool { lock.withLock { _wasReady } }
     /// True when the TLS handshake failed because the two sides derived different keys: with the pre-shared key, the
@@ -81,6 +86,8 @@ public final class Link: @unchecked Sendable {
     private var _clockOffsetNs: Int64?
     private var offsets = ClockOffsetFilter()
     private var backlog = 0
+    /// The part of `backlog` that is keyframes (`.videoFrame` with `isKey`).
+    private var keyframeBacklog = 0
     private var _wasReady = false
     private var _keyMismatch = false
     private var _byeReason: UInt8?
@@ -203,14 +210,16 @@ public final class Link: @unchecked Sendable {
 
     /// Sends `m` while the link is up: ready, and not being closed by this side. A link that is still connecting, or
     /// is closing or ended before the caller heard, drops it: a viewer's `LinkSession` reconnects, and the other side
-    /// asks then for what it needs (a keyframe). `backlogBytes` counts a message until its send completes.
+    /// asks then for what it needs (a keyframe). `backlogBytes` counts a message until its send completes, and
+    /// `backlogBytesExcludingKeyframes` leaves a keyframe out of it for that time.
     public func send(_ m: Message) {
         guard isUp else { log.debug("not sent (type \(m.typeCode)): the link is not up"); return }
         let data = Wire.encode(m)
-        lock.withLock { backlog += data.count }
+        let keyframe = if case .videoFrame(let f) = m { f.isKey } else { false }
+        lock.withLock { backlog += data.count; if keyframe { keyframeBacklog += data.count } }
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
-            lock.withLock { backlog -= data.count }
+            lock.withLock { backlog -= data.count; if keyframe { keyframeBacklog -= data.count } }
             guard let error else { return }
             // Cut short by the link ending (a bye, `close()`, a failure logged already): no failure of its own.
             if isUp { log.error("send: \(error.localizedDescription, privacy: .public)") }
@@ -253,8 +262,11 @@ public final class Link: @unchecked Sendable {
     func muteForTesting() { queue.async { [self] in muted = true } }
     /// Test only: what Network.framework says the connection is doing.
     var connectionStateForTesting: NWConnection.State { connection.state }
-    /// Test only: counts bytes as waiting to be sent (a negative count takes them back), as a congested network would.
-    func addBacklogForTesting(_ bytes: Int) { lock.withLock { backlog += bytes } }
+    /// Test only: counts bytes as waiting to be sent (a negative count takes them back), as a congested network would;
+    /// with `keyframe`, as a keyframe's bytes.
+    func addBacklogForTesting(_ bytes: Int, keyframe: Bool = false) {
+        lock.withLock { backlog += bytes; if keyframe { keyframeBacklog += bytes } }
+    }
 
     /// The TLS statuses that mean the other side holds another key (RFC 5489 PSK: the Finished message does not
     /// decrypt). The side that fails to decrypt reports its own status, the other one the peer's alert.

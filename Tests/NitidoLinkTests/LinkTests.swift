@@ -85,6 +85,47 @@ final class LinkTests: XCTestCase {
     }
 
     /// A `bye` carries its reason (`ByeReason`) to the other side, which ends as `.cancelled`, not as a failure.
+    /// The sharer's dropping rule leaves a keyframe out of the backlog while it is being sent, and counts every other
+    /// message, the frames queued behind it included (`backlogBytesExcludingKeyframes`). Both figures go back to zero
+    /// once the sends complete.
+    func testKeyframesInTheBacklogAreCountedApartUntilTheyAreSent() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let (sharer, viewer) = try await readyPair(advertiser, port: port)
+        func drained() async -> Bool {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while sharer.backlogBytes > 0 || sharer.backlogBytesExcludingKeyframes != 0 {
+                guard ContinuousClock.now < deadline else { return false }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            return true
+        }
+        let helloOut = await drained()
+        XCTAssertTrue(helloOut, "the hello was not sent within 5 s")
+
+        // Eight megabytes of keyframes: they take longer to send than this thread takes to read the figures.
+        for i in 0..<20 {
+            sharer.send(.videoFrame(VideoFrame(seq: UInt32(i), captureHostTimeNs: 0, isKey: true, data: Data(count: 400_000))))
+        }
+        XCTAssertGreaterThan(sharer.backlogBytes, 0, "the keyframes wait to be sent")
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 0, "only keyframes wait")
+        let delta = Message.videoFrame(VideoFrame(seq: 20, captureHostTimeNs: 0, isKey: false, data: Data(count: 1_000)))
+        sharer.send(delta)
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, Wire.encode(delta).count, "the delta behind them counts")
+
+        let allOut = await drained()
+        XCTAssertTrue(allOut, "the frames were not sent within 5 s")
+        XCTAssertEqual(sharer.backlogBytes, 0)
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 0)
+        sharer.addBacklogForTesting(150_000, keyframe: true)
+        sharer.addBacklogForTesting(40_000)
+        XCTAssertEqual(sharer.backlogBytes, 190_000)
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 40_000, "the test seam counts a keyframe's bytes apart too")
+        sharer.addBacklogForTesting(-150_000, keyframe: true)
+        sharer.addBacklogForTesting(-40_000)
+        viewer.close(); sharer.close(); advertiser.stop()
+    }
+
     func testAByeCarriesItsReason() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
