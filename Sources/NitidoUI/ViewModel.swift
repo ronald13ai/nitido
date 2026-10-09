@@ -100,7 +100,7 @@ public final class ViewModel {
             switch drop {
             case .hidden:
                 return
-            case .backlog, .noDrawable, .notPresented:
+            case .backlog, .noDrawable, .notPresented, .replaced:
                 telemetry.recordDrop(at: CACurrentMediaTime())
             case .failed(let reason):
                 telemetry.recordDrop(at: CACurrentMediaTime())
@@ -293,17 +293,12 @@ public final class ViewModel {
                 decoder?.invalidate()
                 codecNotice = nil
                 let d = try VideoDecoder(config: cfg)
-                // The decoder works on its own queue. Pictures and failures hop to the main actor through the main
-                // queue, which keeps them in decode order (a task each would not).
-                d.onFrame = { [weak self, weak d] frame in
-                    DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.decoded(frame, by: d) } } }
-                }
-                d.onDecodeFailure = { [weak self, weak d] seq, error in
-                    DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.decodeFailed(d, seq: seq, error: error) } } }
-                }
-                d.onSuperseded = { [weak self, weak d] _ in
-                    DispatchQueue.main.async { MainActor.assumeIsolated { if let d { self?.superseded(by: d) } } }
-                }
+                // The decoder works on its own queue. Its pictures, failures and superseded frames reach the main actor
+                // in decode order through an outbox where only the newest picture waits (`DecoderOutbox`).
+                DecoderOutbox { [weak self, weak d] output in
+                    guard let self, let d else { return }
+                    decoderOutput(output, from: d)
+                }.attach(to: d)
                 // A RealTime setting rejected inside `init` arrives the moment this is set: hop to the main actor.
                 d.onError = { [weak self] err in Task { @MainActor in self?.handleDecoderError(err) } }
                 decoder = d; decoderConfig = cfg; lastSeq = nil
@@ -376,12 +371,31 @@ public final class ViewModel {
         if keyframeAskedAt.map({ now - $0 >= 1 }) ?? true { askForKeyframe() }
     }
 
+    /// What the decoder handed over (`DecoderOutbox`), in decode order.
+    private func decoderOutput(_ output: DecoderOutbox.Output, from d: VideoDecoder) {
+        switch output {
+        case .frame(let frame): decoded(frame, by: d)
+        case .replaced: replaced(by: d)
+        case .decodeFailure(let seq, let error): decodeFailed(d, seq: seq, error: error)
+        case .superseded: superseded(by: d)
+        }
+    }
+
     /// A picture from the decoder, in decode order. A decoder let go since (a new setup, every third failure, the link
     /// ended) shows nothing more.
     private func decoded(_ frame: DecodedFrame, by d: VideoDecoder) {
         guard d === decoder else { return }
         decodeFailures = 0
         sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
+    }
+
+    /// A picture a newer one replaced before the main actor took it (`DecoderOutbox`): it was decoded, so the failure
+    /// count starts again, as for a picture shown, but it never reaches the screen, so it counts as dropped. A decoder
+    /// let go already says nothing about the current one.
+    private func replaced(by d: VideoDecoder) {
+        guard d === decoder else { return }
+        decodeFailures = 0
+        sink.dropped(.replaced)
     }
 
     /// A frame a later keyframe superseded before the decoder reached it (`VideoDecoder.onSuperseded`): it never

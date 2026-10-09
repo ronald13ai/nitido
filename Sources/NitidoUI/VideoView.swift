@@ -20,6 +20,9 @@ public final class VideoView: NSView {
         case backlog
         /// `nextDrawable()` returned nil after its timeout.
         case noDrawable
+        /// A newer decoded frame replaced it before the main thread took it from the decoder (`DecoderOutbox`), so it
+        /// never reached the view.
+        case replaced
         /// The frame was rendered but its drawable was discarded instead of shown.
         case notPresented
         /// Metal or CoreImage failed to render the frame.
@@ -155,6 +158,8 @@ public final class VideoView: NSView {
                 log.error("Dropped \(count, privacy: .public) frames: replaced by a newer frame while waiting for a drawable")
             case .noDrawable:
                 log.error("Dropped \(count, privacy: .public) frames: no drawable became available")
+            case .replaced:
+                log.error("Dropped \(count, privacy: .public) frames: a newer decoded frame replaced them before the main thread took them")
             case .notPresented:
                 log.error("Dropped \(count, privacy: .public) frames: rendered but never presented")
             case .failed(let reason):
@@ -304,6 +309,14 @@ public final class FrameSink {
     }
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }
+    /// A frame that never reached the view (`.replaced`): the view logs it with its own drops and tells `onDropped`;
+    /// with no view, `onDropped` hears it alone.
+    public func dropped(_ drop: VideoView.Drop) {
+        guard let view else { onDropped?(drop); return }
+        view.onPresented = onPresented
+        view.onDropped = onDropped
+        view.frameDropped(drop)
+    }
     /// Moves the divider of the comparison on screen. A still source sends no new frame to carry the move, so the
     /// view draws the frame it keeps again once a frame is overdue; nothing when that frame shows no comparison.
     public func moveDivider(to divider: CGFloat) { view?.moveDivider(to: divider) }

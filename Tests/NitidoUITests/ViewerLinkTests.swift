@@ -101,6 +101,50 @@ private func realDelta() async throws -> EncodedFrame {
     throw XCTSkip("the hardware encoder emitted no delta frame within 5 s")
 }
 
+/// `count` real frames from the hardware encoder, in order: a keyframe, then deltas, each stamped with its index.
+private func realFrames(_ count: Int) async throws -> [EncodedFrame] {
+    let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+    defer { encoder.invalidate() }
+    let (frames, out) = AsyncStream<EncodedFrame>.makeStream()
+    encoder.onFrame = { out.yield($0) }
+    Task { try? await Task.sleep(for: .seconds(10)); out.finish() }
+    var next = frames.makeAsyncIterator()
+    var encoded: [EncodedFrame] = []
+    for index in 0..<count {
+        XCTAssertTrue(encoder.encode(try stripedFrame(index: index).pixelBuffer, captureHostTimeNs: UInt64(index)))
+        guard let frame = await next.next() else { throw XCTSkip("the hardware encoder emitted no frame within 10 s") }
+        encoded.append(frame)
+    }
+    return encoded
+}
+
+/// What `VideoDecoder.submit` answered, from the thread that fed it.
+private final class SubmitResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [VideoDecoder.SubmitResult] = []
+    func append(_ result: VideoDecoder.SubmitResult) { lock.withLock { results.append(result) } }
+    var all: [VideoDecoder.SubmitResult] { lock.withLock { results } }
+}
+
+/// Feeds `frames` to `decoder` at 58 fps from another thread while the calling thread (the main thread, in a test) is
+/// held, as a stall would hold it, and lets it go once every frame has been submitted and decoded. Returns what
+/// `submit` answered for each.
+func feedAtFiftyEightFpsWhileTheCallingThreadStalls(_ frames: [VideoFrame],
+                                                     to decoder: VideoDecoder) -> [VideoDecoder.SubmitResult] {
+    let results = SubmitResults()
+    let fed = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInteractive).async {
+        for frame in frames {
+            results.append(decoder.submit(frame))
+            usleep(17_000)
+        }
+        fed.signal()
+    }
+    fed.wait()
+    decoder.drainForTesting()
+    return results.all
+}
+
 /// The video frames a plain viewer link received, in order.
 @MainActor
 private final class ReceivedFrames { var frames: [VideoFrame] = [] }
@@ -874,6 +918,45 @@ final class ViewerLinkTests: XCTestCase {
         let skips = try mark.entries("view").filter { $0.composedMessage.contains("keyframe") && $0.composedMessage.contains("behind") }
         XCTAssertEqual(skips.map(\.composedMessage), ["the video decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
         XCTAssertEqual(skips.first?.level, .info)
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// The two-Mac test: the viewer's main thread fell behind the decoder (it presented 33 frames a second of 58), and
+    /// every decoded frame waited for it in the main queue with its pixel buffer. Here the main thread is held for half
+    /// a second while 29 frames reach the decoder at 58 fps: the decoder keeps up (nothing is skipped), and once the
+    /// main thread runs again the view gets one frame, the newest, and the 28 decoded before it count as dropped
+    /// without ever reaching the view.
+    @MainActor
+    func testAViewerWhoseMainThreadStallsGetsOnlyTheNewestDecodedFrame() async throws {
+        let (share, _) = try await listeningShare()
+        let frames = try await realFrames(30)
+        let viewer = ViewModel()
+        let shown = ShownCounter(viewer.sink)
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        viewer.sink.view = view
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        viewer.handleIncoming(.videoConfig(try XCTUnwrap(frames[0].videoConfig)))
+        viewer.handleIncoming(.videoFrame(frames[0].videoFrame))
+        try await waitUntil("the keyframe is shown") { shown.count == 1 }
+        let decoder = try XCTUnwrap(viewer.decoder)
+        decoder.drainForTesting()
+
+        let deltas = frames[1...].map(\.videoFrame)
+        let results = feedAtFiftyEightFpsWhileTheCallingThreadStalls(deltas, to: decoder)
+        XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count), "the decoder never fell behind")
+        try await waitUntil("the stalled main thread hands the view the newest frame") {
+            view.pacer.held?.captureHostTimeNs == frames.last?.captureHostTimeNs
+        }
+        await drain()
+        XCTAssertEqual(shown.count, 2, "one frame after the stall, not one per decoded frame")
+        try await waitUntil("the frames the newest replaced count as dropped") {
+            viewer.snapshot.droppedLastSecond == deltas.count - 1
+        }
+        XCTAssertEqual(viewer.decodeFailures, 0)
         viewer.disconnect()
         await share.stop()
     }

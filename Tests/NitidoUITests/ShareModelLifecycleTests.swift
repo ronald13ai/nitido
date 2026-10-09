@@ -173,6 +173,24 @@ private func realKeyframe() async throws -> EncodedFrame {
     throw XCTSkip("the hardware encoder emitted no keyframe within 5 s")
 }
 
+/// `count` frames from the hardware encoder, in order: a keyframe, then deltas, each stamped with its index.
+@MainActor
+private func realFrames(_ count: Int) async throws -> [EncodedFrame] {
+    let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
+    defer { encoder.invalidate() }
+    let (frames, out) = AsyncStream<EncodedFrame>.makeStream()
+    encoder.onFrame = { out.yield($0) }
+    Task { try? await Task.sleep(for: .seconds(10)); out.finish() }
+    var next = frames.makeAsyncIterator()
+    var encoded: [EncodedFrame] = []
+    for index in 0..<count {
+        XCTAssertTrue(encoder.encode(try capturedFrame(index: index).pixelBuffer, captureHostTimeNs: UInt64(index)))
+        guard let frame = await next.next() else { throw XCTSkip("the hardware encoder emitted no frame within 10 s") }
+        encoded.append(frame)
+    }
+    return encoded
+}
+
 /// The capture times of the frames an encoder emitted, once a test has taken its outputs over.
 @MainActor
 private final class EncodedTimes {
@@ -870,6 +888,43 @@ final class ShareModelLifecycleTests: XCTestCase {
         XCTAssertEqual(skips.map(\.composedMessage),
                        ["the codec loop's decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
         XCTAssertEqual(skips.first?.level, .info)
+        await model.stop()
+    }
+
+    /// The codec loop hands its decoded pictures to the main thread as the viewer does: with the main thread held for
+    /// half a second while 29 frames decode at 58 fps, the decoder keeps up, and the view then gets one picture, the
+    /// newest, while the 28 decoded before it count as dropped without reaching it.
+    @MainActor
+    func testTheCodecLoopWhoseMainThreadStallsShowsOnlyTheNewestDecodedFrame() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "m")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let pushed = PushCounter(model.sink)
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        factory.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        let frames = try await realFrames(30)
+        model.handleEncoded(frames[0])
+        try await waitUntil("the keyframe reaches the screen") { pushed.count == 1 }
+        let decoder = try XCTUnwrap(model.decoder)
+        decoder.drainForTesting()
+
+        let deltas = frames[1...].map(\.videoFrame)
+        let results = feedAtFiftyEightFpsWhileTheCallingThreadStalls(deltas, to: decoder)
+        XCTAssertEqual(results, Array(repeating: .queued, count: deltas.count), "the decoder never fell behind")
+        try await waitUntil("the newest decoded frame reaches the view") {
+            view.pacer.held?.captureHostTimeNs == frames.last?.captureHostTimeNs
+        }
+        await drain()
+        XCTAssertEqual(pushed.count, 2, "one picture after the stall, not one per decoded frame")
+        try await waitUntil("the pictures the newest replaced count as dropped", timeout: 2) {
+            model.snapshot.droppedLastSecond == deltas.count - 1
+        }
+        XCTAssertEqual(model.decodeFailures, 0)
         await model.stop()
     }
 
