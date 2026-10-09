@@ -149,9 +149,14 @@ func feedAtFiftyEightFpsWhileTheCallingThreadStalls(_ frames: [VideoFrame],
     return results.all
 }
 
-/// The video frames a plain viewer link received, in order.
+/// The video frames a plain viewer link received, in order, and when each came (`CACurrentMediaTime`).
 @MainActor
-private final class ReceivedFrames { var frames: [VideoFrame] = [] }
+private final class ReceivedFrames {
+    var frames: [VideoFrame] = []
+    var times: [CFTimeInterval] = []
+    /// When each keyframe came, in order.
+    var keyframeTimes: [CFTimeInterval] { zip(frames, times).filter { $0.0.isKey }.map(\.1) }
+}
 
 /// Every message a plain viewer link received, in order.
 @MainActor
@@ -194,14 +199,19 @@ final class ViewerLinkTests: XCTestCase {
     }
 
     /// A plain viewer link paired with `share`, the video frames it receives and the task that reads them, once the
-    /// keyframe it paired with has come in.
+    /// keyframe it paired with has come in. `host` is the loopback address it connects to: the sharer tells viewers
+    /// apart by the address they come from.
     @MainActor
-    private func rawViewer(of share: ShareModel) async throws -> (link: NitidoLink.Link, received: ReceivedFrames, reader: Task<Void, Never>) {
+    private func rawViewer(of share: ShareModel, host: NWEndpoint.Host = "127.0.0.1")
+        async throws -> (link: NitidoLink.Link, received: ReceivedFrames, reader: Task<Void, Never>) {
         let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
-        let viewer = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
+        let endpoint = NWEndpoint.hostPort(host: host, port: NWEndpoint.Port(rawValue: share.listeningPort!)!)
+        let viewer = NitidoLink.Link.connect(to: endpoint, code: share.code, sharerName: share.name, hello: hello)
         let received = ReceivedFrames()
         let reader = Task { @MainActor in
-            for await m in viewer.messages { if case .videoFrame(let f) = m { received.frames.append(f) } }
+            for await m in viewer.messages {
+                if case .videoFrame(let f) = m { received.frames.append(f); received.times.append(CACurrentMediaTime()) }
+            }
         }
         do {
             try await waitUntil("the viewer gets the keyframe it paired with") { received.frames.first?.isKey == true }
@@ -1084,6 +1094,108 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(share.frameBytes, rateBefore, "the rate is not cut for the keyframe on its way")
         link.addBacklogForTesting(-1_000_000, keyframe: true)
         viewer.close()
+        await share.stop()
+    }
+
+    /// Spec section 8 and the evening two-Mac test of 2026-10-09: a viewer that asks for a keyframe again and again
+    /// (its decoder falling behind under a storm of them) gets at most one forced keyframe per half second, and its
+    /// last ask is still answered. Asks every 100 ms for 1.2 s over a still source, where each forced keyframe is a frame
+    /// encoded again: before, every ask sent one.
+    @MainActor
+    func testAViewerThatKeepsAskingGetsAtMostOneKeyframePerHalfSecond() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let paired = received.keyframeTimes.count
+
+        let started = CACurrentMediaTime()
+        var lastAsk = started
+        for _ in 0..<12 {
+            viewer.send(.keyframeRequest)
+            lastAsk = CACurrentMediaTime()
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try await waitUntil("a keyframe answers the last ask") { (received.keyframeTimes.last ?? 0) > lastAsk }
+        try await Task.sleep(for: .milliseconds(700))    // anything more the asks set off is out by now
+        let times = received.keyframeTimes
+        let answered = times.count - paired
+        let seen = "\(times.map { $0 - started })"
+        XCTAssertGreaterThanOrEqual(answered, 2, "the asks are answered: \(seen)")
+        XCTAssertLessThanOrEqual(answered, 4, "at most one per half second over 1.2 s and the wait after: \(seen)")
+        for (a, b) in zip(times, times.dropFirst()) { XCTAssertGreaterThan(b - a, 0.4, "half a second apart: \(seen)") }
+        viewer.close()
+        await share.stop()
+    }
+
+    /// The sharer's own forced keyframes share the viewer's limit: the keyframe after a drain, asked for just after the
+    /// one the viewer paired with, goes out half a second after that one, not at once.
+    @MainActor
+    func testTheKeyframeAfterADrainWaitsHalfASecondAfterTheLastForcedOne() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let link = try XCTUnwrap(share.link)
+        let paired = try XCTUnwrap(received.keyframeTimes.first)
+        let delta = EncodedFrame(seq: 50, captureHostTimeNs: 1, isKey: false, data: Data(count: 1_000), parameterSets: [],
+                                 codec: .hevc, width: 320, height: 180)
+
+        // Over a second's worth at 2 Mbps: the delta is skipped at once. Drained: the keyframe is asked for.
+        link.addBacklogForTesting(400_000)
+        share.handleEncoded(delta)
+        link.addBacklogForTesting(-400_000)
+        share.handleEncoded(delta)
+        try await waitUntil("the keyframe follows the drain") { received.keyframeTimes.count >= 2 }
+        let afterDrain = received.keyframeTimes[1]
+        XCTAssertGreaterThan(afterDrain - paired, 0.4, "half a second after the keyframe the viewer paired with")
+        viewer.close()
+        await share.stop()
+    }
+
+    /// A new viewer's first keyframe is never held, while a viewer that comes back (the same address) shares the limit
+    /// of its link before. Over a still source: a viewer pairs, pairs again at once, then another viewer (another
+    /// address) takes over just after.
+    @MainActor
+    func testANewViewersFirstKeyframeIsAtOnceAndAReturningOneSharesTheLimit() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (first, firstReceived, firstReader) = try await rawViewer(of: share)
+        defer { firstReader.cancel() }
+        let firstKeyframe = try XCTUnwrap(firstReceived.keyframeTimes.first)
+
+        /// Pairs a viewer from `host` and returns when the sharer took it over and when its first keyframe came.
+        func pair(from host: NWEndpoint.Host) async throws
+            -> (link: NitidoLink.Link, tookOver: CFTimeInterval, keyframe: CFTimeInterval) {
+            let count = share.connectionCount
+            let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+            let endpoint = NWEndpoint.hostPort(host: host, port: NWEndpoint.Port(rawValue: share.listeningPort!)!)
+            let link = NitidoLink.Link.connect(to: endpoint, code: share.code, sharerName: share.name, hello: hello)
+            let received = ReceivedFrames()
+            let reader = Task { @MainActor in
+                for await m in link.messages {
+                    if case .videoFrame(let f) = m { received.frames.append(f); received.times.append(CACurrentMediaTime()) }
+                }
+            }
+            defer { reader.cancel() }
+            let deadline = CACurrentMediaTime() + 10
+            while share.connectionCount == count {
+                guard CACurrentMediaTime() < deadline else { XCTFail("the sharer never took the viewer over"); throw TimedOut() }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            let tookOver = CACurrentMediaTime()
+            try await waitUntil("the viewer from \(host) gets its keyframe") { !received.keyframeTimes.isEmpty }
+            return (link, tookOver, received.keyframeTimes[0])
+        }
+
+        let again = try await pair(from: "127.0.0.1")
+        XCTAssertGreaterThan(again.keyframe - firstKeyframe, 0.4, "the same viewer back at once waits out the half second")
+        let other = try await pair(from: "::1")
+        XCTAssertLessThan(other.keyframe - other.tookOver, 0.3, "another viewer's first keyframe goes at once")
+        first.close(); again.link.close(); other.link.close()
         await share.stop()
     }
 

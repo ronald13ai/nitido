@@ -138,6 +138,16 @@ public final class ShareModel {
     /// A viewer just took over (`linkStateChanged`): it has none of the frames the deltas still in the encoder refer to,
     /// so none goes out to it before the keyframe the takeover asked for (`handleEncoded`).
     @ObservationIgnored private var viewerNeedsKeyframe = false
+    /// The keyframes forced for the viewer, its own asks and the sharer's (a takeover, the drain after a skip): at most
+    /// one per half second (`KeyframeLimiter`, `forceKeyframe`). A new viewer starts it afresh, so its first keyframe
+    /// goes at once; a viewer that comes back (the same address) keeps it.
+    @ObservationIgnored private var forcedKeyframes = KeyframeLimiter()
+    /// The address the viewer `forcedKeyframes` counts for came from (`Link.remoteHost`).
+    @ObservationIgnored private var forcedKeyframesViewer: String?
+    /// Bumped whenever `forcedKeyframes` starts afresh, so a keyframe due for an earlier viewer is not forced.
+    @ObservationIgnored private var forcedKeyframesToken: UInt64 = 0
+    /// When a keyframe last went out to the viewer (`CACurrentMediaTime`): a forced one due after it is not needed.
+    @ObservationIgnored private var keyframeSentAt: CFTimeInterval?
     /// Wrong codes over the whole share, counted per attempt; three rotate it (`rotateCode`).
     private var handshakeFailures = HandshakeFailures()
     /// Wrong codes since the code last changed. Internal for tests.
@@ -321,6 +331,7 @@ public final class ShareModel {
         let byeSent = link.map { viewer in Task { await viewer.closeAndWait() } }
         link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
         viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
+        forgetForcedKeyframes()
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         listeningPort = nil; networkNotice = nil; advertisedName = nil
         loopback = false
@@ -434,6 +445,7 @@ public final class ShareModel {
                 // A keyframe always goes out: it ends a skip (and starts the rule's hold-off) or a takeover's wait.
                 backlogPolicy.keyframeSent(now: at)
                 viewerNeedsKeyframe = false
+                keyframeSentAt = now
                 send(f, on: link, at: now)
             } else {
                 switch backlogPolicy.delta(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: at) {
@@ -549,16 +561,16 @@ public final class ShareModel {
     }
 
     /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode
-    /// again (`BacklogPolicy.keyframeDue`). `sendKeyframe` covers a still source too (it encodes the newest frame
-    /// again), so the viewer never keeps a damaged or stale picture until the content moves. Asks again only if no
-    /// keyframe went out within a second. With no encoder there is nothing to ask: the next frame makes one, and a
-    /// fresh encoder starts with a keyframe.
+    /// again (`BacklogPolicy.keyframeDue`), within the viewer's half-second limit (`forceKeyframe`). `sendKeyframe`
+    /// covers a still source too (it encodes the newest frame again), so the viewer never keeps a damaged or stale
+    /// picture until the content moves. Asks again only if no keyframe went out within a second. With no encoder there
+    /// is nothing to ask: the next frame makes one, and a fresh encoder starts with a keyframe.
     private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
         guard encoder != nil, backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }
         let skipped = backlogPolicy.skipped
         let lasted = backlogPolicy.trippedAt.map { (now - $0) * 1000 } ?? 0
         log.info("the send backlog drained after \(skipped, privacy: .public) skipped frames in \(lasted, format: .fixed(precision: 0), privacy: .public) ms; sending a keyframe")
-        sendKeyframe()
+        forceKeyframe()
     }
 
     /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed,
@@ -791,6 +803,7 @@ public final class ShareModel {
         linkTasks.forEach { $0.cancel() }; linkTasks = []
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
+        forgetForcedKeyframes()
         advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil; advertisedName = nil
     }
 
@@ -839,7 +852,10 @@ public final class ShareModel {
             // A skip, a hold-off or a time over the threshold was the last viewer's link's.
             backlogPolicy = BacklogPolicy()
             viewerNeedsKeyframe = true
-            sendKeyframe()
+            // A new viewer's first keyframe goes at once; one that comes back shares the limit of its link before.
+            let host = l.remoteHost
+            if host == nil || host != forcedKeyframesViewer { forgetForcedKeyframes(); forcedKeyframesViewer = host }
+            forceKeyframe()
         case .failed(let m):
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
                 // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was. A link that was the
@@ -903,15 +919,43 @@ public final class ShareModel {
         case .undo(let id): ink.undoRemote(id: id)
         case .clear: ink.clearRemote()
         case .cursor(let c): ink.remoteCursor(c, name: viewerName ?? "Viewer")
-        case .keyframeRequest: sendKeyframe()
+        case .keyframeRequest: forceKeyframe()
         default: break
         }
+    }
+
+    /// A keyframe for the viewer, at most one per half second (`KeyframeLimiter`): at once, or when the half second
+    /// since the last one forced is up, unless a keyframe has gone out by then. The viewer's asks (`keyframeRequest`)
+    /// and the sharer's own (a takeover, the drain after a skip) all come here. A storm of them (the evening two-Mac
+    /// test of 2026-10-09) filled the link the drain was meant to clear and made VideoToolbox drop frames.
+    private func forceKeyframe() {
+        let now = CACurrentMediaTime()
+        switch forcedKeyframes.ask(now: now) {
+        case .now:
+            sendKeyframe()
+        case .at(let due):
+            let token = forcedKeyframesToken
+            Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(max(0, due - now))) } catch { return }
+                guard let self, token == forcedKeyframesToken else { return }
+                if forcedKeyframes.due(now: CACurrentMediaTime(), lastKeyframeAt: keyframeSentAt) { sendKeyframe() }
+            }
+        case .folded:
+            break
+        }
+    }
+
+    /// The viewer the forced keyframes were limited for is gone: the next one starts afresh.
+    private func forgetForcedKeyframes() {
+        forcedKeyframes = KeyframeLimiter(); forcedKeyframesViewer = nil
+        forcedKeyframesToken &+= 1; keyframeSentAt = nil
     }
 
     /// The next frame the viewer gets is a keyframe. A still source sends no next frame (`CaptureSession` forwards only
     /// changed ones), so a viewer that just connected, or lost its decoder, would see nothing until the content moved:
     /// when the encoder takes no frame within `stillAfter` (a frame it turned away at its cap does not count), the
     /// newest one is encoded again (a fresh encoder's first frame is a keyframe, a running one's is after the request).
+    /// Forced keyframes come through `forceKeyframe`, which keeps them half a second apart.
     private func sendKeyframe() {
         encoder?.requestKeyframe()
         let requestedAt = CACurrentMediaTime()
