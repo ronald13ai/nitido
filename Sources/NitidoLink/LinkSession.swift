@@ -14,8 +14,9 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 ///
 /// Every attempt goes through the peer's routes in order (`Peer.routes`): an address the sharer published, the next
 /// one, then the Bonjour service, all within `Link.defaultConnectTimeout` (8 s). A published address that does not
-/// reach the sharer (refused, no route, no answer within `unreachableAfter`) hands over to the next route at once;
-/// anything else it says (a failed handshake above all) is the attempt's answer.
+/// reach the sharer (refused, no route, no answer within `unreachableAfter`: `Link.noPathErrors`) hands over to the next
+/// route at once; anything else it says (a failed handshake above all, or a connection it took and reset) is the
+/// attempt's answer.
 public final class LinkSession: @unchecked Sendable {
     public enum State: Sendable, Equatable {
         case connecting(attempt: Int)

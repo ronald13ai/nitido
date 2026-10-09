@@ -35,8 +35,8 @@ public final class Link: @unchecked Sendable {
     /// The reason the other side gave in its `bye` (`ByeReason`), once one came. Set before `states` reports `.cancelled`.
     public var byeReason: UInt8? { lock.withLock { _byeReason } }
     /// True when a link made with `unreachableAfter` failed because its address does not reach the sharer: refused, no
-    /// route, or no answer at all in that time. A viewer's session then tries its next route (`LinkSession`). Set before
-    /// `states` reports the failure.
+    /// route, or no answer at all in that time (`noPathErrors`). A viewer's session then tries its next route
+    /// (`LinkSession`); a connection the address took and then cut is not that. Set before `states` reports the failure.
     public var unreachable: Bool { lock.withLock { _unreachable } }
     /// The other side's address, without its port or an interface: on the sharer, where a connection came from, which is
     /// what failed handshakes are counted by. Nil when the endpoint is not an address.
@@ -67,9 +67,9 @@ public final class Link: @unchecked Sendable {
     /// When `connectTimeout` runs out (`CACurrentMediaTime`): a viewer's session hands each route what is left of its
     /// attempt (`LinkSession`), and a wait is never given longer than that.
     private let connectDeadline: Double
-    /// A viewer's link to an address the sharer published: a POSIX failure (refused, no route) or no answer within this
-    /// many seconds fails it at once as `unreachable`, so the session goes on to its next route. Nil on the last route
-    /// and on the sharer, where a wait gets `waitingTimeout`.
+    /// A viewer's link to an address the sharer published: a failure that says there is no path (`noPathErrors`:
+    /// refused, no route) or no answer within this many seconds fails it at once as `unreachable`, so the session goes
+    /// on to its next route. Nil on the last route and on the sharer, where a wait gets `waitingTimeout`.
     private let unreachableAfter: Double?
     private let queue = DispatchQueue(label: "ai.ronar.nitido.link", qos: .userInteractive)
 
@@ -160,9 +160,18 @@ public final class Link: @unchecked Sendable {
                     noteKeyMismatch(e)
                     finish(.failed(e.localizedDescription)); connection.cancel()
                 } else if unreachableAfter != nil, case .posix = e {
-                    // An address the sharer published that does not take the connection (refused, no route): the
-                    // session has another route, so this one ends now rather than after `waitingTimeout`.
-                    giveUpUnreachable("Could not reach \(connection.endpoint): \(e.plainDescription)")
+                    if Self.hasNoPath(e) {
+                        // An address the sharer published that does not take the connection (refused, no route): the
+                        // session has another route, so this one ends now rather than after `waitingTimeout`.
+                        giveUpUnreachable("Could not reach \(connection.endpoint): \(e.plainDescription)")
+                    } else {
+                        // The address took the connection and cut it (a reset, an abort): the sharer was reached and
+                        // may have failed a handshake on the keys already, so another route would make a second one
+                        // there, another wrong code for one typed. The attempt ends with the reason, now, rather than
+                        // after Network.framework tried this address again.
+                        log.error("waiting: \(e.localizedDescription, privacy: .public)")
+                        giveUpConnecting("Could not reach the other Mac: \(e.plainDescription)")
+                    }
                 } else {
                     // Refused, unreachable or Local Network denied: Network.framework retries on its own, which
                     // can last forever (a stale Bonjour peer). Give it `waitingTimeout`, or what is left of the connect
@@ -259,9 +268,21 @@ public final class Link: @unchecked Sendable {
         lock.withLock { _keyMismatch = true }
     }
 
-    /// On `queue`, before the failure is reported: remembers that a published address did not take the connection.
+    /// The POSIX errors that say an address has no path to the sharer: nothing listens there, no route to it, its network
+    /// or host is down, the address is not one this Mac can use, or nothing answered. Any other (a reset, an abort, a
+    /// broken pipe) means a host took the connection, and the sharer may have failed a handshake on the keys already.
+    static let noPathErrors: Set<POSIXErrorCode> = [
+        .ECONNREFUSED, .EHOSTUNREACH, .ENETUNREACH, .ENETDOWN, .EHOSTDOWN, .EADDRNOTAVAIL, .ETIMEDOUT,
+    ]
+
+    static func hasNoPath(_ e: NWError) -> Bool {
+        guard case .posix(let code) = e else { return false }
+        return noPathErrors.contains(code)
+    }
+
+    /// On `queue`, before the failure is reported: remembers that a published address has no path to the sharer.
     private func noteUnreachable(_ e: NWError) {
-        guard unreachableAfter != nil, case .posix = e, state == .connecting else { return }
+        guard unreachableAfter != nil, Self.hasNoPath(e), state == .connecting else { return }
         lock.withLock { _unreachable = true }
     }
 

@@ -213,6 +213,33 @@ final class LinkSessionTests: XCTestCase {
         session.close()
     }
 
+    /// The published address takes the connection and resets it: the sharer was reached and may already have failed a
+    /// handshake on the keys, so trying the next route would make a second one there, another wrong code for one typed.
+    /// Only an error that says the address has no path to the sharer hands over to the next route; this one ends the
+    /// attempt with its reason, after one connection, and the next route is never tried.
+    func testAPublishedAddressThatResetsTheConnectionEndsTheAttempt() async throws {
+        let resetting = try ResettingListener()
+        let resettingPort = resetting.start()
+        defer { resetting.stop() }
+        let next = try SilentListener()
+        let nextPort = try await next.start()
+        defer { next.stop() }
+        let sharer = Peer(id: "reset", name: "Sharer", keyName: "Sharer",
+                          endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: nextPort)!),
+                          addresses: [IPv4Address("127.0.0.1")!], port: resettingPort)
+        let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view))
+        let clock = ContinuousClock(), started = clock.now
+        let seen = await states(of: session, within: 15)
+        XCTAssertLessThan(clock.now - started, .seconds(3), "the reset ended the attempt at once")
+        XCTAssertEqual(seen.count, 2, "one attempt, then the end: \(seen)")
+        XCTAssertFalse(seen.contains(.codeRejected), "a reset is not a wrong code")
+        guard case .closed(let reason?)? = seen.last else { return XCTFail("expected .closed with a reason, got \(seen)") }
+        XCTAssertTrue(reason.hasPrefix("Could not connect to Sharer."), reason)
+        XCTAssertEqual(resetting.accepted, 1, "one connection on the address that reset it")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(next.accepted, 0, "the next route was not tried")
+    }
+
     /// One attempt gives up after 8 seconds over all its routes (15 before): "No answer" says so.
     func testAnAttemptGivesUpAfterEightSeconds() async throws {
         let silent = try SilentListener()
