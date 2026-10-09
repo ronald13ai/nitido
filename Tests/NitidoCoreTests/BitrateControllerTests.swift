@@ -8,6 +8,8 @@ final class BitrateControllerTests: XCTestCase {
     func testInitialBitrateScalesWithPixels() {
         XCTAssertEqual(BitrateController.initialBitrate(width: 1920, height: 1080), 20_000_000)
         XCTAssertEqual(BitrateController.initialBitrate(width: 1280, height: 720), 8_888_888)
+        // The second two-Mac test's window, 1346×878 pt at 2x: as many bits per pixel as 20 Mbps at 1080p.
+        XCTAssertEqual(BitrateController.initialBitrate(width: 2692, height: 1756), 45_593_672)
         XCTAssertEqual(BitrateController.initialBitrate(width: 5120, height: 2880), 60_000_000)
         XCTAssertEqual(BitrateController.initialBitrate(width: 100, height: 100), 2_000_000)
     }
