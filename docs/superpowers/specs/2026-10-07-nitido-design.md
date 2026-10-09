@@ -105,15 +105,17 @@ Byte order big-endian. Every message: `u32 length` (payload bytes, excluding the
 
 ## 8. Bitrate controller and dropping policy
 
-Inputs every 250 ms: RTT p50 of the last second, send backlog in bytes, and the age of the newest frame the viewer reported (carried in pong as an extra u32 when available, else unknown).
+Inputs every 250 ms: RTT p50 of the last second, send backlog in bytes, whether the sender started skipping frames for the backlog since the last update, and the age of the newest frame the viewer reported (carried in pong as an extra u32 when available, else unknown). The backlog is the one the dropping rule below judges: it leaves out keyframes still being sent, since a keyframe is one burst the encoder makes on purpose; the frames queued behind it count.
 
 - Baseline RTT: minimum RTT seen in the last 10 s.
-- Decrease by 25% if backlog exceeds two frames' worth of bytes at the current rate, or RTT exceeds baseline + 40 ms. After a decrease, hold for 2 s.
+- Decrease by 25% if backlog exceeds two frames' worth of bytes at the current rate, or RTT exceeds baseline + 40 ms, or the sender started skipping frames. After a decrease, hold for 2 s; a skip cuts even within the hold, since it is congestion that lasted (amended 2026-10-09).
 - Increase by 10% every 2 s while backlog stays under one frame and RTT stays within baseline + 15 ms.
-- Bounds: 2 Mbps to 60 Mbps; initial 20 Mbps at 1080p-class sizes, scaled by pixel count.
+- Bounds: 2 Mbps to 60 Mbps; initial 20 Mbps at 1080p-class sizes, scaled by pixel count (45.6 Mbps for a 1346×878 pt window at 2x, 2692×1756 px).
 - Loopback mode ignores network inputs and uses the slider value directly.
 
-Dropping: the encoder keeps only the newest captured frame; the sender skips non-key frames while backlog exceeds four frames' worth and then sends the next keyframe; the viewer displays only the newest decoded frame; on reconnect or decode error the viewer sends `keyframeRequest`. Nothing ever grows a queue.
+Dropping: the encoder keeps only the newest captured frame; the sender skips non-key frames once the backlog has stayed over 150 ms worth at the current rate (four frames' worth if that were more) for 100 ms, every reading in between over it too, or at once when it is over a second's worth; from then on it skips every delta until a keyframe has gone out, asks for that keyframe once the backlog is under one frame's worth (again only if none went out within a second), and for 500 ms after it only a backlog over a second's worth starts another skip; the viewer displays only the newest decoded frame; on reconnect or decode error the viewer sends `keyframeRequest`. Nothing ever grows a queue.
+
+Amended 2026-10-09 from "skips non-key frames while backlog exceeds four frames' worth", judged at each frame. On the second two-Mac test (2692×1756 HEVC from a MacBook Pro over Wi-Fi 6 at 5 GHz to a MacBook Air, RTT 9 to 10 ms, a 120-line TextEdit window scrolled with the trackpad) that rule tripped on single readings: a backlog of 144 kB, about 60 ms of traffic at 20 Mbps, drained 17 ms later, and the keyframe sent then filled it again and tripped it again, over and over. The sharer captured and showed 58 fps while the viewer showed 10 to 48. Four frames are 67 ms at 60 fps, less than one Wi-Fi burst or one keyframe, so the rule now judges the backlog in time, waits for it to last, leaves keyframes out of it and gives the link half a second after the keyframe that ends a skip.
 
 ## 9. Windows and flow
 

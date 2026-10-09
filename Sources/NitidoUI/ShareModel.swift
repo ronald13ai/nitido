@@ -125,17 +125,16 @@ public final class ShareModel {
     private var unpaired: [ObjectIdentifier: (link: NitidoLink.Link, states: Task<Void, Never>)] = [:]
     /// How many connections are still proving the code (tests check that none is left behind).
     var unpairedCount: Int { unpaired.count }
-    /// Adapts the viewer's bitrate every 250 ms (the snapshot loop), from the RTT and the send backlog.
+    /// Adapts the viewer's bitrate every 250 ms (the snapshot loop), from the RTT, the send backlog and the skips the
+    /// dropping rule started (`backlogPolicy`).
     private var controller = BitrateController(initial: 20_000_000)
-    /// The encoder's rate, which also sizes a frame for the backlog dropping rule (`handleEncoded`).
+    /// The encoder's rate, which also sizes the backlog dropping rule (`backlogPolicy`).
     private var currentBitrate = 20_000_000
-    /// One frame's worth of bytes at the current rate: the unit of the backlog dropping rule. Internal for tests.
-    var frameBytes: Int { currentBitrate / 8 / 60 }
-    /// Frames were dropped for the backlog, so the viewer lacks the frames the next deltas refer to: every non-key frame
-    /// is skipped until a keyframe goes out, asked for once the backlog drains under one frame (`keyframeAfterDrain`).
-    private var needKeyAfterDrain = false
-    /// When `keyframeAfterDrain` last asked for that keyframe, so it asks again only if none came within a second.
-    @ObservationIgnored private var drainKeyRequestedAt: CFTimeInterval?
+    /// One frame's worth of bytes at the current rate: the unit the backlog drains to. Internal for tests.
+    var frameBytes: Int { BacklogPolicy.frameBytes(bitsPerSecond: currentBitrate) }
+    /// Spec section 8's dropping rule for the viewer's link: when deltas are skipped for the send backlog, and when the
+    /// keyframe that ends the skip is asked for (`handleEncoded`, `keyframeAfterDrain`). Each viewer starts it afresh.
+    @ObservationIgnored private var backlogPolicy = BacklogPolicy()
     /// A viewer just took over (`linkStateChanged`): it has none of the frames the deltas still in the encoder refer to,
     /// so none goes out to it before the keyframe the takeover asked for (`handleEncoded`).
     @ObservationIgnored private var viewerNeedsKeyframe = false
@@ -145,6 +144,8 @@ public final class ShareModel {
     var wrongCodeAttempts: Int { handshakeFailures.count }
     /// The clock wrong codes are counted by (`HandshakeFailures`). Internal so a test can move it on.
     @ObservationIgnored var handshakeClock: () -> CFTimeInterval = { CACurrentMediaTime() }
+    /// The clock the backlog dropping rule reads (`BacklogPolicy`). Internal so a test can move it on.
+    @ObservationIgnored var backlogClock: () -> CFTimeInterval = { CACurrentMediaTime() }
 
     private var hello: Hello {
         Hello(protocolVersion: protocolVersion, role: .share, name: name,
@@ -284,14 +285,26 @@ public final class ShareModel {
                     // Frames the capture stream let go because the share had not taken the one before yet.
                     for _ in 0..<(capture?.takeDroppedFrames() ?? 0) { telemetry.recordDrop(at: now) }
                     snapshot = telemetry.snapshot(now: now)
-                    if isSending, !loopback, let link, let encoder {
-                        // Spec 8: the RTT p50 of the last second, the strip's own figure, not the latest ping alone.
-                        let bps = controller.update(rttMs: snapshot.rttMs, backlogBytes: link.backlogBytes, frameAgeMs: nil,
-                                                    fps: max(snapshot.captureFPS, 30), now: now)
-                        if bps != currentBitrate { currentBitrate = bps; encoder.setBitrate(bps) }
+                    if isSending, let link {
+                        // The measure the dropping rule judges, for it and the controller alike: without the keyframes
+                        // still being sent, which are one burst made on purpose and never congestion by themselves.
+                        let backlog = link.backlogBytesExcludingKeyframes
+                        backlogPolicy.observe(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: backlogClock())
+                        let skipped = backlogPolicy.takeTrip()
+                        if !loopback, let encoder {
+                            // Spec 8: the RTT p50 of the last second, the strip's own figure, not the latest ping alone.
+                            // A skip the dropping rule started since the last update cuts now, hold or not.
+                            let bps = controller.update(rttMs: snapshot.rttMs, backlogBytes: backlog, frameAgeMs: nil,
+                                                        fps: max(snapshot.captureFPS, 30), now: now, skippedForBacklog: skipped)
+                            if bps != currentBitrate {
+                                let rtt = snapshot.rttMs.map { String(format: "%.1f ms", $0) } ?? "unknown"
+                                log.info("the bitrate goes from \(Double(self.currentBitrate) / 1e6, format: .fixed(precision: 1), privacy: .public) to \(Double(bps) / 1e6, format: .fixed(precision: 1), privacy: .public) Mbps: send backlog \(backlog, privacy: .public) bytes, RTT p50 \(rtt, privacy: .public)\(skipped ? ", frames skipped for the backlog" : "", privacy: .public)")
+                                currentBitrate = bps; encoder.setBitrate(bps)
+                            }
+                        }
+                        // A source that went still after the drop sends no frame that could check the drain: this does.
+                        keyframeAfterDrain(backlog: backlog, now: backlogClock())
                     }
-                    // A source that went still after the drop sends no frame that could check the drain: this does.
-                    if isSending, let link { keyframeAfterDrain(backlog: link.backlogBytes, now: now) }
                     codecMs = loopback ? codecWindow.stats(now: now)?.p50 : nil
                 }
             },
@@ -409,21 +422,35 @@ public final class ShareModel {
         // what the codec loop's encoder made.
         if !isSending, loopback { telemetry.recordBytes(f.data.count, at: now) }
         if isSending, let link {
-            // Spec section 8: skip non-key frames while the backlog exceeds four frames' worth, then send the next
-            // keyframe. A delta after a drop refers to frames the viewer never got, so none goes out until it has.
-            let backlog = link.backlogBytes
+            // Spec section 8: skip non-key frames once the backlog has stayed over 150 ms worth for 100 ms, or is over a
+            // second's worth, then send the next keyframe (`BacklogPolicy`). A delta after a drop refers to frames the
+            // viewer never got, so none goes out until it has. Keyframes still being sent are left out of the backlog.
+            let backlog = link.backlogBytesExcludingKeyframes
+            let at = backlogClock()
             if !f.isKey, viewerNeedsKeyframe {
                 // A delta encoded before the viewer took over: it never had the frames it refers to. Not a dropped frame,
                 // since this viewer was never going to see it; its keyframe is on the way (`sendKeyframe`).
-            } else if !f.isKey, needKeyAfterDrain || backlog > 4 * frameBytes {
-                if !needKeyAfterDrain { log.info("send backlog of \(backlog, privacy: .public) bytes; skipping frames until a keyframe") }
-                telemetry.recordDrop(at: now); needKeyAfterDrain = true
-                keyframeAfterDrain(backlog: backlog, now: now)
+            } else if f.isKey {
+                // A keyframe always goes out: it ends a skip (and starts the rule's hold-off) or a takeover's wait.
+                backlogPolicy.keyframeSent(now: at)
+                viewerNeedsKeyframe = false
+                send(f, on: link, at: now)
             } else {
-                if f.isKey { needKeyAfterDrain = false; drainKeyRequestedAt = nil; viewerNeedsKeyframe = false }
-                if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
-                link.send(.videoFrame(f.videoFrame))
-                telemetry.recordBytes(f.data.count, at: now)
+                switch backlogPolicy.delta(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: at) {
+                case .send:
+                    send(f, on: link, at: now)
+                case .trip(let overFor):
+                    let worth = Double(backlog) * 8 / Double(currentBitrate) * 1000
+                    let why = backlog > BacklogPolicy.ceiling(bitsPerSecond: currentBitrate)
+                        ? "over a second's worth"
+                        : "over \(Int(BacklogPolicy.thresholdSeconds * 1000)) ms worth for \(Int((overFor * 1000).rounded())) ms"
+                    log.info("send backlog of \(backlog, privacy: .public) bytes, \(worth, format: .fixed(precision: 0), privacy: .public) ms at \(Double(self.currentBitrate) / 1e6, format: .fixed(precision: 1), privacy: .public) Mbps, \(why, privacy: .public); skipping frames until a keyframe")
+                    telemetry.recordDrop(at: now)
+                    keyframeAfterDrain(backlog: backlog, now: at)
+                case .skip:
+                    telemetry.recordDrop(at: now)
+                    keyframeAfterDrain(backlog: backlog, now: at)
+                }
             }
         }
         guard loopback else { return }
@@ -514,15 +541,23 @@ public final class ShareModel {
         encoder?.requestKeyframe()
     }
 
-    /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode again.
-    /// `sendKeyframe` covers a still source too (it encodes the newest frame again), so the viewer never keeps a damaged
-    /// or stale picture until the content moves. Asks again only if no keyframe went out within a second. With no
-    /// encoder there is nothing to ask: the next frame makes one, and a fresh encoder starts with a keyframe.
+    /// A frame that goes to the viewer, with its setup when it carries one; the strip's bitrate counts it.
+    private func send(_ f: EncodedFrame, on link: NitidoLink.Link, at now: CFTimeInterval) {
+        if let cfg = f.videoConfig { link.send(.videoConfig(cfg)) }
+        link.send(.videoFrame(f.videoFrame))
+        telemetry.recordBytes(f.data.count, at: now)
+    }
+
+    /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode again
+    /// (`BacklogPolicy.keyframeDue`). `sendKeyframe` covers a still source too (it encodes the newest frame again), so the
+    /// viewer never keeps a damaged or stale picture until the content moves. Asks again only if no keyframe went out
+    /// within a second. With no encoder there is nothing to ask: the next frame makes one, and a fresh encoder starts
+    /// with a keyframe.
     private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
-        guard needKeyAfterDrain, backlog < frameBytes, encoder != nil else { return }
-        if let asked = drainKeyRequestedAt, now - asked < 1 { return }
-        drainKeyRequestedAt = now
-        log.info("the send backlog drained after dropped frames; sending a keyframe")
+        guard encoder != nil, backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }
+        let skipped = backlogPolicy.skipped
+        let lasted = backlogPolicy.trippedAt.map { (now - $0) * 1000 } ?? 0
+        log.info("the send backlog drained after \(skipped, privacy: .public) skipped frames in \(lasted, format: .fixed(precision: 0), privacy: .public) ms; sending a keyframe")
         sendKeyframe()
     }
 
@@ -801,6 +836,8 @@ public final class ShareModel {
                 controller = BitrateController(initial: currentBitrate)
                 encoder.setBitrate(currentBitrate)
             }
+            // A skip, a hold-off or a time over the threshold was the last viewer's link's.
+            backlogPolicy = BacklogPolicy()
             viewerNeedsKeyframe = true
             sendKeyframe()
         case .failed(let m):
