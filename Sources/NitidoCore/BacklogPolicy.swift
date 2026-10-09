@@ -3,8 +3,8 @@ import Foundation
 /// The sender's dropping rule (spec section 8), as a pure decision: when non-key frames are skipped for the send
 /// backlog, and when the keyframe that lets the viewer decode again is asked for. The share hands it every reading of
 /// the backlog, each encoded frame's (`delta`, `keyframeSent`) and the 250 ms loop's (`observe`, `keyframeDue`), at the
-/// rate the encoder runs at, without the keyframes still being sent (`Link.backlogBytesExcludingKeyframes`); `now` is
-/// in seconds.
+/// rate the encoder runs at, without the keyframe on its way (`Link.backlogBytesExcludingKeyframes`: the keyframes
+/// queued behind it count); `now` is in seconds.
 ///
 /// The backlog is judged in time and with hysteresis, not by a byte count at one reading. The rule it replaces skipped
 /// as soon as one reading was over four frames' worth: on the two-Mac test of 2026-10-09 (2692×1756 HEVC over Wi-Fi 6,

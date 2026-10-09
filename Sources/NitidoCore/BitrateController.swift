@@ -25,7 +25,7 @@ public struct BitrateController: Sendable {
     }
 
     /// The rate to encode at from now on. `rttMs` is the RTT p50 of the last second, `backlogBytes` the link's send
-    /// backlog (the measure the sender's dropping rule judges: without the keyframes still being sent), `frameAgeMs`
+    /// backlog (the measure the sender's dropping rule judges: without the keyframe on its way), `frameAgeMs`
     /// the age of the newest frame the viewer reported (nil when unknown); `now` is in seconds. `skippedForBacklog`
     /// says the sender started skipping frames for its backlog since the last update (`BacklogPolicy.takeTrip`): that
     /// is congestion that lasted (150 ms worth for 100 ms), so it cuts now, whatever the other inputs say and even

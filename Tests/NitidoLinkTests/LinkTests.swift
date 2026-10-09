@@ -84,11 +84,12 @@ final class LinkTests: XCTestCase {
         return last
     }
 
-    /// A `bye` carries its reason (`ByeReason`) to the other side, which ends as `.cancelled`, not as a failure.
-    /// The sharer's dropping rule leaves a keyframe out of the backlog while it is being sent, and counts every other
-    /// message, the frames queued behind it included (`backlogBytesExcludingKeyframes`). Both figures go back to zero
-    /// once the sends complete.
-    func testKeyframesInTheBacklogAreCountedApartUntilTheyAreSent() async throws {
+    /// The sharer's dropping rule leaves the keyframe on its way out of the backlog, the oldest one still being sent,
+    /// and counts every other message: the keyframes queued behind it and the frames behind those (spec section 8,
+    /// `backlogBytesExcludingKeyframes`). Keyframes stacked up (a viewer asking for one after another) are a backlog
+    /// like any other: eight megabytes of them read as all but one keyframe, not as nothing. Both figures go back to
+    /// zero once the sends complete.
+    func testOnlyTheKeyframeOnItsWayIsLeftOutOfTheBacklog() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
         let (sharer, viewer) = try await readyPair(advertiser, port: port)
@@ -104,28 +105,40 @@ final class LinkTests: XCTestCase {
         XCTAssertTrue(helloOut, "the hello was not sent within 5 s")
 
         // Eight megabytes of keyframes: they take longer to send than this thread takes to read the figures.
-        for i in 0..<20 {
-            sharer.send(.videoFrame(VideoFrame(seq: UInt32(i), captureHostTimeNs: 0, isKey: true, data: Data(count: 400_000))))
+        func keyframe(_ seq: UInt32) -> Message {
+            .videoFrame(VideoFrame(seq: seq, captureHostTimeNs: 0, isKey: true, data: Data(count: 400_000)))
         }
-        XCTAssertGreaterThan(sharer.backlogBytes, 0, "the keyframes wait to be sent")
-        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 0, "only keyframes wait")
+        let size = Wire.encode(keyframe(0)).count
+        for i in 0..<20 { sharer.send(keyframe(UInt32(i))) }
+        let (total, excluding) = sharer.backlogFiguresForTesting
+        XCTAssertGreaterThanOrEqual(total, 2 * size, "the keyframes wait to be sent")
+        XCTAssertEqual(excluding, total - size, "only the keyframe on its way is left out; the ones behind it count")
         let delta = Message.videoFrame(VideoFrame(seq: 20, captureHostTimeNs: 0, isKey: false, data: Data(count: 1_000)))
         sharer.send(delta)
-        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, Wire.encode(delta).count, "the delta behind them counts")
+        let (withDelta, excludingWithDelta) = sharer.backlogFiguresForTesting
+        XCTAssertEqual(excludingWithDelta, withDelta - size, "the delta behind them counts too")
 
         let allOut = await drained()
         XCTAssertTrue(allOut, "the frames were not sent within 5 s")
         XCTAssertEqual(sharer.backlogBytes, 0)
         XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 0)
+
+        // The test seam follows the same rule: the first keyframe held is the one on its way.
+        sharer.addBacklogForTesting(150_000, keyframe: true)
         sharer.addBacklogForTesting(150_000, keyframe: true)
         sharer.addBacklogForTesting(40_000)
-        XCTAssertEqual(sharer.backlogBytes, 190_000)
-        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 40_000, "the test seam counts a keyframe's bytes apart too")
+        XCTAssertEqual(sharer.backlogBytes, 340_000)
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 190_000, "the second keyframe and the 40 kB count")
         sharer.addBacklogForTesting(-150_000, keyframe: true)
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 40_000, "the second keyframe is the one on its way now")
+        sharer.addBacklogForTesting(-150_000, keyframe: true)
+        XCTAssertEqual(sharer.backlogBytesExcludingKeyframes, 40_000)
         sharer.addBacklogForTesting(-40_000)
+        XCTAssertEqual(sharer.backlogBytes, 0)
         viewer.close(); sharer.close(); advertiser.stop()
     }
 
+    /// A `bye` carries its reason (`ByeReason`) to the other side, which ends as `.cancelled`, not as a failure.
     func testAByeCarriesItsReason() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()

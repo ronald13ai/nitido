@@ -891,9 +891,11 @@ final class ViewerLinkTests: XCTestCase {
         let mark = LogMark()
         let sent = received.frames.count
 
-        // A 150 kB keyframe goes out and takes 50 ms to (the loopback sends it at once: the test holds its bytes).
+        // A 150 kB keyframe goes out and takes 50 ms to (the loopback sends it at once: once it has, the test holds its
+        // bytes, as the keyframe on its way).
         share.handleEncoded(EncodedFrame(seq: 100, captureHostTimeNs: 1, isKey: true, data: Data(count: 150_000), parameterSets: [],
                                          codec: .hevc, width: 320, height: 180))
+        try await waitUntil("the loopback has taken the first keyframe") { link.backlogBytes == 0 }
         link.addBacklogForTesting(150_000, keyframe: true)
         for _ in 0..<3 { share.handleEncoded(delta); clock.now += 1.0 / 60 }
         link.addBacklogForTesting(-150_000, keyframe: true)
@@ -908,6 +910,7 @@ final class ViewerLinkTests: XCTestCase {
         // A keyframe as large that takes 200 ms to go out.
         share.handleEncoded(EncodedFrame(seq: 200, captureHostTimeNs: 1, isKey: true, data: Data(count: 150_000), parameterSets: [],
                                          codec: .hevc, width: 320, height: 180))
+        try await waitUntil("the loopback has taken the second keyframe") { link.backlogBytes == 0 }
         link.addBacklogForTesting(150_000, keyframe: true)
         for _ in 0..<12 { share.handleEncoded(delta); clock.now += 1.0 / 60 }
         link.addBacklogForTesting(-150_000, keyframe: true)
@@ -1023,9 +1026,63 @@ final class ViewerLinkTests: XCTestCase {
         link.addBacklogForTesting(-400_000)
         try await waitUntil("a keyframe follows that drain too") { received.frames.count > keyed + 5 }
         XCTAssertEqual(received.frames[keyed...].map(\.isKey), [false, false, false, false, false, true])
-        let skips = try mark.entries("share").map(\.composedMessage).filter { $0.contains("skipping frames until a keyframe") }
+        let skips = try mark.entries("share").map(\.composedMessage)
+            .filter { $0.contains("skipping frames until a keyframe") }
         XCTAssertEqual(skips.count, 2, skips.joined(separator: "\n"))
         XCTAssertTrue(skips.allSatisfy { $0.contains("over a second's worth") }, skips.joined(separator: "\n"))
+        viewer.close()
+        await share.stop()
+    }
+
+    /// Spec section 8 and the re-review of 2026-10-09: only the keyframe on its way is left out of the backlog.
+    /// Keyframes stacked behind it (a viewer that keeps asking for one) count for the threshold, the ceiling and the
+    /// bitrate controller, so a stream made of keyframes is caught like any other backlog. At 1920×1080 (20 Mbps) a
+    /// second's worth is 2.5 MB: three 2 MB keyframes held leave 4 MB that count, so the next delta trips with "over a
+    /// second's worth", and the next update cuts the rate.
+    @MainActor
+    func testKeyframesStackedBehindTheOneOnItsWayCountForTheCeilingAndTheController() async throws {
+        let (share, source) = try await listeningShare(width: 1920, height: 1080)
+        source.emit(frame: try stripedFrame(width: 1920, height: 1080))
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let link = try XCTUnwrap(share.link)
+        let delta = try await realDelta()
+        let mark = LogMark()
+        let sent = received.frames.count
+        let rateBefore = share.frameBytes
+
+        for _ in 0..<3 { link.addBacklogForTesting(2_000_000, keyframe: true) }
+        share.handleEncoded(delta)
+        try await waitUntil("the next update cuts the rate") { share.frameBytes < rateBefore }
+        XCTAssertEqual(received.frames.count, sent, "the delta was skipped")
+        let skips = try mark.entries("share").map(\.composedMessage)
+            .filter { $0.contains("skipping frames until a keyframe") }
+        XCTAssertEqual(skips.count, 1, skips.joined(separator: "\n"))
+        XCTAssertTrue(skips.allSatisfy { $0.contains("over a second's worth") }, skips.joined(separator: "\n"))
+        for _ in 0..<3 { link.addBacklogForTesting(-2_000_000, keyframe: true) }
+        viewer.close()
+        await share.stop()
+    }
+
+    /// The keyframe on its way is not congestion for the bitrate controller either: at 1920×1080 a megabyte is 400 ms
+    /// worth, far over the controller's two frames, but one keyframe held across two 250 ms updates cuts nothing. Fed
+    /// the whole backlog, the controller cut 25% at the first update; the 45.6 Mbps the two-Mac test starts at rests on
+    /// this.
+    @MainActor
+    func testOneKeyframeOnItsWayCutsNothing() async throws {
+        let (share, source) = try await listeningShare(width: 1920, height: 1080)
+        source.emit(frame: try stripedFrame(width: 1920, height: 1080))
+        await drain()
+        let (viewer, _, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let link = try XCTUnwrap(share.link)
+        let rateBefore = share.frameBytes
+
+        link.addBacklogForTesting(1_000_000, keyframe: true)
+        try await Task.sleep(for: .milliseconds(600))    // the 250 ms loop updates the controller twice
+        XCTAssertGreaterThanOrEqual(share.frameBytes, rateBefore, "the rate is not cut for the keyframe on its way")
+        link.addBacklogForTesting(-1_000_000, keyframe: true)
         viewer.close()
         await share.stop()
     }

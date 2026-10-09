@@ -286,8 +286,8 @@ public final class ShareModel {
                     for _ in 0..<(capture?.takeDroppedFrames() ?? 0) { telemetry.recordDrop(at: now) }
                     snapshot = telemetry.snapshot(now: now)
                     if isSending, let link {
-                        // The measure the dropping rule judges, for it and the controller alike: without the keyframes
-                        // still being sent, which are one burst made on purpose and never congestion by themselves.
+                        // The measure the dropping rule judges, for it and the controller alike: without the keyframe
+                        // on its way, one burst made on purpose and never congestion by itself; those behind it count.
                         let backlog = link.backlogBytesExcludingKeyframes
                         backlogPolicy.observe(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: backlogClock())
                         let skipped = backlogPolicy.takeTrip()
@@ -424,7 +424,7 @@ public final class ShareModel {
         if isSending, let link {
             // Spec section 8: skip non-key frames once the backlog has stayed over 150 ms worth for 100 ms, or is over a
             // second's worth, then send the next keyframe (`BacklogPolicy`). A delta after a drop refers to frames the
-            // viewer never got, so none goes out until it has. Keyframes still being sent are left out of the backlog.
+            // viewer never got, so none goes out until it has. The keyframe on its way is left out of the backlog.
             let backlog = link.backlogBytesExcludingKeyframes
             let at = backlogClock()
             if !f.isKey, viewerNeedsKeyframe {
