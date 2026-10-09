@@ -452,17 +452,20 @@ public final class ShareModel {
             if !f.isKey { encoder?.requestKeyframe() }
             return
         }
-        if case .skipped(let first) = decoder.submit(f.videoFrame) {
-            // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped, and that
-            // keyframe drops the frames still waiting (`loopSuperseded`). The first one asks for that keyframe; a later
-            // one asks again once a second has passed.
-            telemetry.recordDrop(at: now)
-            encodeStarts.removeValue(forKey: f.seq)   // this frame never decodes
-            if first { log.info("the codec loop's decoder fell behind with \(VideoDecoder.maxPending, privacy: .public) frames waiting; skipping to the next keyframe") }
-            if first || loopKeyframeAskedAt.map({ now - $0 >= 1 }) ?? true {
-                loopKeyframeAskedAt = now
-                encoder?.requestKeyframe()
-            }
+        let result = decoder.submit(f.videoFrame)
+        guard result != .queued else { return }
+        // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped, and that
+        // keyframe drops the frames still waiting (`loopSuperseded`). The first one asks for that keyframe; a later one
+        // asks again once a second has passed.
+        telemetry.recordDrop(at: now)
+        encodeStarts.removeValue(forKey: f.seq)   // this frame never decodes
+        if case .fellBehind(let backlog) = result {
+            log.info("the codec loop's decoder fell behind with \(backlog.frames, privacy: .public) frames waiting, the oldest for \(backlog.oldestWait * 1000, format: .fixed(precision: 1), privacy: .public) ms; skipping to the next keyframe")
+            loopKeyframeAskedAt = now
+            encoder?.requestKeyframe()
+        } else if loopKeyframeAskedAt.map({ now - $0 >= 1 }) ?? true {
+            loopKeyframeAskedAt = now
+            encoder?.requestKeyframe()
         }
     }
 

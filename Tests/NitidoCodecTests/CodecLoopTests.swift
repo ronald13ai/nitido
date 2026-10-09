@@ -89,8 +89,8 @@ final class CodecLoopTests: XCTestCase {
         let decoder = try VideoDecoder(config: try XCTUnwrap(frames.first?.videoConfig))
         let seqs = Box<[UInt32]>([]), onMain = Box<[Bool]>([]), failures = Box<[UInt32]>([])
         decoder.onDecodeFailure = { seq, _ in failures.append(seq) }
-        for start in stride(from: 0, to: frames.count, by: VideoDecoder.maxPending) {
-            let group = frames[start..<min(start + VideoDecoder.maxPending, frames.count)]
+        for start in stride(from: 0, to: frames.count, by: VideoDecoder.maxWaiting) {
+            let group = frames[start..<min(start + VideoDecoder.maxWaiting, frames.count)]
             let decoded = expectation(description: "frames from \(start)"); decoded.expectedFulfillmentCount = group.count
             decoder.onFrame = { d in seqs.append(d.seq); onMain.append(Thread.isMainThread); decoded.fulfill() }
             for f in group { XCTAssertEqual(decoder.submit(f.videoFrame), .queued, "frame \(f.seq)") }
@@ -118,37 +118,94 @@ final class CodecLoopTests: XCTestCase {
         decoder.invalidate()
     }
 
-    /// Spec 4 and 8: the decoder drops work rather than queue it. With three frames waiting (the queue held here, as a
-    /// stall would), the next delta is skipped and asks for a keyframe once, the deltas after it are skipped quietly
-    /// (they refer to the one skipped), and the keyframe ends the skip and starts the count again, so the delta after
-    /// it decodes. The three that waited are dropped undecoded when the queue moves (`onSuperseded`), since nothing
-    /// from the keyframe on refers to them: no more than three frames ever wait to be decoded, and the keyframe that
-    /// recovers the picture does not decode behind frames it replaces.
-    func testSubmitSkipsToTheNextKeyframeWhenThreeFramesWait() throws {
-        let frames = try encodeFrames(8, keyframesAt: [6])
-        XCTAssertTrue(frames[0].isKey); XCTAssertTrue(frames[6].isKey)
-        XCTAssertTrue(frames[1...5].allSatisfy { !$0.isKey }); XCTAssertFalse(frames[7].isKey)
-        let decoder = try VideoDecoder(config: try XCTUnwrap(frames[0].videoConfig))
-        let first = expectation(description: "the keyframe")
-        decoder.onFrame = { _ in first.fulfill() }
-        XCTAssertEqual(decoder.submit(frames[0].videoFrame), .queued)
-        wait(for: [first], timeout: 5)
-        decoder.drainForTesting()
-
-        let seqs = Box<[UInt32]>([]), superseded = Box<[UInt32]>([])
-        decoder.onFrame = { d in seqs.append(d.seq) }
-        decoder.onSuperseded = { seq in superseded.append(seq) }
-        decoder.suspendForTesting()
-        for i in 1...3 { XCTAssertEqual(decoder.submit(frames[i].videoFrame), .queued, "delta \(i)") }
-        XCTAssertEqual(decoder.submit(frames[4].videoFrame), .skipped(askForKeyframe: true))
-        XCTAssertEqual(decoder.submit(frames[5].videoFrame), .skipped(askForKeyframe: false))
-        XCTAssertEqual(decoder.submit(frames[6].videoFrame), .queued, "a keyframe ends the skip")
-        XCTAssertEqual(decoder.submit(frames[7].videoFrame), .queued, "the delta after the keyframe decodes")
-        decoder.resumeForTesting()
+    /// A decoder on `clock` that has shown `key`, with nothing left waiting.
+    private func decoderThatShowed(_ key: EncodedFrame, clock: ManualClock) throws -> VideoDecoder {
+        let decoder = try VideoDecoder(config: try XCTUnwrap(key.videoConfig), clock: { clock.now })
+        let shown = Box<[UInt32]>([])
+        decoder.onFrame = { shown.append($0.seq) }
+        XCTAssertEqual(decoder.submit(key.videoFrame), .queued)
         decoder.drainForTesting()   // `decode` hands each picture to `onFrame` before it returns
-        XCTAssertEqual(superseded.value, [1, 2, 3], "the keyframe superseded the deltas still waiting")
-        XCTAssertEqual(seqs.value, [6, 7])
-        decoder.invalidate()
+        XCTAssertEqual(shown.value, [key.seq])
+        return decoder
+    }
+
+    /// Spec 4: the decoder judges itself behind by how long a frame has waited, not by how many wait. Four deltas handed
+    /// over within 5 ms while the decoder's queue is held (a main thread that was busy, a network that delivered them
+    /// at once) are all queued and all decoded, in order: none is skipped and no keyframe is asked for.
+    func testFramesHandedOverInABurstAreAllDecoded() throws {
+        let frames = try encodeFrames(5)
+        let clock = ManualClock()
+        let decoder = try decoderThatShowed(frames[0], clock: clock)
+        defer { decoder.invalidate() }
+        let seqs = Box<[UInt32]>([]), superseded = Box<[UInt32]>([])
+        decoder.onFrame = { seqs.append($0.seq) }
+        decoder.onSuperseded = { superseded.append($0) }
+        decoder.suspendForTesting()
+        var results: [VideoDecoder.SubmitResult] = []
+        for (i, frame) in frames[1...4].enumerated() {
+            clock.set(Double([0, 2, 4, 5][i]) / 1000)
+            results.append(decoder.submit(frame.videoFrame))
+        }
+        decoder.resumeForTesting()
+        decoder.drainForTesting()
+        XCTAssertEqual(results, Array(repeating: .queued, count: 4), "a burst within 5 ms is not falling behind")
+        XCTAssertEqual(seqs.value, [1, 2, 3, 4], "every frame of the burst decoded, in order")
+        XCTAssertEqual(superseded.value, [])
+    }
+
+    /// Spec 4 and 8: the decoder drops work rather than queue it. A frame that has waited more than 50 ms on the
+    /// decoder's clock (three frame intervals at 60 fps; the queue held here, as a stall would) means the decoder fell
+    /// behind: at exactly 50 ms the next delta still waits, at 60 ms the one after it starts a skip to the next keyframe
+    /// and says what was waiting, the delta after that is skipped quietly (it refers to the one skipped), and the
+    /// keyframe ends the skip and starts the count again, so the delta after it decodes. The two that waited are dropped
+    /// undecoded when the queue moves (`onSuperseded`), since nothing from the keyframe on refers to them: the keyframe
+    /// that recovers the picture does not decode behind frames it replaces.
+    func testAFrameThatWaitedPastFiftyMillisecondsMakesTheNextDeltaSkipToTheKeyframe() throws {
+        let frames = try encodeFrames(7, keyframesAt: [5])
+        XCTAssertTrue(frames[0].isKey); XCTAssertTrue(frames[5].isKey)
+        XCTAssertTrue(frames[1...4].allSatisfy { !$0.isKey }); XCTAssertFalse(frames[6].isKey)
+        let clock = ManualClock()
+        let decoder = try decoderThatShowed(frames[0], clock: clock)
+        defer { decoder.invalidate() }
+        let seqs = Box<[UInt32]>([]), superseded = Box<[UInt32]>([])
+        decoder.onFrame = { seqs.append($0.seq) }
+        decoder.onSuperseded = { superseded.append($0) }
+        decoder.suspendForTesting()
+        let first = decoder.submit(frames[1].videoFrame)
+        clock.set(0.050)
+        let atFifty = decoder.submit(frames[2].videoFrame)
+        clock.set(0.060)
+        let rest = frames[3...6].map { decoder.submit($0.videoFrame) }
+        decoder.resumeForTesting()
+        decoder.drainForTesting()
+        XCTAssertEqual(first, .queued)
+        XCTAssertEqual(atFifty, .queued, "50 ms is not more than 50 ms")
+        XCTAssertEqual(rest[0], .fellBehind(.init(frames: 2, oldestWait: 0.060)), "the oldest waited 60 ms")
+        XCTAssertEqual(rest[1], .skipped, "the delta after a skipped one is skipped too")
+        XCTAssertEqual(rest[2], .queued, "a keyframe ends the skip")
+        XCTAssertEqual(rest[3], .queued, "the delta after the keyframe decodes")
+        XCTAssertEqual(superseded.value, [1, 2], "the keyframe superseded the deltas still waiting")
+        XCTAssertEqual(seqs.value, [5, 6])
+    }
+
+    /// However quickly they come, no more than eight frames wait: on a clock that never moves, eight deltas handed over
+    /// at once are queued and decoded, and the ninth starts a skip to the next keyframe.
+    func testNoMoreThanEightFramesWait() throws {
+        let frames = try encodeFrames(11)
+        let clock = ManualClock()
+        let decoder = try decoderThatShowed(frames[0], clock: clock)
+        defer { decoder.invalidate() }
+        let seqs = Box<[UInt32]>([])
+        decoder.onFrame = { seqs.append($0.seq) }
+        decoder.suspendForTesting()
+        let results = frames[1...10].map { decoder.submit($0.videoFrame) }
+        decoder.resumeForTesting()
+        decoder.drainForTesting()
+        XCTAssertEqual(VideoDecoder.maxWaiting, 8)
+        XCTAssertEqual(Array(results[0..<8]), Array(repeating: .queued, count: 8))
+        XCTAssertEqual(results[8], .fellBehind(.init(frames: 8, oldestWait: 0)), "the ninth: eight wait already")
+        XCTAssertEqual(results[9], .skipped)
+        XCTAssertEqual(seqs.value, Array(1...8))
     }
 
     func testKeyframeRequestAndBitrateChange() throws {
@@ -178,6 +235,14 @@ final class CodecLoopTests: XCTestCase {
         XCTAssertThrowsError(try decoder.decode(VideoFrame(seq: 1, captureHostTimeNs: 1, isKey: false, data: Data([0, 0, 0, 3, 1, 2, 3]))))
         decoder.invalidate(); encoder.invalidate()
     }
+}
+
+/// A clock a test sets by hand, for `VideoDecoder(config:clock:)`, in seconds from 0.
+final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seconds: Double = 0
+    var now: Double { lock.withLock { seconds } }
+    func set(_ value: Double) { lock.withLock { seconds = value } }
 }
 
 /// Thread-safe collector for callbacks that arrive on VideoToolbox's queues.

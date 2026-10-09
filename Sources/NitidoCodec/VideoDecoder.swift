@@ -17,9 +17,12 @@ public struct DecodedFrame: @unchecked Sendable {
 ///
 /// `submit(_:)` is the way in for a stream: it decodes on the decoder's own serial queue, in the order the frames came
 /// (inter-coded frames refer to the ones before them, so none can be skipped on its own), and it drops work rather than
-/// queue it (spec 4): past `maxPending` frames waiting it skips to the next keyframe, and the caller asks for one; a
-/// keyframe drops the frames still waiting before it (`onSuperseded`). The renderer then shows the newest decoded
-/// frame. `decode(_:)` decodes one frame on the calling thread.
+/// queue it (spec 4). It judges itself behind by how long the oldest frame still waiting has waited on its clock, not by
+/// how many wait: frames handed over in a burst a few milliseconds apart (a main thread that was busy, a network that
+/// delivered several at once) are all decoded. Once the oldest has waited more than `maxWait`, or `maxWaiting` frames
+/// wait, it skips to the next keyframe and the caller asks for one; a keyframe drops the frames still waiting before it
+/// (`onSuperseded`). The renderer then shows the newest decoded frame. `decode(_:)` decodes one frame on the calling
+/// thread.
 ///
 /// Thread-safe: every member may be used from any thread, including `invalidate()` while another
 /// thread is inside `decode(_:)`.
@@ -28,14 +31,29 @@ public final class VideoDecoder: @unchecked Sendable {
     public enum SubmitResult: Sendable, Equatable {
         /// The frame waits for, or is in, the decoder's queue.
         case queued
-        /// The frame is not decoded: `maxPending` frames were waiting, or a skip began and no keyframe has ended it
-        /// yet. `askForKeyframe` is true for the frame that began the skip, false for the ones after it.
-        case skipped(askForKeyframe: Bool)
+        /// The decoder had fallen behind (`backlog` says how far): the frame is not decoded, and it begins a skip to the
+        /// next keyframe, which the caller asks for.
+        case fellBehind(Backlog)
+        /// A skip is under way and no keyframe has ended it yet: the frame is not decoded.
+        case skipped
     }
 
-    /// At most this many frames from the newest keyframe on wait for the decoder or are in it (`submit`); one from
-    /// before that keyframe is dropped when its turn comes (`onSuperseded`).
-    public static let maxPending = 3
+    /// The frames waiting when a skip began: how many (the one in the decoder included) and how long the oldest of them
+    /// had waited, in seconds on the decoder's clock.
+    public struct Backlog: Sendable, Equatable {
+        public let frames: Int
+        public let oldestWait: Double
+        public init(frames: Int, oldestWait: Double) { self.frames = frames; self.oldestWait = oldestWait }
+    }
+
+    /// A delta is skipped once the oldest frame still waiting has waited longer than this, in seconds: three frame
+    /// intervals at 60 fps. A frame waits from its submit until its decode ends.
+    public static let maxWait: Double = 0.050
+    /// And whatever their age, no more than this many frames wait: the next delta is skipped.
+    public static let maxWaiting = 8
+
+    /// The decoder's clock, in seconds: the system's uptime.
+    public static func uptime() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }
 
     /// Called on the decoder's queue, in decode order, by `submit(_:)` and `decode(_:)`.
     public var onFrame: (@Sendable (DecodedFrame) -> Void)? {
@@ -70,17 +88,21 @@ public final class VideoDecoder: @unchecked Sendable {
     private var frameHandler: (@Sendable (DecodedFrame) -> Void)?
     private var decodeFailureHandler: (@Sendable (UInt32, CodecError) -> Void)?
     private var supersededHandler: (@Sendable (UInt32) -> Void)?
-    /// Frames submitted since the newest keyframe that have not been decoded yet.
-    private var pending = 0
+    /// When each frame submitted since the newest keyframe that has not been decoded yet was submitted, oldest first, on
+    /// `clock`.
+    private var waitingSince: [Double] = []
     /// A frame was skipped, so every delta up to the next keyframe is too: it refers to the skipped one.
     private var skipping = false
     /// Bumped by every keyframe submitted. Nothing after a keyframe refers to the frames before it: those still waiting
-    /// are dropped undecoded (`onSuperseded`), and none counts in `pending` any more.
+    /// are dropped undecoded (`onSuperseded`), and none counts in `waitingSince` any more.
     private var keyEpoch: UInt64 = 0
+    private let clock: @Sendable () -> Double
     private let format: CMVideoFormatDescription
     private let queue = DispatchQueue(label: "ai.ronar.nitido.decoder", qos: .userInteractive)
 
-    public init(config: VideoConfig) throws(CodecError) {
+    /// `clock` says how long a frame has waited (`submit`), in seconds; a test can give its own.
+    public init(config: VideoConfig, clock: @escaping @Sendable () -> Double = VideoDecoder.uptime) throws(CodecError) {
+        self.clock = clock
         let sets = config.parameterSets
         let pointers = sets.map { set -> UnsafeMutablePointer<UInt8> in
             let p = UnsafeMutablePointer<UInt8>.allocate(capacity: max(set.count, 1))
@@ -118,21 +140,22 @@ public final class VideoDecoder: @unchecked Sendable {
 
     /// Decodes `frame` on the decoder's queue, after every frame submitted before it, and hands the picture to
     /// `onFrame` (a failure to `onDecodeFailure`). A keyframe is always queued, ends a skip, and supersedes the frames
-    /// still waiting before it: each goes to `onSuperseded` instead of the decoder. A delta is skipped while
-    /// `maxPending` frames are waiting, and so is every delta after it until the next keyframe; the first one skipped
-    /// says to ask for that keyframe. Never blocks the caller.
+    /// still waiting before it: each goes to `onSuperseded` instead of the decoder. A delta is skipped once the oldest
+    /// frame still waiting has waited more than `maxWait`, or `maxWaiting` frames wait (`.fellBehind`), and so is every
+    /// delta after it until the next keyframe (`.skipped`): they refer to the one skipped. Never blocks the caller.
     @discardableResult
     public func submit(_ frame: VideoFrame) -> SubmitResult {
         let admitted: (epoch: UInt64?, result: SubmitResult) = lock.withLock {
+            let now = clock()
             if frame.isKey {
-                skipping = false; keyEpoch &+= 1; pending = 0
+                skipping = false; keyEpoch &+= 1; waitingSince.removeAll()
             } else if skipping {
-                return (nil, .skipped(askForKeyframe: false))
-            } else if pending >= Self.maxPending {
+                return (nil, .skipped)
+            } else if let oldest = waitingSince.first, now - oldest > Self.maxWait || waitingSince.count >= Self.maxWaiting {
                 skipping = true
-                return (nil, .skipped(askForKeyframe: true))
+                return (nil, .fellBehind(Backlog(frames: waitingSince.count, oldestWait: now - oldest)))
             }
-            pending += 1
+            waitingSince.append(now)
             return (keyEpoch, .queued)
         }
         guard let epoch = admitted.epoch else { return admitted.result }
@@ -143,7 +166,7 @@ public final class VideoDecoder: @unchecked Sendable {
                 onSuperseded?(frame.seq)
                 return
             }
-            defer { lock.withLock { if keyEpoch == epoch { pending -= 1 } } }
+            defer { lock.withLock { if keyEpoch == epoch, !waitingSince.isEmpty { waitingSince.removeFirst() } } }
             do throws(CodecError) {
                 try decode(frame)
             } catch {

@@ -899,11 +899,12 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// Spec 4: a viewer whose decoder falls behind drops work rather than queue it. With three frames waiting (the
-    /// decoder's queue held here, as a stall would), the next delta starts a skip to the next keyframe and the one after
-    /// it is skipped too; the keyframe then drops the three that waited instead of decoding them first. Every one of
-    /// the five never reaches the screen and counts as dropped, none is a decode failure, and the keyframe is shown.
-    /// Spec 12: the skip is logged, once, as the sharer logs a skip for its send backlog.
+    /// Spec 4: a viewer whose decoder falls behind drops work rather than queue it, and it judges behind by how long a
+    /// frame has waited, not by how many wait. Four deltas handed over at once (the decoder's queue held here, as a
+    /// stall would) all wait; 60 ms later the oldest has waited past 50 ms, so the next delta starts a skip to the next
+    /// keyframe and the one after it is skipped too; the keyframe then drops the four that waited instead of decoding
+    /// them first. Every one of the six never reaches the screen and counts as dropped, none is a decode failure, and
+    /// the keyframe is shown. Spec 12: the skip is logged, once, with what was waiting.
     @MainActor
     func testAViewerThatFellBehindSkipsToTheKeyframeAndCountsWhatItDropped() async throws {
         let (share, _) = try await listeningShare()
@@ -925,25 +926,23 @@ final class ViewerLinkTests: XCTestCase {
         decoder.drainForTesting()
         let mark = LogMark()
         decoder.suspendForTesting()
-        for seq in 1...5 { viewer.handleIncoming(.videoFrame(frame(UInt32(seq), isKey: false))) }   // 1 to 3 wait, 4 and 5 are skipped
-        viewer.handleIncoming(.videoFrame(frame(6, isKey: true)))
+        for seq in 1...4 { viewer.handleIncoming(.videoFrame(frame(UInt32(seq), isKey: false))) }   // a burst: all four wait
+        try await Task.sleep(for: .milliseconds(60))
+        for seq in 5...6 { viewer.handleIncoming(.videoFrame(frame(UInt32(seq), isKey: false))) }   // skipped
+        viewer.handleIncoming(.videoFrame(frame(7, isKey: true)))
         decoder.resumeForTesting()
         try await waitUntil("the keyframe after the skip is shown") { shown.count == 2 }
-        try await waitUntil("the five frames count as dropped") { viewer.snapshot.droppedLastSecond == 5 }
+        try await waitUntil("the six frames count as dropped") { viewer.snapshot.droppedLastSecond == 6 }
         XCTAssertEqual(viewer.decodeFailures, 0, "no delta reached the decoder")
         let skips = try mark.entries("view").filter { $0.composedMessage.contains("keyframe") && $0.composedMessage.contains("behind") }
-        XCTAssertEqual(skips.map(\.composedMessage), ["the video decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
+        XCTAssertEqual(skips.count, 1, "one line for the skip: \(skips.map(\.composedMessage))")
         XCTAssertEqual(skips.first?.level, .info)
-        // How close together the frames that filled the queue came: here in one burst, as from a main thread that was
-        // busy or a network that delivered them at once, not about 50 ms apart, as from a decoder slower than the
-        // stream.
-        let spread = try mark.entries("view").filter {
-            $0.composedMessage.hasPrefix("the last 4 frames reached the decoder within ")
-        }
-        XCTAssertEqual(spread.count, 1, "the skip says how close together the waiting frames arrived")
-        XCTAssertEqual(spread.first?.level, .info)
-        let ms = spread.first.flatMap { Double($0.composedMessage.dropFirst(45).prefix { $0 != " " }) }
-        XCTAssertLessThan(try XCTUnwrap(ms, "a figure in ms"), 20)
+        let line = try XCTUnwrap(skips.first?.composedMessage)
+        let prefix = "the video decoder fell behind with 4 frames waiting, the oldest for "
+        let suffix = " ms; skipping to the next keyframe"
+        XCTAssertTrue(line.hasPrefix(prefix) && line.hasSuffix(suffix), line)
+        let waited = Double(line.dropFirst(prefix.count).dropLast(suffix.count))
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(waited, "a figure in ms: \(line)"), 60, "the oldest waited through the 60 ms")
         viewer.disconnect()
         await share.stop()
     }

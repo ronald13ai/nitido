@@ -851,11 +851,12 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
-    /// Spec 4, in the codec loop: a decoder that falls behind drops work rather than queue it. With three frames waiting
-    /// (the decoder's queue held here, as a stall would), the next delta starts a skip to the next keyframe and the one
-    /// after it is skipped too; the keyframe then drops the three that waited instead of decoding them first. All five
-    /// count as dropped, none is a decode failure, and the keyframe reaches the screen. Spec 12: the skip is logged,
-    /// once.
+    /// Spec 4, in the codec loop: a decoder that falls behind drops work rather than queue it, and it judges behind by
+    /// how long a frame has waited, not by how many wait. Four deltas handed over at once (the decoder's queue held
+    /// here, as a stall would) all wait; 60 ms later the oldest has waited past 50 ms, so the next delta starts a skip to
+    /// the next keyframe and the one after it is skipped too; the keyframe then drops the four that waited instead of
+    /// decoding them first. All six count as dropped, none is a decode failure, and the keyframe reaches the screen.
+    /// Spec 12: the skip is logged, once, with what was waiting.
     @MainActor
     func testTheCodecLoopSkipsToTheKeyframeWhenItFallsBehindAndCountsWhatItDropped() async throws {
         let journal = Journal()
@@ -879,18 +880,25 @@ final class ShareModelLifecycleTests: XCTestCase {
         decoder.drainForTesting()
         let mark = LogMark()
         decoder.suspendForTesting()
-        for seq in 1...5 { model.handleEncoded(frame(UInt32(seq), isKey: false)) }   // 1 to 3 wait, 4 and 5 are skipped
-        model.handleEncoded(frame(6, isKey: true))
+        for seq in 1...4 { model.handleEncoded(frame(UInt32(seq), isKey: false)) }   // a burst: all four wait
+        try await Task.sleep(for: .milliseconds(60))
+        for seq in 5...6 { model.handleEncoded(frame(UInt32(seq), isKey: false)) }   // skipped
+        model.handleEncoded(frame(7, isKey: true))
         XCTAssertTrue(model.decoder === decoder, "the keyframe's setup is the one the decoder has")
         decoder.resumeForTesting()
         try await waitUntil("the keyframe after the skip reaches the screen") { pushed.count == 2 }
-        try await waitUntil("the five frames count as dropped", timeout: 2) { model.snapshot.droppedLastSecond == 5 }
+        try await waitUntil("the six frames count as dropped", timeout: 2) { model.snapshot.droppedLastSecond == 6 }
         XCTAssertEqual(model.decodeFailures, 0, "no delta reached the decoder")
         XCTAssertEqual(model.state, .capturing)
         let skips = try mark.entries("share").filter { $0.composedMessage.contains("keyframe") && $0.composedMessage.contains("behind") }
-        XCTAssertEqual(skips.map(\.composedMessage),
-                       ["the codec loop's decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
+        XCTAssertEqual(skips.count, 1, "one line for the skip: \(skips.map(\.composedMessage))")
         XCTAssertEqual(skips.first?.level, .info)
+        let line = try XCTUnwrap(skips.first?.composedMessage)
+        let prefix = "the codec loop's decoder fell behind with 4 frames waiting, the oldest for "
+        let suffix = " ms; skipping to the next keyframe"
+        XCTAssertTrue(line.hasPrefix(prefix) && line.hasSuffix(suffix), line)
+        let waited = Double(line.dropFirst(prefix.count).dropLast(suffix.count))
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(waited, "a figure in ms: \(line)"), 60, "the oldest waited through the 60 ms")
         await model.stop()
     }
 
