@@ -66,15 +66,19 @@ final class FitTests: XCTestCase {
 }
 
 final class KeepWindowOnScreenTests: XCTestCase {
-    /// A resize that leaves the window off the left edge (as after shrinking back to Welcome) is pulled back.
+    /// A resize that leaves the window off the left edge (as after shrinking back to Welcome) is pulled back. The keeper
+    /// is given the visible frame of a 14-inch MacBook Pro's screen: off every screen, the window would otherwise be
+    /// pulled onto the main one, and with a second display attached that is not always the screen it started on.
     @MainActor
     func testResizeOffTheLeftEdgeIsPulledBackOnScreen() throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 720, height: 524),
                               styleMask: [.titled], backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
-        window.contentView = WindowKeeperView()
-        guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { throw XCTSkip("no screen") }
+        let keeper = WindowKeeperView()
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 950)
+        keeper.visibleFrame = { _ in visible }
+        window.contentView = keeper
 
         window.setFrame(NSRect(x: visible.minX - 927, y: visible.minY + 40, width: 560, height: 392), display: false)
 

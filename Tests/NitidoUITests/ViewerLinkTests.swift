@@ -295,6 +295,9 @@ final class ViewerLinkTests: XCTestCase {
 
     /// The viewer shows the sharer's picture at the same size: 1:1 stays exact, even at a half point. 1001 x 801 px
     /// at 2x is 500.5 x 400.5 pt, which `ViewView` lays out at the top left of a 501 pt wide window, as `ShareView` does.
+    /// The display is given to the sink first (a 14-inch MacBook Pro's, at 2x), so the rule does not depend on which
+    /// displays this Mac has: with none in a window the viewer would read the main screen, which can be a 1x monitor.
+    /// The window then reports its own screen, and the picture keeps the 1:1 size at that screen's scale.
     @MainActor
     func testAOneToOnePictureKeepsItsExactHalfPointSizeOnTheViewer() async throws {
         let (share, source) = try await listeningShare(width: 1001, height: 801)
@@ -307,12 +310,12 @@ final class ViewerLinkTests: XCTestCase {
         viewer.connect()
         try await waitUntil("the picture reaches the viewer") { shown.count >= 1 }
         XCTAssertEqual(viewer.pixelSize, CGSize(width: 1001, height: 801))
-        let screen = try XCTUnwrap(NSScreen.main, "a screen to fit the picture on")
-        guard screen.visibleFrame.width >= 560, screen.visibleFrame.height >= 540 else { throw XCTSkip("screen too small for 1:1") }
+        viewer.sink.displayChanged(scale: 2, visibleFrame: CGRect(x: 0, y: 0, width: 1512, height: 950))
         XCTAssertEqual(viewer.fittedPointSize, CGSize(width: 500.5, height: 400.5))
 
         // On screen, as `ShareWindowSizeTests` checks the sharing side: the window takes the content's whole-point
-        // size, and the picture sits at its top left with exactly the fitted size.
+        // size, and the picture sits at its top left with exactly the fitted size: 500.5 x 400.5 pt on a 2x screen,
+        // 1001 x 801 on a 1x one.
         _ = NSApplication.shared
         let controller = NSHostingController(rootView: ViewView(model: viewer))
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 560, height: 360),
@@ -321,6 +324,13 @@ final class ViewerLinkTests: XCTestCase {
         window.contentViewController = controller
         defer { window.contentViewController = nil }
         try await waitUntil("the viewer's video view exists") { viewer.sink.view != nil }
+        let scale = window.backingScaleFactor
+        let natural = CGSize(width: 1001 / scale, height: 801 / scale)
+        let visible = try XCTUnwrap(window.screen?.visibleFrame, "the window's screen")
+        let room = Fit.limit(visibleFrame: visible)
+        guard room.width >= natural.width, room.height >= natural.height else { throw XCTSkip("screen too small for 1:1") }
+        try await waitUntil("the sink hears the window's display") { viewer.sink.backingScale == scale }
+        XCTAssertEqual(viewer.fittedPointSize, natural, "1:1 at the scale of the window's screen")
         let content = try XCTUnwrap(window.contentView)
         content.layoutSubtreeIfNeeded()
         let fitted = viewer.fittedPointSize

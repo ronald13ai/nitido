@@ -56,6 +56,9 @@ struct KeepWindowOnScreen: NSViewRepresentable {
 
 final class WindowKeeperView: NSView {
     private weak var observed: NSWindow?
+    /// The visible frame the window is kept inside: its screen's, or the main screen's while it is on none. Internal so a
+    /// test can give it one, and not depend on which displays the Mac has or which of them is main.
+    var visibleFrame: (NSWindow) -> CGRect? = { ($0.screen ?? NSScreen.main)?.visibleFrame }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -72,8 +75,8 @@ final class WindowKeeperView: NSView {
     @objc private func windowDidResize(_ note: Notification) { keepOnScreen() }
 
     private func keepOnScreen() {
-        guard let window, let screen = window.screen ?? NSScreen.main else { return }
-        let fitted = Fit.constrained(window.frame, in: screen.visibleFrame)
+        guard let window, let visible = visibleFrame(window) else { return }
+        let fitted = Fit.constrained(window.frame, in: visible)
         if fitted.origin != window.frame.origin { window.setFrameOrigin(fitted.origin) }
     }
 }
