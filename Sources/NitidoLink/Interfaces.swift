@@ -33,8 +33,8 @@ struct IPv4Interface {
     }
 }
 
-/// An IPv4 network one of this Mac's interfaces is on: that interface's address and netmask. A viewer dials only the
-/// published addresses on one of its own networks (`Peer.routes(on:)`).
+/// An IPv4 network one of this Mac's interfaces is on: that interface's address and netmask. A viewer dials the
+/// published addresses on one of its own networks before the others (`Peer.dialled(on:)`).
 public struct IPv4Subnet: Hashable, Sendable {
     public let address: IPv4Address
     public let mask: IPv4Address

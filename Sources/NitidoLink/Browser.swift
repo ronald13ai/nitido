@@ -24,19 +24,28 @@ public struct Peer: Identifiable, Hashable, Sendable {
     }
 
     /// Where a viewer on `subnets` (its own networks, `IPv4Subnet.local`) tries to reach the sharer, in order
-    /// (`LinkSession`): the first address the sharer published on one of those networks, the next one, then the Bonjour
-    /// service. Most likely reading of the two-Mac logs (2026-10-09): the Bonjour service resolves to every address the
-    /// sharer has (IPv6 link-local, IPv4, AWDL), which Network.framework tries one after another, so a wrong code through
-    /// it failed the handshake several times on the sharer and never came back to the viewer, which gave up after its
-    /// deadline. One address gives one handshake, whose failure comes back as on one Mac. An address on none of the
-    /// viewer's networks (a desktop's Ethernet on another network, a sharer found only over AWDL) is not dialled: its
-    /// silence would only take time from the Bonjour service, the one route that can work then.
+    /// (`LinkSession`): two of the addresses the sharer published (`dialled(on:)`), then the Bonjour service. Most likely
+    /// reading of the two-Mac logs (2026-10-09): the Bonjour service resolves to every address the sharer has (IPv6
+    /// link-local, IPv4, AWDL), which Network.framework tries one after another, so a wrong code through it failed the
+    /// handshake several times on the sharer and never came back to the viewer, which gave up after its deadline. One
+    /// address gives one handshake, whose failure comes back as on one Mac.
     public func routes(on subnets: [IPv4Subnet]) -> [NWEndpoint] {
         let published = port.flatMap { NWEndpoint.Port(rawValue: $0) }.map { port in
-            addresses.filter { address in subnets.contains { $0.contains(address) } }
-                .prefix(2).map { NWEndpoint.hostPort(host: .ipv4($0), port: port) }
+            dialled(on: subnets).map { NWEndpoint.hostPort(host: .ipv4($0), port: port) }
         } ?? []
         return published.filter { $0 != endpoint } + [endpoint]
+    }
+
+    /// The published addresses a viewer on `subnets` dials, at most two, in order: those on one of its networks first,
+    /// then the others, each group in the order the sharer published them. An address on another network still comes
+    /// before the Bonjour service, since it may be the only way through: a sharer on another VLAN behind an mDNS
+    /// reflector, or one with only a self-assigned 169.254 address. Put after the ones on the viewer's networks, it does
+    /// not hold up the address that works: a desktop Mac publishes its Ethernet first, wherever that is. None without a
+    /// port.
+    func dialled(on subnets: [IPv4Subnet]) -> [IPv4Address] {
+        guard port != nil else { return [] }
+        let onOne = { (address: IPv4Address) in subnets.contains { $0.contains(address) } }
+        return Array((addresses.filter(onOne) + addresses.filter { !onOne($0) }).prefix(2))
     }
 }
 

@@ -12,9 +12,9 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 /// unreachable, Local Network denied, no answer), so a right code is never called wrong. A reconnect the sharer turns
 /// away with another key ends it too: its code changed (a new one every launch, or after three wrong codes).
 ///
-/// Every attempt goes through the peer's routes in order (`Peer.routes(on:)`): an address the sharer published on one of
-/// this Mac's networks, the next one, then the Bonjour service, all within `Link.defaultConnectTimeout` (8 s). A
-/// published address that does not reach the sharer (refused, no route, no answer within `unreachableAfter`:
+/// Every attempt goes through the peer's routes in order (`Peer.routes(on:)`): two addresses the sharer published, those
+/// on one of this Mac's networks before the others, then the Bonjour service, all within `Link.defaultConnectTimeout`
+/// (8 s). A published address that does not reach the sharer (refused, no route, no answer within `unreachableAfter`:
 /// `Link.noPathErrors`) hands over to the next route at once; anything else it says (a failed handshake above all, or a
 /// connection it took and reset) is the attempt's answer.
 public final class LinkSession: @unchecked Sendable {
@@ -66,17 +66,17 @@ public final class LinkSession: @unchecked Sendable {
                   connectTimeout: Link.defaultConnectTimeout, waitingTimeout: 5)
     }
 
-    /// `subnets` lists this Mac's networks (`IPv4Subnet.local`; tests give their own): a published address on none of
-    /// them is not dialled, so a sharer reached only over AWDL, or one whose Ethernet is on another network, leaves the
-    /// Bonjour service the whole deadline instead of 2 s after two silent addresses.
+    /// `subnets` lists this Mac's networks (`IPv4Subnet.local`; tests give their own): a published address on one of them
+    /// is dialled before one on none of them, so a desktop sharer whose Ethernet is on another network does not hold up
+    /// its Wi-Fi address, and one on none of them is still dialled, before the Bonjour service.
     convenience init(peer: Peer, code: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double,
                      subnets: @escaping @Sendable () -> [IPv4Subnet] = IPv4Subnet.local) {
         self.init(findRoutes: {
             let networks = subnets()
-            let elsewhere = peer.port == nil ? [] : peer.addresses.filter { address in !networks.contains { $0.contains(address) } }
+            let elsewhere = peer.dialled(on: networks).filter { address in !networks.contains { $0.contains(address) } }
             if !elsewhere.isEmpty {
                 let shown = elsewhere.map { "\($0)" }.joined(separator: ", ")
-                log.info("not dialling \(shown, privacy: .public): on none of this Mac's networks")
+                log.info("dialling \(shown, privacy: .public) last of the published addresses: on none of this Mac's networks")
             }
             return peer.routes(on: networks)
         }, code: code, sharerName: peer.keyName, hello: hello, connectTimeout: connectTimeout, waitingTimeout: waitingTimeout,

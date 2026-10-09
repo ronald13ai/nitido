@@ -131,28 +131,40 @@ final class DiscoveryTests: XCTestCase {
         ])
     }
 
-    /// Only the published addresses on one of the viewer's own networks are dialled. A desktop Mac whose Ethernet is on
-    /// another network publishes that address first, and a sharer found only over AWDL publishes addresses the viewer
-    /// cannot reach: dialling them cost 4 s and 2 s of silence and left the Bonjour service, the one route that works
-    /// there, 2 s of the deadline.
-    func testOnlyPublishedAddressesOnOneOfTheViewersNetworksAreDialled() {
+    private func route(_ address: String) -> NWEndpoint { .hostPort(host: .ipv4(IPv4Address(address)!), port: 50_000) }
+
+    /// The published addresses on one of the viewer's own networks are dialled first, then the others, then the Bonjour
+    /// service; two addresses at most. A desktop Mac whose Ethernet is on another network publishes that address first:
+    /// dialled first, its silence would cost 4 s before the Wi-Fi address that works. An address on none of the viewer's
+    /// networks is still dialled, after those: a sharer on another VLAN behind an mDNS reflector may be reached that way.
+    func testPublishedAddressesOnTheViewersNetworksComeFirstThenTheOthersThenTheService() {
         let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
-        let published = ["10.20.0.7", "192.168.1.20", "192.168.1.21", "169.254.10.1"].map { IPv4Address($0)! }
-        let peer = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: published, port: 50_000)
         let wifi = subnet("192.168.1.31", "255.255.255.0")
-        XCTAssertEqual(peer.routes(on: [wifi]), [
-            .hostPort(host: .ipv4(IPv4Address("192.168.1.20")!), port: 50_000),
-            .hostPort(host: .ipv4(IPv4Address("192.168.1.21")!), port: 50_000),
-            service,
-        ], "the Ethernet address on another network is skipped, not tried first")
-        XCTAssertEqual(peer.routes(on: [subnet("172.20.4.9", "255.255.0.0")]), [service],
-                       "on none of the viewer's networks: the Bonjour service alone, with the whole deadline")
-        XCTAssertEqual(peer.routes(on: []), [service])
-        XCTAssertEqual(peer.routes(on: [subnet("169.254.80.2", "255.255.0.0"), wifi]), [
-            .hostPort(host: .ipv4(IPv4Address("192.168.1.20")!), port: 50_000),
-            .hostPort(host: .ipv4(IPv4Address("192.168.1.21")!), port: 50_000),
-            service,
-        ], "in the order the sharer published them")
+        let desktop = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service,
+                           addresses: ["10.20.0.7", "192.168.1.20", "169.254.10.1"].map { IPv4Address($0)! }, port: 50_000)
+        XCTAssertEqual(desktop.routes(on: [wifi]), [route("192.168.1.20"), route("10.20.0.7"), service],
+                       "the address on the viewer's network first, the one elsewhere next, the Bonjour service last")
+        XCTAssertEqual(desktop.routes(on: [subnet("169.254.80.2", "255.255.0.0"), wifi]),
+                       [route("192.168.1.20"), route("169.254.10.1"), service],
+                       "two on the viewer's networks, in the order the sharer published them")
+        XCTAssertEqual(desktop.routes(on: [subnet("172.20.4.9", "255.255.0.0")]), [route("10.20.0.7"), route("192.168.1.20"), service],
+                       "on none of the viewer's networks: still dialled, in the order the sharer published them")
+        XCTAssertEqual(desktop.routes(on: []), [route("10.20.0.7"), route("192.168.1.20"), service])
+        let twoOnWifi = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service,
+                             addresses: ["10.20.0.7", "192.168.1.20", "192.168.1.21", "169.254.10.1"].map { IPv4Address($0)! },
+                             port: 50_000)
+        XCTAssertEqual(twoOnWifi.routes(on: [wifi]), [route("192.168.1.20"), route("192.168.1.21"), service],
+                       "two on the viewer's network take both tries")
+    }
+
+    /// A sharer whose only address is self-assigned (no DHCP server), seen by a viewer with no such address: the address
+    /// is on none of the viewer's networks and still dialled, before the Bonjour service.
+    func testAnAddressOnNoneOfTheViewersNetworksIsDialledWhenItIsTheOnlyOne() {
+        let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
+        let selfAssigned = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service,
+                                addresses: [IPv4Address("169.254.10.1")!], port: 50_000)
+        XCTAssertEqual(selfAssigned.routes(on: [subnet("192.168.1.31", "255.255.255.0")]), [route("169.254.10.1"), service])
+        XCTAssertEqual(selfAssigned.routes(on: []), [route("169.254.10.1"), service])
     }
 
     /// A network holds the addresses whose bits under its mask match its own.

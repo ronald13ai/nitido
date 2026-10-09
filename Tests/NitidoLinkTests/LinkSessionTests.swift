@@ -241,35 +241,62 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertEqual(next.accepted, 0, "the next route was not tried")
     }
 
-    /// A published address on none of the viewer's networks is not dialled: the session goes straight to the next
-    /// address and the attempt keeps its whole deadline. 192.0.2.1 (a documentation address, on no network) stands for a
-    /// desktop Mac's Ethernet on another network; the viewer's networks are given (loopback only).
-    func testAPublishedAddressOnNoneOfTheViewersNetworksIsNotDialled() async throws {
+    /// A session to `sharer` from a viewer on `networks`: its states until it is ready (or ends, 15 s at most), how long
+    /// that took, and what it logged.
+    private func pair(_ sharer: Peer, on networks: [IPv4Subnet]) async throws -> (seen: [LinkSession.State], took: Duration, log: [String]) {
         let mark = LogMark()
-        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
-        let port = try await advertiser.start()
-        defer { advertiser.stop() }
-        let sharer = Peer(id: "elsewhere", name: "Sharer", keyName: "Sharer", endpoint: absentService(),
-                          addresses: [IPv4Address("192.0.2.1")!, IPv4Address("127.0.0.1")!], port: port)
-        let loopback = IPv4Subnet(address: IPv4Address("127.0.0.1")!, mask: IPv4Address("255.0.0.0")!)
         let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view), connectTimeout: 8, waitingTimeout: 5,
-                                  unreachableAfter: 4, subnets: { [loopback] })
+                                  unreachableAfter: 4, subnets: { networks })
         let clock = ContinuousClock(), started = clock.now
         let watcher = Task { () -> [LinkSession.State] in
             var seen: [LinkSession.State] = []
             for await s in session.states { seen.append(s); if s == .ready { break } }
             return seen
         }
+        let deadline = Task { try await Task.sleep(for: .seconds(15)); session.close() }
         session.start()
         let seen = await watcher.value
-        XCTAssertEqual(seen, [.connecting(attempt: 1), .ready])
-        XCTAssertLessThan(clock.now - started, .seconds(2), "no time spent on the address elsewhere")
+        let took = clock.now - started
+        deadline.cancel()
         session.close()
+        return (seen, took, try mark.entries("session").map(\.composedMessage))
+    }
 
-        let lines = try mark.entries("session").map(\.composedMessage)
+    /// A published address on one of the viewer's networks is dialled before one on none of them, so the attempt does not
+    /// spend 4 s on the address elsewhere first. 192.0.2.1 (a documentation address, on no network) stands for a desktop
+    /// Mac's Ethernet on another network, published first; the viewer's networks are given (loopback only).
+    func testAPublishedAddressOnTheViewersNetworkIsDialledBeforeOneElsewhere() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "elsewhere", name: "Sharer", keyName: "Sharer", endpoint: absentService(),
+                          addresses: [IPv4Address("192.0.2.1")!, IPv4Address("127.0.0.1")!], port: port)
+        let loopback = IPv4Subnet(address: IPv4Address("127.0.0.1")!, mask: IPv4Address("255.0.0.0")!)
+        let (seen, took, lines) = try await pair(sharer, on: [loopback])
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .ready])
+        XCTAssertLessThan(took, .seconds(2), "no time spent on the address elsewhere")
+        let tried = lines.filter { $0.hasPrefix("trying ") }
+        XCTAssertEqual(tried, ["trying 127.0.0.1:\(port) (route 1 of 3)"], "\(lines)")
+        XCTAssertTrue(lines.contains("dialling 192.0.2.1 last of the published addresses: on none of this Mac's networks"), "\(lines)")
+    }
+
+    /// A published address on none of the viewer's networks is still dialled, before the Bonjour service: a sharer on
+    /// another VLAN behind an mDNS reflector, or one with only a self-assigned 169.254 address, is reached that way. Here
+    /// the viewer's networks are given without loopback and the Bonjour service never resolves, so only the published
+    /// 127.0.0.1 can pair.
+    func testAPublishedAddressOnNoneOfTheViewersNetworksIsDialledWhenItIsTheOnlyOne() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "reflected", name: "Sharer", keyName: "Sharer", endpoint: absentService(),
+                          addresses: [IPv4Address("127.0.0.1")!], port: port)
+        let elsewhere = IPv4Subnet(address: IPv4Address("192.168.77.2")!, mask: IPv4Address("255.255.255.0")!)
+        let (seen, took, lines) = try await pair(sharer, on: [elsewhere])
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .ready], "\(lines)")
+        XCTAssertLessThan(took, .seconds(2))
         let tried = lines.filter { $0.hasPrefix("trying ") }
         XCTAssertEqual(tried, ["trying 127.0.0.1:\(port) (route 1 of 2)"], "\(lines)")
-        XCTAssertTrue(lines.contains("not dialling 192.0.2.1: on none of this Mac's networks"), "\(lines)")
+        XCTAssertTrue(lines.contains("dialling 127.0.0.1 last of the published addresses: on none of this Mac's networks"), "\(lines)")
     }
 
     /// One attempt gives up after 8 seconds over all its routes (15 before): "No answer" says so.
