@@ -68,6 +68,9 @@ public final class VideoView: NSView {
         l.device = device
         l.pixelFormat = .bgra8Unorm
         l.framebufferOnly = false
+        // Three, the most a CAMetalLayer allows: one on screen, one on its way and one being drawn, so two in flight
+        // (`FramePacer.minimumCap` on a 60 Hz panel) still leave a drawable to draw into.
+        l.maximumDrawableCount = 3
         // Bounded wait: a nil drawable after one second instead of a main thread blocked indefinitely.
         l.allowsNextDrawableTimeout = true
         l.isOpaque = true
@@ -80,6 +83,7 @@ public final class VideoView: NSView {
         super.viewDidChangeBackingProperties()
         updateDrawableSize()
         reportDisplay()
+        pacer.displayChanged()
     }
     public override func layout() { super.layout(); updateDrawableSize() }
 
@@ -99,7 +103,12 @@ public final class VideoView: NSView {
         onDisplayChange?(window.backingScaleFactor, window.screen?.visibleFrame)
     }
 
-    @objc private func displayMayHaveChanged(_ note: Notification) { reportDisplay() }
+    /// The window moved to another screen, or a screen changed (its mode, the Dock, the menu bar): the sink hears the
+    /// display, and the pacer takes the cap the screen's refresh rate needs.
+    @objc private func displayMayHaveChanged(_ note: Notification) {
+        reportDisplay()
+        pacer.displayChanged()
+    }
 
     /// `compareWith` is the raw frame shown left of `dividerAt` (0...1); the main buffer is shown on the right.
     public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
@@ -177,6 +186,7 @@ public final class VideoView: NSView {
         center.addObserver(self, selector: #selector(displayMayHaveChanged(_:)),
                            name: NSWindow.didChangeScreenNotification, object: window)
         reportDisplay()
+        pacer.displayChanged()
     }
 
     /// Frames that arrived while the window was minimized, covered or hidden were kept, not drawn: show the newest.
@@ -194,6 +204,8 @@ extension VideoView: FrameDrawing {
     }
 
     var drawableCount: Int { metalLayer.maximumDrawableCount }
+
+    var refreshRate: Double { Double((window?.screen ?? NSScreen.main)?.maximumFramesPerSecond ?? 0) }
 
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> Drop? {
         let target = metalLayer.drawableSize

@@ -9,6 +9,8 @@ import NitidoCapture
 private final class FakeDrawing: FrameDrawing {
     var canShowFrames = true
     var drawableCount = 3
+    /// A 120 Hz panel, as on the Mac the pacer was first tuned on: one drawable in flight to start.
+    var refreshRate: Double = 120
     var renderResult: VideoView.Drop?
     /// The time a render is committed at. The display simulation sets it; unit tests leave it at 0.
     var clock: () -> Double = { 0 }
@@ -74,7 +76,14 @@ private func frame(_ ns: UInt64) throws -> FramePacer.Frame {
 ///   one per refresh, as with display sync on. Its presented handler reaches the main actor `handlerDelay` after
 ///   the refresh and reports the refresh time.
 /// - The source changes at every `sourceEvery`-th refresh. Each frame carries that refresh as its capture time,
-///   as ScreenCaptureKit's display time does, and reaches the main actor `arrivalPhase` after it.
+///   as ScreenCaptureKit's display time does, and reaches the main actor `arrivalPhase` after it. With `sourcePeriod`
+///   it changes every `sourcePeriod` seconds instead, whatever the display does (the viewer's frames come from the
+///   other Mac's capture), and each frame carries the moment it changed.
+/// - With `refreshRate`, the view reports that rate to the pacer, as `VideoView` does for its window's screen.
+///   Without it the pacer is never told and keeps one drawable in flight to start, as on a panel at twice the capture
+///   rate or faster: the tests that leave it out at a 60 Hz period exercise the one-in-flight rules (a late frame held
+///   back, a burst drained) on a compositor that shows a drawable at the next refresh. On a real 60 Hz panel the pacer
+///   starts at two (`testSixtyHertzPanelShowsAFiftyEightFpsSourceWithTwoInFlightFromTheStart`).
 /// - Main-actor work (arrivals, presented handlers, the pacer's late draws, divider moves) waits while the main
 ///   thread is stalled. Of the frames that arrive during a stall, the first (already handed to the waiting frames
 ///   loop) and the newest (the capture stream keeps one buffered) reach the pacer; the ones between are lost before
@@ -92,6 +101,10 @@ private final class DisplaySim {
         var compare = false
         /// Added to `arrivalPhase` frame by frame, in turn: frames that reach the main actor a little late.
         var arrivalJitter: [Double] = [0]
+        /// A source that changes every this many seconds, on its own clock, in place of `sourceEvery`.
+        var sourcePeriod: Double? = nil
+        /// The refresh rate the view reports to the pacer; nil reports none, and the pacer keeps its first cap.
+        var refreshRate: Double? = nil
     }
 
     private struct Event {
@@ -115,6 +128,8 @@ private final class DisplaySim {
     /// The last refresh run.
     private(set) var refresh = 0
     private var sourceStopsAfter = Int.max
+    /// The next change of a source with `sourcePeriod`.
+    private var nextSourceChange: Double = 1
     private var events: [Event] = []
     private var seq = 0
     private var stalls: [(start: Double, end: Double)] = []
@@ -134,6 +149,10 @@ private final class DisplaySim {
         pacer.now = { [unowned self] in clock }
         pacer.schedule = { [unowned self] delay, action in add(at: clock + delay, arrival: false, action) }
         host.clock = { [unowned self] in clock }
+        if let rate = config.refreshRate {
+            host.refreshRate = rate
+            pacer.displayChanged()
+        }
         pacer.drawableSize = CGSize(width: 800, height: 600)
     }
 
@@ -142,6 +161,14 @@ private final class DisplaySim {
     /// Runs `count` more refreshes and the main-actor work between them.
     func run(refreshes count: Int) {
         let last = refresh + count
+        if let period = config.sourcePeriod {
+            while nextSourceChange <= time(ofRefresh: last) {
+                let jitter = config.arrivalJitter[sourceFrames % config.arrivalJitter.count]
+                sourceFrames += 1
+                scheduleArrival(at: nextSourceChange + config.arrivalPhase + jitter, capturedAt: nextSourceChange)
+                nextSourceChange += period
+            }
+        }
         while true {
             let nextRefresh = time(ofRefresh: refresh + 1)
             if let i = nextEventIndex(), effective(events[i].time) < nextRefresh {
@@ -166,7 +193,10 @@ private final class DisplaySim {
     }
 
     /// The source stops changing after the current refresh.
-    func stopSource() { sourceStopsAfter = refresh }
+    func stopSource() {
+        precondition(config.sourcePeriod == nil, "a source on its own clock runs on")
+        sourceStopsAfter = refresh
+    }
 
     /// The divider is dragged: `count` moves `interval` apart, the first `delay` from now, each to a new position.
     /// A move is main-actor work (the gesture sets `ShareModel.dividerPosition`, which moves the view's divider).
@@ -262,7 +292,7 @@ private final class DisplaySim {
                 }
             }
         }
-        if refresh % config.sourceEvery == 0, refresh <= sourceStopsAfter {
+        if config.sourcePeriod == nil, refresh % config.sourceEvery == 0, refresh <= sourceStopsAfter {
             let jitter = config.arrivalJitter[sourceFrames % config.arrivalJitter.count]
             sourceFrames += 1
             scheduleArrival(at: t + config.arrivalPhase + jitter, capturedAt: t)
@@ -846,6 +876,57 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(pacer.cap, 1, "never below one")
     }
 
+    /// The cap starts from the display the window is on and follows it to another one. Two refreshes are what one
+    /// drawable in flight costs a frame (the compositor puts it on the glass at the second refresh after its commit),
+    /// so a panel slower than twice the capture rate needs two in flight to show a 60 fps source, and never goes below
+    /// two however long it stays calm; a faster one starts from one and keeps the rule that raises it and lowers it
+    /// again. A pool of two drawables never allows two in flight, and an unknown rate changes nothing.
+    @MainActor
+    func testTheCapStartsFromTheDisplayAndFollowsItToAnother() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        var clock = 10.0
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        let buffer = try makeBuffer()
+        var ns: UInt64 = 1
+        var shownNs = ns
+        pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+        /// Frames whose drawables come back in time, for `seconds`: nothing starves.
+        func calm(for seconds: Double) {
+            let end = clock + seconds
+            while clock + 1.0 / 60 <= end {
+                clock += 1.0 / 60; ns += 1
+                pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+                pacer.drawableReturned(kind: .live, captureHostTimeNs: shownNs, presentedAt: clock - 0.005)
+                shownNs = ns
+            }
+        }
+
+        for (rate, expected) in [(120.0, 1), (60, 2), (59.94, 2), (90, 2), (144, 1), (60, 2)] {
+            host.refreshRate = rate
+            pacer.displayChanged()
+            XCTAssertEqual(pacer.cap, expected, "\(rate) Hz")
+        }
+        calm(for: 30)
+        XCTAssertEqual(pacer.cap, 2, "thirty calm seconds on a 60 Hz panel leave two in flight")
+        XCTAssertTrue(host.drops.isEmpty)
+
+        host.refreshRate = 120
+        pacer.displayChanged()
+        XCTAssertEqual(pacer.cap, 1, "moved to a 120 Hz panel")
+        host.refreshRate = 0
+        pacer.displayChanged()
+        XCTAssertEqual(pacer.cap, 1, "a rate the screen does not say changes nothing")
+        host.drawableCount = 2
+        host.refreshRate = 60
+        pacer.displayChanged()
+        XCTAssertEqual(pacer.cap, 1, "a pool of two never has two in flight")
+    }
+
     /// No drawable back for over a second: the count resets and drawing resumes (a lost presented handler).
     @MainActor
     func testStalledBacklogResetsAfterOneSecond() throws {
@@ -1061,6 +1142,46 @@ final class FramePacerDisplayTests: XCTestCase {
             XCTAssertEqual(sim.pacer.cap, 1)
             sim.assertAccounting()
         }
+    }
+
+    /// The two-Mac test's viewer: a 60 Hz panel whose compositor puts each drawable on the glass at the second refresh
+    /// after its commit (with one drawable in flight that panel showed 33 fps of a 58 fps source), and a source at
+    /// 58 fps, on the sharer's clock. Two in flight from the start: every frame is shown, none waits behind another or
+    /// is dropped, and the cap stays at two for 40 seconds, four times the calm that lowered a raised cap, so it never
+    /// swings between one and two.
+    @MainActor
+    func testSixtyHertzPanelShowsAFiftyEightFpsSourceWithTwoInFlightFromTheStart() throws {
+        let sim = try DisplaySim(.init(depth: 2, sourcePeriod: 1.0 / 58, refreshRate: 60))
+        XCTAssertEqual(sim.pacer.cap, 2, "two in flight before the first frame")
+        var caps: Set<Int> = []
+        for _ in 0..<40 {
+            sim.run(refreshes: 60)
+            caps.insert(sim.pacer.cap)
+        }
+        XCTAssertEqual(caps, [2], "never back to one")
+        XCTAssertEqual(sim.backlogDrops, 0, "no frame replaced while it waited")
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        let shownPerSecond = Double(sim.host.presented.count) / 40
+        XCTAssertGreaterThan(shownPerSecond, 57.5, "close to the source's 58 fps")
+        let latest = sim.latencies.map(\.refreshes).max() ?? 0
+        XCTAssertLessThanOrEqual(latest, 2 + 0.002 * 60 + 0.001, "the compositor's two refreshes after the frame arrived, no more")
+        sim.assertAccounting()
+    }
+
+    /// The same source and compositor on a 120 Hz panel: two of its refreshes are shorter than a capture interval, so
+    /// one drawable in flight shows every frame without adding a refresh of latency, and the pacer keeps one.
+    @MainActor
+    func testOneTwentyHertzPanelShowsAFiftyEightFpsSourceWithOneInFlight() throws {
+        let sim = try DisplaySim(.init(period: 1.0 / 120, depth: 2, sourcePeriod: 1.0 / 58, refreshRate: 120))
+        var caps: Set<Int> = []
+        for _ in 0..<20 {
+            sim.run(refreshes: 120)
+            caps.insert(sim.pacer.cap)
+        }
+        XCTAssertEqual(caps, [1])
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        XCTAssertGreaterThan(Double(sim.host.presented.count) / 20, 57.5)
+        sim.assertAccounting()
     }
 
     /// The gold divider dragged for a second over a source that changes every capture interval. Each frame carries the

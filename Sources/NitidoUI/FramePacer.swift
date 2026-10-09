@@ -14,6 +14,8 @@ protocol FrameDrawing: AnyObject {
     var canShowFrames: Bool { get }
     /// The layer's drawable pool size.
     var drawableCount: Int { get }
+    /// The highest refresh rate, in Hz, of the screen the window is on; 0 when it is not known.
+    var refreshRate: Double { get }
     /// Renders `frame` into a fresh drawable and commits it. Returns nil once the drawable is committed; the
     /// host then calls `FramePacer.drawableReturned` when it is presented or discarded. Returns why otherwise.
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> VideoView.Drop?
@@ -28,17 +30,22 @@ protocol FrameDrawing: AnyObject {
 /// cap waits for the next drawable as a live frame, so it still counts as displayed, with its real latency; it
 /// is a dropped frame only when a newer one replaces it before it was drawn.
 ///
-/// Queue depth. Presentation is in order, one drawable per refresh, so every drawable queued ahead of a frame
-/// delays it by a refresh, and a source that changes at the display rate keeps that delay for good: one frame
-/// arrives and one is shown per refresh, so the queue never drains on its own. The pacer therefore keeps one
-/// drawable in flight (`cap`). A frame that waited at the cap through a refresh (the drawable ahead of it was shown
-/// after it arrived) is held back for one capture interval with the drawable free: a newer frame replaces it (one
-/// `.backlog` drop) and is drawn at once into the empty queue, which brings latency back to one refresh; if none
-/// comes, the source went still and the held-back frame is drawn then. A frame that waited only because the
-/// presented handler reached the main actor after it is drawn at once. If frames keep starving at the cap, the
-/// display keeps each drawable longer than a refresh, and the cap rises by one, up to the pool size minus one. It
-/// steps back down by one after ten seconds without starving (on `now`, whatever the refresh rate), so a transient (a
-/// Space switch, Mission Control, a main-thread hitch) does not cost a refresh of latency for the rest of the session.
+/// Queue depth. Presentation is in order, one drawable per refresh, so every drawable queued ahead of a frame delays it
+/// by a refresh, and a source that changes at the display rate keeps that delay for good: one frame arrives and one is
+/// shown per refresh, so the queue never drains on its own. The pacer therefore keeps as few drawables in flight
+/// (`cap`) as the display needs. One drawable in flight costs each frame two refreshes (the compositor puts a drawable
+/// on the glass at the second refresh after its commit, and the presented handler that frees the slot comes no sooner),
+/// so a panel slower than twice the capture rate, 60 Hz among them, could show only every other frame of a 60 fps
+/// source with one: it starts at two and never goes below (`minimumCap`, taken from the screen the window is on by
+/// `displayChanged`). A 120 Hz panel starts at one. A frame that waited at the cap through a refresh (the drawable
+/// ahead of it was shown after it arrived) is held back for one capture interval with the drawable free: a newer frame
+/// replaces it (one `.backlog` drop) and is drawn at once into the emptier queue, which brings latency back to the
+/// display's own; if none comes, the source went still and the held-back frame is drawn then. A frame that waited only
+/// because the presented handler reached the main actor after it is drawn at once. If frames keep starving at the cap,
+/// the display keeps each drawable longer than the pacer expected, and the cap rises by one, up to the pool size minus
+/// one. It steps back down by one after ten seconds without starving (on `now`, whatever the refresh rate), never below
+/// `minimumCap`, so a transient (a Space switch, Mission Control, a main-thread hitch) does not cost a refresh of
+/// latency for the rest of the session.
 @MainActor
 final class FramePacer {
     struct Frame {
@@ -57,9 +64,12 @@ final class FramePacer {
         case redraw
     }
 
-    /// How long a late frame is held back for a newer one: the capture interval (`CaptureSession` asks for at most
-    /// 60 fps), so a source that keeps changing sends its next frame within it.
-    static let lateFrameGrace: CFTimeInterval = 1.0 / 60
+    /// The highest rate a source changes at: `CaptureSession` asks for at most 60 fps, on the viewer too (its frames
+    /// come from the sharer's capture).
+    static let captureRate: Double = 60
+    /// How long a late frame is held back for a newer one: the capture interval, so a source that keeps changing sends
+    /// its next frame within it.
+    static let lateFrameGrace: CFTimeInterval = 1.0 / captureRate
     /// Drawable returns in a row that find a frame starved before one more drawable may be in flight.
     static let starvedReturnsBeforeRaise = 6
     /// Seconds without a starved frame before one drawable fewer may be in flight again.
@@ -76,10 +86,12 @@ final class FramePacer {
     private(set) var held: Frame?
     /// Frames committed whose drawable has not been presented or discarded yet.
     private(set) var inFlight = 0
-    /// Drawables allowed in flight. One to start: the compositor may still hold the drawable shown before the
-    /// current one, so with the usual pool of three a second one queued could make nextDrawable() block the main
-    /// thread, and one queued drawable is all a frame needs to be shown at the next refresh.
+    /// Drawables allowed in flight: `minimumCap` to start, raised while frames keep starving, lowered after a calm.
     private(set) var cap = 1
+    /// The fewest drawables in flight the display needs to show a source at the capture rate: two on a panel slower
+    /// than twice the capture rate, one on a faster one (`minimumCap(refreshRate:drawableCount:)`). One until the pacer
+    /// knows the display (`displayChanged`).
+    private(set) var minimumCap = 1
     /// The held frame met the cap and is drawn as this kind when a drawable is free, unless a live frame is
     /// committed first. `.live`: a captured frame not drawn yet, counted as displayed once it is shown, or as
     /// dropped if a newer frame replaces it first. `.redraw`: the held frame drawn again (resize, reveal).
@@ -229,6 +241,35 @@ final class FramePacer {
         if let held { submit(held, kind: waiting) }
     }
 
+    /// The window is on a screen for the first time, moved to another, or its screen changed mode: the cap starts again
+    /// from what this display needs (`minimumCap(refreshRate:drawableCount:)`), and the rule that raises and lowers it
+    /// starts afresh on top of that. Nothing when the display needs what the last one did, or does not say its rate.
+    func displayChanged() {
+        guard let host, host.refreshRate > 0 else { return }
+        let needed = Self.minimumCap(refreshRate: host.refreshRate, drawableCount: host.drawableCount)
+        guard needed != minimumCap else { return }
+        minimumCap = needed
+        cap = needed
+        starvedReturns = 0
+        calmSince = now()
+        lowerAfter = Self.calmBeforeLower
+        loweredAt = nil
+        log.info("The display refreshes at \(host.refreshRate, format: .fixed(precision: 0), privacy: .public) Hz: allowing \(self.cap, privacy: .public) in flight")
+    }
+
+    /// Two drawables in flight on a panel slower than twice the capture rate (60 Hz, also 59.94, 75, 90 or 100 Hz), one
+    /// on a faster one. One drawable in flight costs a frame two refreshes: the compositor puts it on the glass at the
+    /// second refresh after its commit, and its presented handler, which frees the slot, comes no sooner (with one in
+    /// flight the two-Mac test's 60 Hz viewer showed 33 fps of a 58 fps source). Where two refreshes last longer than a
+    /// capture interval, every frame needs the next drawable queued behind the one on its way: one shown and one
+    /// queued. A 120 Hz panel shows a 60 fps source with one, and a second would only add a refresh of latency after a
+    /// burst. Never more than the pool minus one: the layer keeps three drawables (`VideoView`), one on screen, one on
+    /// its way and one being drawn.
+    static func minimumCap(refreshRate: Double, drawableCount: Int) -> Int {
+        let wanted = refreshRate < 2 * captureRate - 1 ? 2 : 1
+        return min(wanted, max(1, drawableCount - 1))
+    }
+
     /// Lets go of the held frame so its buffer goes back to the capture pool.
     func releaseHeldFrame() {
         held = nil
@@ -254,7 +295,8 @@ final class FramePacer {
     }
 
     /// Counts drawable returns that found a live frame starved; enough in a row raise the cap by one. A return
-    /// `lowerAfter` seconds after the last starved one (or the last lowering) lowers it by one again, never below one.
+    /// `lowerAfter` seconds after the last starved one (or the last lowering) lowers it by one again, never below
+    /// `minimumCap`.
     /// The calm is measured on `now`, so it lasts as long at 120 Hz or with a 30 fps source as at 60 Hz.
     private func noteReturn(starved: Bool, at now: CFTimeInterval) {
         replacedSinceReturn = false
@@ -265,7 +307,7 @@ final class FramePacer {
             starvedReturns = 0
             if let lowered = loweredAt, now - lowered < lowerAfter { lowerAfter = min(2 * lowerAfter, Self.longestWaitBeforeLower) }
             log.info("Frames kept waiting for a drawable: the display holds each one longer than a refresh. Allowing \(self.cap, privacy: .public) in flight")
-        } else if cap > 1, now - calmSince >= lowerAfter {
+        } else if cap > minimumCap, now - calmSince >= lowerAfter {
             cap -= 1
             calmSince = now
             loweredAt = now
