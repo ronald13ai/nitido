@@ -929,9 +929,10 @@ final class FramePacerTests: XCTestCase {
 
     /// ProMotion runs the panel at 60 Hz for a 60 fps source while the screen still says 120 Hz. The pacer measures the
     /// cadence of the presentations over each second: every one 16.7 ms or a whole multiple of it after the last means
-    /// a 60 Hz panel, so two in flight, however long it stays calm. Back at 120 Hz (presentations 16.7 or 25 ms apart
-    /// for a 58 fps source, which only a 120 Hz panel shows) the floor is the screen's again within a second or so, and
-    /// the cap steps down to one after ten calm seconds from then, not before.
+    /// a 60 Hz panel, so two in flight, however long it stays calm, and through a change of the rate the screen says.
+    /// Back at 120 Hz (presentations 16.7 or 25 ms apart for a 58 fps source, which only a 120 Hz panel shows) the floor
+    /// is the screen's again within a second or so, and the cap steps down to one after ten calm seconds from then, not
+    /// before.
     @MainActor
     func testTheCapFollowsThePresentationCadenceUnderTheScreensRate() throws {
         let host = FakeDrawing()
@@ -970,6 +971,13 @@ final class FramePacerTests: XCTestCase {
         _ = run(for: 2, refresh: 1.0 / 60)
         XCTAssertEqual(pacer.cap, 2, "two in flight within two seconds of presentations at 60 Hz")
         XCTAssertEqual(run(for: 30, refresh: 1.0 / 60), [2], "thirty calm seconds at 60 Hz leave two in flight")
+        // The screen says another rate (a mode change): the cadence is measured afresh against it, and the two in flight
+        // stay meanwhile.
+        for rate in [144.0, 120] {
+            host.refreshRate = rate
+            pacer.displayChanged()
+            XCTAssertEqual(run(for: 5, refresh: 1.0 / 60), [2], "\(rate) Hz said, 60 Hz shown")
+        }
         XCTAssertEqual(run(for: 10, refresh: 1.0 / 120), [2], "back at 120 Hz: not before ten calm seconds")
         _ = run(for: 2, refresh: 1.0 / 120)
         XCTAssertEqual(pacer.cap, 1, "then one again")

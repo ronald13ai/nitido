@@ -280,6 +280,8 @@ final class FramePacer {
             nominalRate = host.refreshRate
             presentations.removeAll()
             cadenceMeasuredAt = nil
+            // A cap the old cadence raised steps down only after a calm from here, as it does when the cadence changes.
+            if cadenceFloor > 1 { calmSince = now() }
             cadenceFloor = 1
         }
         let needed = Self.minimumCap(refreshRate: host.refreshRate, drawableCount: host.drawableCount)
