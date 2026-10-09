@@ -1538,9 +1538,33 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(share.frameBytes, initialFrameBytes, "a new viewer starts from the initial rate")
 
         share.loopback = true
+        XCTAssertEqual(share.frameBytes, Int(share.qualityMbps * 1_000_000) / 8 / 60,
+                       "the loop turned on runs at the slider's rate before the slider moves")
         share.qualityMbps = 60
         XCTAssertEqual(share.frameBytes, 60_000_000 / 8 / 60, "the slider's rate sizes a frame while the loop is on")
         second.disconnect(); first.disconnect()
+        await share.stop()
+    }
+
+    /// Spec 1 allows connecting a viewer, then turning the codec loop on: the loop's picture and the strip's bitrate then
+    /// show the slider's rate (20 Mbps by default), not the rate the controller had set for the viewer (2 Mbps for this
+    /// 320x180 picture), which the loop would otherwise keep until the slider moved. A new encoder takes the slider's
+    /// rate, so the loop's still picture shows it at once.
+    @MainActor
+    func testTheCodecLoopTurnedOnWithAViewerConnectedRunsAtTheSlidersRate() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        XCTAssertEqual(share.frameBytes, BitrateController.initialBitrate(width: 320, height: 180) / 8 / 60)
+        let keyframes = received.keyframeTimes.count
+
+        share.loopback = true
+        XCTAssertEqual(share.frameBytes, Int(share.qualityMbps * 1_000_000) / 8 / 60, "the loop runs at the slider's rate")
+        try await waitUntil("the viewer gets the new encoder's keyframe") { received.keyframeTimes.count > keyframes }
+        XCTAssertEqual(share.state, .capturing)
+        viewer.close()
         await share.stop()
     }
 

@@ -671,6 +671,12 @@ public final class ShareModel {
 
     private func loopbackDidChange() {
         guard !loopback else {
+            // An encoder made for a viewer runs at the controller's rate, which the loop freezes: the loop runs at the
+            // slider's instead (spec 8), from a new encoder, since a running one's rate control would carry the old
+            // rate's quality over many frames (`qualityRested`). The viewer gets the new encoder's keyframe.
+            if let encoder, currentBitrate != Int(qualityMbps * 1_000_000), state == .capturing {
+                makeEncoder(width: encoder.width, height: encoder.height)
+            }
             // On at once: a still source sends no frame to start the loop with, so the one on screen is encoded now.
             encodeNewestAgain()
             return
