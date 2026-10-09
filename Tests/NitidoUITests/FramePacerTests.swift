@@ -1168,6 +1168,78 @@ final class FramePacerDisplayTests: XCTestCase {
         sim.assertAccounting()
     }
 
+    /// The two-Mac test's 60 Hz panel (two in flight from the start, a compositor that puts each drawable on the glass
+    /// at the second refresh after its commit) after three extra frames at once, as a network that delivered several
+    /// together hands them over: the cap stays at two, the burst costs its three frames (each replaced by a newer one
+    /// before it was drawn), and every frame from the burst on is shown two refreshes after capture, the compositor's
+    /// own delay, never a refresh more. Measured with the probe for this case: 3 backlog drops, 2.000 refreshes.
+    @MainActor
+    func testSixtyHertzPanelWithTwoInFlightDrainsABurstBackToTwoRefreshes() throws {
+        let sim = try DisplaySim(.init(depth: 2, refreshRate: 60))
+        sim.run(refreshes: 60)
+        XCTAssertEqual(sim.pacer.cap, 2)
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        let burstAt = sim.refresh
+        sim.burst(3)
+        var caps: Set<Int> = []
+        for _ in 0..<10 { sim.run(refreshes: 6); caps.insert(sim.pacer.cap) }
+        XCTAssertEqual(caps, [2], "never back to one, never up to three")
+        XCTAssertEqual(sim.host.drops, [.backlog, .backlog, .backlog], "each burst frame replaced before it was drawn")
+        let after = sim.latencies(capturedFromRefresh: burstAt)
+        XCTAssertGreaterThanOrEqual(after.count, 59)
+        XCTAssertEqual(after.max() ?? 0, 2, accuracy: 0.001, "no plateau after the burst")
+        XCTAssertEqual(after.min() ?? 0, 2, accuracy: 0.001)
+        sim.assertAccounting()
+    }
+
+    /// The same panel after a 50 ms main-thread stall: the frames loop then hands over a stale frame and the newest one
+    /// back to back. The cap stays at two; the frame between them never reaches the pacer and the stale one is replaced
+    /// by the newest (one backlog drop); the frames the stall caught are shown late (4 and then 3 refreshes after
+    /// capture), and every frame captured from the first refresh after the stall on is back at two. Measured with the
+    /// probe for this case: 1 lost, 1 backlog drop, latencies 4, 3, then 2.000.
+    @MainActor
+    func testSixtyHertzPanelWithTwoInFlightRecoversFromAFiftyMillisecondStall() throws {
+        let sim = try DisplaySim(.init(depth: 2, refreshRate: 60))
+        sim.run(refreshes: 60)
+        let stallRefresh = sim.refresh
+        sim.stall(after: 0.001, for: 0.050)
+        var caps: Set<Int> = []
+        for _ in 0..<10 { sim.run(refreshes: 6); caps.insert(sim.pacer.cap) }
+        XCTAssertEqual(caps, [2], "never back to one, never up to three")
+        XCTAssertEqual(sim.lost, 1, "the frame between the first and the newest never reaches the pacer")
+        XCTAssertEqual(sim.host.drops, [.backlog], "the stale frame the newest replaced")
+        XCTAssertEqual(sim.latencies(capturedFromRefresh: stallRefresh).max() ?? 0, 4, accuracy: 0.001, "the frame that waited out the stall")
+        XCTAssertEqual(sim.latencies(capturedFromRefresh: stallRefresh + 2).max() ?? 0, 3, accuracy: 0.001)
+        // The stall ends just after refresh stallRefresh + 3; the frame captured at the next refresh is on time.
+        let after = sim.latencies(capturedFromRefresh: stallRefresh + 4)
+        XCTAssertGreaterThanOrEqual(after.count, 54)
+        XCTAssertEqual(after.max() ?? 0, 2, accuracy: 0.001, "no plateau after the stall")
+        XCTAssertEqual(after.min() ?? 0, 2, accuracy: 0.001)
+        sim.assertAccounting()
+    }
+
+    /// The same panel when the drawable changes size (the window fitted to the pick): the held frame is drawn again
+    /// once, the cap stays at two, the frame that waited behind the redraw is replaced by the next (one backlog drop),
+    /// and every frame is shown two refreshes after capture, the redraw costing no refresh of latency. Measured with
+    /// the probe for this case: 1 redraw, 1 backlog drop, 2.000 refreshes.
+    @MainActor
+    func testSixtyHertzPanelWithTwoInFlightKeepsTwoRefreshesThroughAResize() throws {
+        let sim = try DisplaySim(.init(depth: 2, refreshRate: 60))
+        sim.run(refreshes: 60)
+        let resizeAt = sim.refresh
+        sim.pacer.drawableSize = CGSize(width: 1600, height: 1200)
+        var caps: Set<Int> = []
+        for _ in 0..<10 { sim.run(refreshes: 6); caps.insert(sim.pacer.cap) }
+        XCTAssertEqual(caps, [2], "never back to one, never up to three")
+        XCTAssertEqual(sim.redraws, 1, "the resize redraw only")
+        XCTAssertEqual(sim.host.drops, [.backlog], "the frame that waited behind the redraw")
+        let after = sim.latencies(capturedFromRefresh: resizeAt)
+        XCTAssertGreaterThanOrEqual(after.count, 58)
+        XCTAssertEqual(after.max() ?? 0, 2, accuracy: 0.001, "no plateau after the resize")
+        XCTAssertEqual(after.min() ?? 0, 2, accuracy: 0.001)
+        sim.assertAccounting()
+    }
+
     /// The same source and compositor on a 120 Hz panel: two of its refreshes are shorter than a capture interval, so
     /// one drawable in flight shows every frame without adding a refresh of latency, and the pacer keeps one.
     @MainActor
