@@ -133,8 +133,9 @@ final class LinkSessionTests: XCTestCase {
         return seen
     }
 
-    /// Two Macs, wrong code: through the Bonjour service Network.framework tried the handshake on each address it
-    /// resolved, failed it on every one, reported nothing and the viewer gave up after 15 s with "No answer". Through
+    /// Two Macs, wrong code: through the Bonjour service the handshake failed four times on the sharer (most likely
+    /// Network.framework trying each address it resolved), nothing came back and the viewer gave up after 15 s with "No
+    /// answer". Through
     /// the address the sharer published, the failed handshake comes back at once and the session ends as a wrong code,
     /// after one handshake on the sharer. The right code pairs the same way.
     func testAWrongCodeThroughThePublishedAddressIsRejectedAtOnce() async throws {

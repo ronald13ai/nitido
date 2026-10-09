@@ -78,8 +78,9 @@ final class DiscoveryTests: XCTestCase {
     }
 
     /// The sharer's TXT record names the IPv4 addresses and the port it listens on, so a viewer can connect to one
-    /// address instead of the Bonjour service, which Network.framework resolves to several addresses and tries one after
-    /// another. A record from a sharer that publishes none (an older build) still gives a peer, with no address.
+    /// address instead of the Bonjour service, which Network.framework most likely resolves to several addresses and
+    /// tries one after another. A record from a sharer that publishes none (an older build) still gives a peer, with no
+    /// address.
     func testTheTXTRecordCarriesTheAddressesAndThePortAndReadsBack() throws {
         let service = NWEndpoint.service(name: "Ronald's MacBook Pro (2)", type: "_nitido._tcp", domain: "local.", interface: nil)
         let addresses = [IPv4Address("192.168.1.20")!, IPv4Address("10.0.0.5")!]

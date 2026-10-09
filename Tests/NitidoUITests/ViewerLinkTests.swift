@@ -1058,7 +1058,8 @@ final class ViewerLinkTests: XCTestCase {
 
     /// Three wrong codes mean someone is guessing: the sharer shows a new code and listens with its key, the old code no
     /// longer pairs, and the viewer who had paired goes on as it was. One attempt that fails the handshake several times
-    /// in a row from one address (Network.framework tried each address of the sharer on two Macs) is one wrong code, so
+    /// in a row from one address (on two Macs, most likely Network.framework trying each address of the sharer) is one
+    /// wrong code, so
     /// the guesses here come seconds apart on the sharer's clock.
     @MainActor
     func testThreeFailedHandshakesRotateTheCodeAndLeaveTheViewerAlone() async throws {
@@ -1243,8 +1244,9 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// Two Macs, wrong code: the viewer said "No answer from the other Mac within 15 seconds" because it connected to
-    /// the Bonjour service, whose several addresses Network.framework tried one after another without a word. It now
+    /// Two Macs, wrong code: the viewer said "No answer from the other Mac within 15 seconds" when it connected to the
+    /// Bonjour service, most likely because Network.framework tried its several addresses one after another without a
+    /// word. It now
     /// connects to the address the sharer published (here the loopback address, behind a Bonjour service that never
     /// resolves), and the failed handshake comes back at once as "Wrong code", one wrong code on the sharer. The right
     /// code pairs the same way.
