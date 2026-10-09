@@ -343,6 +343,8 @@ public final class ShareModel {
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         listeningPort = nil; networkNotice = nil; advertisedName = nil
         loopback = false
+        // A new session never inherits an encoder, whether or not the loop was on: the next frame makes a fresh one.
+        dropCodec()
         qualityRestToken &+= 1
         // The view keeps the last frame for redraws; hand it back so the old stream's buffer pool can drain. The model
         // lets go of the same frame, and a new session never encodes the old one.
@@ -394,8 +396,9 @@ public final class ShareModel {
         } else {
             encodeStarts.removeValue(forKey: n)
             // `nextSeq` moves only once the encoder has taken the frame. A refusal after that went to `onError`, which
-            // counts it; a frame turned away at the two-in-flight cap, or by an invalidated encoder, is counted here,
-            // and is encoded again as soon as a slot frees, unless a newer frame gets in first.
+            // counts it; a frame turned away at the two-in-flight cap is counted here, and is encoded again as soon as a
+            // slot frees, unless a newer frame gets in first. The model never holds an invalidated encoder (`dropCodec`
+            // goes with every invalidation), so a refusal here is always the cap.
             if encoder.nextSeq == n { telemetry.recordDrop(at: CACurrentMediaTime()); newestPending = true }
         }
     }
@@ -426,6 +429,10 @@ public final class ShareModel {
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
         } catch {
             log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
+            // The encoder invalidated above goes with the failure: kept, Retry at its size would reuse it, and an
+            // invalidated encoder turns every frame away (`encode` would count each as a drop and wait for a slot
+            // that never frees).
+            dropCodec()
             state = .failed("This Mac's hardware video encoder could not start\(error.statusNote); press Retry to try again.")
             endViewers()
         }

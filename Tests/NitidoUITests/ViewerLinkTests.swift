@@ -583,6 +583,44 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A resize the encoder cannot take fails the share, and Retry back at a size it takes works again: a new viewer gets
+    /// its keyframe. Before, the failed `makeEncoder` left the encoder it had invalidated in place, Retry reused it at
+    /// the old size, and it turned every frame away: the viewer stayed black and the strip counted 60 drops a second.
+    /// No hardware encoder takes a picture 100,000 pixels wide, so the encoder cannot start at that size here.
+    @MainActor
+    func testRetryAfterAnEncoderThatCouldNotStartForANewSizeSendsAgain() async throws {
+        let sources = SourceFactory()
+        let share = ShareModel(makeSource: sources.make, screenRecordingGranted: { true })
+        share.start(excludingWindowIDs: [])
+        try await waitUntil("the session is made") { sources.made.count == 1 }
+        sources.made[0].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the sharer listens") { share.listeningPort != nil }
+        sources.made[0].emit(frame: try stripedFrame())
+        let (first, _, firstReader) = try await rawViewer(of: share)
+        defer { firstReader.cancel() }
+
+        sources.made[0].emit(.started(pixelWidth: 100_000, pixelHeight: 2, scale: 2))
+        sources.made[0].emit(frame: try stripedFrame(width: 100_000, height: 2))
+        try await waitUntil("the share fails") { share.state != .capturing }
+        guard case .failed(let message) = share.state else { return XCTFail("expected a failure, got \(share.state)") }
+        XCTAssertTrue(message.hasPrefix("This Mac's hardware video encoder could not start"), message)
+        XCTAssertNil(share.encoder, "the encoder that could not start leaves no invalidated one behind")
+        XCTAssertEqual(share.codecLabel, "raw")
+
+        share.retry()
+        try await waitUntil("Retry makes a fresh session") { sources.made.count == 2 }
+        sources.made[1].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("Retry listens again") { share.listeningPort != nil }
+        sources.made[1].emit(frame: try stripedFrame(index: 1))   // the only frame: the source is still from here on
+        await drain()
+        let (second, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        XCTAssertEqual(received.frames.first?.isKey, true, "the new viewer gets its keyframe")
+        XCTAssertEqual(share.state, .capturing)
+        second.close(); first.close()
+        await share.stop()
+    }
+
     /// Stop Sharing in the menu bar ends the stream, and the share fails and ends its viewer. The session's system picker
     /// stays up, though: a new pick from it starts a fresh stream (`.started` on the same session), and the share
     /// resumes without Retry, listens again with the same code, and a viewer that pairs sees the new stream's picture.
