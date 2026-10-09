@@ -9,7 +9,7 @@ Run before tagging a release. Each line is a pass/fail.
 5. Two Macs on Wi-Fi: glass-to-glass under 100 ms at the sharer's native size; rtt shown; bitrate climbs to the ceiling within 10 s on a good network.
 6. Wi-Fi off on the viewer for 10 s: Reconnecting overlay with growing attempts, and the sharer's pairing panel shows the viewer as Reconnecting…; Wi-Fi on: recovery with a keyframe, no restart.
 7. Quit the sharer with ⌘Q, and again by closing its window, while connected: viewer shows "The sharer ended the session." each time. kill -9 the sharer: viewer shows "Reconnecting… attempt n" with growing gaps; relaunch the sharer: it has a new code, so the viewer says "The code on <Mac> has changed. Enter the new code to connect again."
-8. Three wrong codes: the sharer's code changes.
+8. Three wrong codes, each typed once the field has shaken: every one says Wrong code at once on the viewer, between two Macs too, and the sharer's code changes after the third, not before (failed handshakes from one address within 3 s count as one wrong code; a port scan never counts).
 9. Display resolution change mid-share (share the display), then share a TextEdit window and drag it larger and smaller: each time the picture restarts at the new size on both sides, 1:1 again, with the new size and scale in both strips.
 10. Reduce Motion on: no scale, ring or shake; fades still happen; nothing feels broken.
 11. ⌘H never animates. Esc asks before disconnecting, not before leaving Welcome; with a share running behind the View screen it asks "Stop sharing and disconnect?".

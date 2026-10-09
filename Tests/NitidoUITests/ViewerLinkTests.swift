@@ -74,6 +74,10 @@ private final class ShownCounter {
 
 private struct TimedOut: Error {}
 
+/// The sharer's clock for counting wrong codes (`ShareModel.handshakeClock`), moved on by hand.
+@MainActor
+private final class SharerClock { var now: CFTimeInterval = 1_000 }
+
 /// A real keyframe from the hardware encoder: its parameter sets build a decoder that works.
 private func realKeyframe() async throws -> EncodedFrame {
     let encoder = try VideoEncoder(width: 320, height: 180, preferred: .hevc, bitsPerSecond: 2_000_000)
@@ -480,6 +484,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(share.viewerName, viewer.name)
         probe.cancel()
         try await waitUntil("the sharer lets the probe go", timeout: 20) { share.unpairedCount == 0 }
+        XCTAssertEqual(share.wrongCodeAttempts, 0, "a port scan says nothing about the code")
 
         // A mistyped code: the handshake fails.
         let wrong = String(format: "%04d", (Int(share.code)! + 1) % 10_000)
@@ -487,6 +492,7 @@ final class ViewerLinkTests: XCTestCase {
         let guess = NitidoLink.Link.connect(to: sharer.endpoint, code: wrong, sharerName: sharer.keyName, hello: hello)
         try await waitUntil("the wrong code fails") { if case .failed = guess.state { return true }; return false }
         try await waitUntil("the sharer lets the guess go") { share.unpairedCount == 0 }
+        XCTAssertEqual(share.wrongCodeAttempts, 1, "the mistyped code counts")
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(viewer.state, .connected, "a wrong code ended the viewer's session")
         XCTAssertTrue(share.isSending)
@@ -1009,8 +1015,10 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// Three connections that fail to prove the code mean someone is guessing: the sharer shows a new code and listens
-    /// with its key, the old code no longer pairs, and the viewer who had paired goes on as it was.
+    /// Three wrong codes mean someone is guessing: the sharer shows a new code and listens with its key, the old code no
+    /// longer pairs, and the viewer who had paired goes on as it was. One attempt that fails the handshake several times
+    /// in a row from one address (Network.framework tried each address of the sharer on two Macs) is one wrong code, so
+    /// the guesses here come seconds apart on the sharer's clock.
     @MainActor
     func testThreeFailedHandshakesRotateTheCodeAndLeaveTheViewerAlone() async throws {
         let (share, source) = try await listeningShare()
@@ -1024,15 +1032,23 @@ final class ViewerLinkTests: XCTestCase {
         viewer.connect()
         try await waitUntil("the viewer shows the picture") { viewer.state == .connected && shown.count >= 1 }
         let original = share.code, listener = try XCTUnwrap(share.advertiser)
+        let clock = SharerClock()
+        share.handshakeClock = { clock.now }
         let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Guess", pixelWidth: 0, pixelHeight: 0, scale: 2)
-        for i in 1...3 {
-            XCTAssertEqual(share.code, original, "the code holds before the third failed handshake (guess \(i))")
+        func guess(_ i: Int) async throws {
             let wrong = String(format: "%04d", (Int(original)! + i) % 10_000)
             let guess = NitidoLink.Link.connect(to: sharer.endpoint, code: wrong, sharerName: sharer.keyName, hello: hello)
             try await waitUntil("guess \(i) fails") { if case .failed = guess.state { return true }; return false }
             try await waitUntil("the sharer lets guess \(i) go") { share.unpairedCount == 0 }
         }
-        XCTAssertNotEqual(share.code, original, "three failed handshakes rotate the code")
+        for _ in 1...4 { try await guess(1) }
+        XCTAssertEqual(share.wrongCodeAttempts, 1, "four failed handshakes from one address within the window are one attempt")
+        for i in 2...3 {
+            XCTAssertEqual(share.code, original, "the code holds before the third wrong code (attempt \(i))")
+            clock.now += 3.5
+            try await guess(i)
+        }
+        XCTAssertNotEqual(share.code, original, "three wrong codes rotate the code")
         XCTAssertFalse(share.advertiser === listener, "the new code listens with its own key")
         try await waitUntil("the new listener is ready") { share.listeningPort != nil }
 
@@ -1165,6 +1181,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertLessThan(CACurrentMediaTime() - started, 2, "the failed handshake came back at once")
         XCTAssertEqual(viewer.state, .enteringCode(sharer))
         try await waitUntil("the sharer lets the attempt go") { share.unpairedCount == 0 }
+        XCTAssertEqual(share.wrongCodeAttempts, 1, "one wrong code on the sharer")
 
         viewer.code = share.code
         viewer.connect()

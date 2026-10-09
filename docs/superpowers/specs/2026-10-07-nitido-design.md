@@ -164,7 +164,7 @@ Motion, following the design engineering rules in use at RONAR:
 | Quit or window closed mid-session | The session stops first, so the other side hears `bye`; the app quits once it is out (2 s at most). |
 | Backlog grows | Skip non-key frames, lower bitrate, request keyframe; the strip shows the dropped count. |
 | Decode error | Request keyframe; after three failures rebuild the decoder; after ten, show an error with Reconnect. |
-| Wrong code | Reject with a shake of the code field (one 180 ms shake, respects reduce motion); three wrong codes regenerate the sharer's code. |
+| Wrong code | Reject with a shake of the code field (one 180 ms shake, respects reduce motion); three wrong codes regenerate the sharer's code (section 13 says how they are counted). |
 | Protocol mismatch | `bye(1)` and a message naming both versions. |
 | No hardware HEVC | Fall back to H.264 and label the codec in the strip. |
 
@@ -172,7 +172,7 @@ Every failure is visible in the UI and logged with `os.Logger` under subsystem `
 
 ## 13. Security
 
-TLS 1.2 with a pre-shared key derived with HKDF-SHA256 from the 4-digit code and the sharer's Bonjour name; the viewer must type the code shown on the sharer's screen. Ciphersuite `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256` (RFC 5489: the PSK plus an ephemeral ECDH exchange). Network.framework negotiates it on macOS 26.5 (checked 2026-10-07 with a localhost listener and connection: right code connects, wrong code fails with "bad MAC"); `TLS_PSK_WITH_AES_128_GCM_SHA256` is the fallback only if an OS build refuses it, and the fallback is logged. A wrong code fails the handshake. Three failed handshakes regenerate the code. The listener binds to the local network only. Frames never touch disk.
+TLS 1.2 with a pre-shared key derived with HKDF-SHA256 from the 4-digit code and the sharer's Bonjour name; the viewer must type the code shown on the sharer's screen. Ciphersuite `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256` (RFC 5489: the PSK plus an ephemeral ECDH exchange). Network.framework negotiates it on macOS 26.5 (checked 2026-10-07 with a localhost listener and connection: right code connects, wrong code fails with "bad MAC"); `TLS_PSK_WITH_AES_128_GCM_SHA256` is the fallback only if an OS build refuses it, and the fallback is logged. A wrong code fails the handshake. Three wrong codes regenerate the code. The sharer counts attempts: handshakes that failed on the keys, those from one address within 3 s as one, up to four of them, so one attempt that fails more than once is one wrong code and a guesser meets a new code by its ninth guess; a port scan, a refused or dropped connection and a protocol mismatch do not count. The listener binds to the local network only. Frames never touch disk.
 
 Known limit, accepted for the LAN prototype (v0.1):
 - The key is only as strong as the code: 10,000 values. The HKDF salt (`nitido-v1`) and info (the sharer name, which Bonjour broadcasts) are public, so HKDF adds no secrecy.

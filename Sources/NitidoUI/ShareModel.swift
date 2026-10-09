@@ -38,7 +38,7 @@ public final class ShareModel {
     public var showTelemetry = true
     public let sink = FrameSink()
     public let ink = InkController(role: .share)
-    /// Rotates after three failed handshakes (`rotateCode`).
+    /// Rotates after three wrong codes (`rotateCode`, `HandshakeFailures`).
     public private(set) var code = Pairing.makeCode()
     public let name = Host.current().localizedName ?? "Mac"
     /// True when the current failure most likely comes from a missing Screen Recording grant, so System Settings is the fix.
@@ -139,8 +139,12 @@ public final class ShareModel {
     /// A viewer just took over (`linkStateChanged`): it has none of the frames the deltas still in the encoder refer to,
     /// so none goes out to it before the keyframe the takeover asked for (`handleEncoded`).
     @ObservationIgnored private var viewerNeedsKeyframe = false
-    /// Connections that failed before they proved the code, over the whole share; three rotate it (`rotateCode`).
-    private var failedHandshakes = 0
+    /// Wrong codes over the whole share, counted per attempt; three rotate it (`rotateCode`).
+    private var handshakeFailures = HandshakeFailures()
+    /// Wrong codes since the code last changed. Internal for tests.
+    var wrongCodeAttempts: Int { handshakeFailures.count }
+    /// The clock wrong codes are counted by (`HandshakeFailures`). Internal so a test can move it on.
+    @ObservationIgnored var handshakeClock: () -> CFTimeInterval = { CACurrentMediaTime() }
 
     private var hello: Hello {
         Hello(protocolVersion: protocolVersion, role: .share, name: name,
@@ -790,9 +794,15 @@ public final class ShareModel {
         case .failed(let m):
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
                 // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was. A link that was the
-                // viewer's had proved the code, so only these count as failed handshakes.
-                log.info("a connection ended before it proved the code: \(m, privacy: .public)")
-                failedHandshakes += 1; if failedHandshakes >= 3 { rotateCode() }
+                // viewer's had proved the code, so only these can count as wrong codes, and only those that failed on
+                // the keys, once per attempt (`HandshakeFailures`).
+                let host = l.remoteHost
+                let counted = handshakeFailures.record(host: host, keyMismatch: l.keyMismatch, at: handshakeClock())
+                let verdict = !l.keyMismatch ? "not a wrong code"
+                    : counted ? "wrong code \(handshakeFailures.count) of \(HandshakeFailures.rotateAfter)"
+                    : "the same attempt as the last failure from there"
+                log.info("a connection from \(host ?? "an unknown address", privacy: .public) ended before it proved the code (\(verdict, privacy: .public)): \(m, privacy: .public)")
+                if handshakeFailures.shouldRotate { rotateCode() }
                 return
             }
             guard l === link else { return }
@@ -815,15 +825,15 @@ public final class ShareModel {
         }
     }
 
-    /// Three failed handshakes over the share (a viewer pairing in between does not reset the count, spec 13) mean
-    /// someone may be guessing: new code, new key. Port probes and handshakes cut short count too, so a paired viewer
-    /// can see the code change and need the new one after its next drop.
+    /// Three wrong codes over the share (a viewer pairing in between does not reset the count, spec 13) mean someone may
+    /// be guessing: new code, new key, so a paired viewer can see the code change and need the new one after its next
+    /// drop. Port probes and handshakes cut short do not count (`HandshakeFailures`).
     private func rotateCode() {
-        failedHandshakes = 0
+        handshakeFailures.rotated()
         // A new code, never the one being guessed (`makeCode` repeats one in 10,000 draws).
         let old = code
         repeat { code = Pairing.makeCode() } while code == old
-        log.info("three connections failed to prove the code; showing a new one")
+        log.info("three wrong codes; showing a new one")
         advertiser?.stop(); advertiser = nil
         listeningPort = nil   // the stopped listener's port; the new listener sets its own once ready
         startAdvertising()
