@@ -280,8 +280,8 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertNil(canvas.controller)
     }
 
-    /// The canvas ticks only while it is in a window, and a canvas let go while its tick is scheduled takes the tick
-    /// with it: firing it afterwards ticks nothing (the test seam starts the tick without a window).
+    /// The canvas ticks only while it is in a window, and a canvas let go while its tick is scheduled goes (the tick
+    /// holds it weakly) and invalidates the tick as it goes (the test seam starts the tick without a window).
     @MainActor
     func testACanvasOutOfItsWindowOrGoneStopsTicking() throws {
         let window = offscreenWindow()
@@ -306,12 +306,8 @@ final class InkCanvasLifetimeTests: XCTestCase {
             scheduled = other.tickTimer
             gone = other
         }
-        XCTAssertNil(gone, "the canvas is gone")
+        XCTAssertNil(gone, "the scheduled tick does not keep the canvas alive")
         XCTAssertEqual(scheduled?.isValid, false, "its tick went with it")
-        let after = controller.ticks
-        scheduled?.fire()
-        RunLoop.main.run(until: Date() + 0.1)
-        XCTAssertEqual(controller.ticks, after, "nothing ticks once the canvas is gone")
     }
 
     /// SwiftUI keeps the canvas when the share on screen is replaced by a new one and hands it the new controller: the

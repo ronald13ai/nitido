@@ -174,13 +174,19 @@ final class BacklogPolicyTests: XCTestCase {
         assertTrip(p.delta(backlogBytes: backlog, bitsPerSecond: after, now: 10.9), after: 0.1, "a backlog that stays")
     }
 
-    /// The half second after a cut judges the ceiling at the rate before it too, and a raise ends nothing: only a cut
-    /// starts the half second.
+    /// The half second after a cut judges the ceiling at the rate before it too, and once the half second is up the
+    /// ceiling is the current rate's again. The reading at 10.45, under the threshold, ends the time over it, so only
+    /// the ceiling can trip the backlog at 10.5 (10 ms over the threshold, short of the 100 ms that trips by itself).
     func testTheCeilingAfterACutIsTheOneBeforeIt() {
         var p = BacklogPolicy()
         p.rateCut(from: 20_000_000, now: 10)
         XCTAssertEqual(p.delta(backlogBytes: 2_000_000, bitsPerSecond: 15_000_000, now: 10.1), .send,
                        "2 MB is under a second's worth at 20 Mbps, though over it at 15")
+        p.observe(backlogBytes: 0, bitsPerSecond: 15_000_000, now: 10.45)
+        XCTAssertEqual(p.delta(backlogBytes: 2_000_000, bitsPerSecond: 15_000_000, now: 10.49), .send,
+                       "still in the half second: the ceiling is 20 Mbps worth")
+        assertTrip(p.delta(backlogBytes: 2_000_000, bitsPerSecond: 15_000_000, now: 10.5), after: 0.01,
+                   "the half second is up: the ceiling is 15 Mbps worth, and 2 MB is over it")
         var q = BacklogPolicy()
         assertTrip(q.delta(backlogBytes: 2_000_000, bitsPerSecond: 15_000_000, now: 10.1), after: 0, "no cut: at once")
     }
