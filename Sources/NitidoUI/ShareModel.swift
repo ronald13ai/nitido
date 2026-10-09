@@ -573,13 +573,22 @@ public final class ShareModel {
     /// again (`BacklogPolicy.keyframeDue`), within the viewer's half-second limit (`forceKeyframe`). `sendKeyframe`
     /// covers a still source too (it encodes the newest frame again), so the viewer never keeps a damaged or stale
     /// picture until the content moves. Asks again only if no keyframe went out within a second. With no encoder there
-    /// is nothing to ask: the next frame makes one, and a fresh encoder starts with a keyframe.
+    /// is nothing to ask: the next frame makes one, and a fresh encoder starts with a keyframe. The log line says
+    /// whether the keyframe goes now or when the limit lets it, as a tester reads it (docs/testing.md item 19): one held
+    /// for up to half a second, logged as sent, looked like the skips the item checks for.
     private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
         guard encoder != nil, backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }
         let skipped = backlogPolicy.skipped
         let lasted = backlogPolicy.trippedAt.map { (now - $0) * 1000 } ?? 0
-        log.info("the send backlog drained after \(skipped, privacy: .public) skipped frames in \(lasted, format: .fixed(precision: 0), privacy: .public) ms; sending a keyframe")
-        forceKeyframe()
+        let due: Double?
+        switch forceKeyframe() {
+        case .now: due = nil
+        case .at(let at): due = at
+        case .folded: due = forcedKeyframes.dueAt
+        }
+        let keyframe = due.map { "the keyframe goes when the half-second limit is up (in \(Int((max(0, $0 - CACurrentMediaTime()) * 1000).rounded())) ms)" }
+            ?? "sending a keyframe"
+        log.info("the send backlog drained after \(skipped, privacy: .public) skipped frames in \(lasted, format: .fixed(precision: 0), privacy: .public) ms; \(keyframe, privacy: .public)")
     }
 
     /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed
@@ -956,10 +965,13 @@ public final class ShareModel {
     /// A keyframe for the viewer, at most one per half second (`KeyframeLimiter`): at once, or when the half second
     /// since the last one forced is up, unless a keyframe has gone out by then. The viewer's asks (`keyframeRequest`)
     /// and the sharer's own (a takeover, the drain after a skip) all come here. A storm of them (the evening two-Mac
-    /// test of 2026-10-09) filled the link the drain was meant to clear and made VideoToolbox drop frames.
-    private func forceKeyframe() {
+    /// test of 2026-10-09) filled the link the drain was meant to clear and made VideoToolbox drop frames. Returns the
+    /// limiter's answer, which the drain's log line says.
+    @discardableResult
+    private func forceKeyframe() -> KeyframeLimiter.Answer {
         let now = CACurrentMediaTime()
-        switch forcedKeyframes.ask(now: now) {
+        let answer = forcedKeyframes.ask(now: now)
+        switch answer {
         case .now:
             sendKeyframe()
         case .at(let due):
@@ -972,6 +984,7 @@ public final class ShareModel {
         case .folded:
             break
         }
+        return answer
     }
 
     /// The viewer the forced keyframes were limited for is gone: the next one starts afresh.

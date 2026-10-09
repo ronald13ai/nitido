@@ -932,7 +932,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(after.filter(\.isKey).count, 2, "no keyframe after a drain")
         XCTAssertEqual(share.snapshot.droppedLastSecond, 0)
         let lines = try mark.entries("share").map(\.composedMessage)
-        XCTAssertEqual(lines.filter { $0.contains("skipping frames") || $0.contains("sending a keyframe") }, [])
+        XCTAssertEqual(lines.filter { $0.contains("skipping frames") || $0.contains("the send backlog drained") }, [])
         viewer.close()
         await share.stop()
     }
@@ -994,7 +994,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertFalse(received.frames[keyed].isKey)
         let lines = try mark.entries("share").map(\.composedMessage)
         XCTAssertEqual(lines.filter { $0.contains("skipping frames until a keyframe") }.count, 1, lines.joined(separator: "\n"))
-        XCTAssertEqual(lines.filter { $0.contains("sending a keyframe") }.count, 1, lines.joined(separator: "\n"))
+        XCTAssertEqual(lines.filter { $0.contains("the send backlog drained") }.count, 1, lines.joined(separator: "\n"))
         viewer.close()
         await share.stop()
     }
@@ -1186,6 +1186,44 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the keyframe follows the drain") { received.keyframeTimes.count >= 2 }
         let afterDrain = received.keyframeTimes[1]
         XCTAssertGreaterThan(afterDrain - paired, 0.4, "half a second after the keyframe the viewer paired with")
+        viewer.close()
+        await share.stop()
+    }
+
+    /// The drain's log line says when its keyframe goes, as a tester reads it (docs/testing.md item 19): "sending a
+    /// keyframe" only when it goes at once, "the keyframe goes when the half-second limit is up (in N ms)" when the
+    /// viewer's limit holds it. A skip over a second's worth at 2 Mbps, drained, asks for the keyframe; a second later
+    /// on the rule's clock, with none gone out, it asks again, within the same moment on the limiter's: that one is
+    /// held (`.at` after one forced at once, `.folded` after one held already). Before, both lines said "sending a
+    /// keyframe".
+    @MainActor
+    func testTheDrainSaysWhenTheHalfSecondLimitHoldsItsKeyframe() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let clock = SharerClock()
+        share.backlogClock = { clock.now }
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let link = try XCTUnwrap(share.link)
+        let delta = EncodedFrame(seq: 50, captureHostTimeNs: 1, isKey: false, data: Data(count: 1_000), parameterSets: [],
+                                 codec: .hevc, width: 320, height: 180)
+        let mark = LogMark()
+
+        link.addBacklogForTesting(400_000)
+        share.handleEncoded(delta)                        // over a second's worth: skipped, and the skip starts
+        link.addBacklogForTesting(-400_000)
+        share.handleEncoded(delta)                        // drained: the keyframe is asked for
+        clock.now += BacklogPolicy.keyframeRetry
+        share.handleEncoded(delta)                        // none went out within a second: asked for again
+        try await waitUntil("the keyframe follows the drain") { received.keyframeTimes.count >= 2 }
+
+        let lines = try mark.entries("share").map(\.composedMessage).filter { $0.contains("the send backlog drained after") }
+        XCTAssertEqual(lines.count, 2, lines.joined(separator: "\n"))
+        let held = try XCTUnwrap(lines.last)
+        XCTAssertFalse(held.contains("sending a keyframe"), held)
+        let wait = try XCTUnwrap(held.firstMatch(of: /; the keyframe goes when the half-second limit is up \(in (\d+) ms\)$/), held)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(Int(wait.1)), 500, held)
         viewer.close()
         await share.stop()
     }

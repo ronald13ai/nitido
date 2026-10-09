@@ -29,6 +29,10 @@ public struct KeyframeLimiter: Sendable {
 
     public init() {}
 
+    /// When the keyframe due is to be forced: the time the first ask held was answered with (`.at`), which every ask
+    /// folded into it shares; nil while none is due.
+    public var dueAt: Double? { askedAt == nil ? nil : forcedAt.map { $0 + Self.interval } }
+
     /// A keyframe is wanted now.
     public mutating func ask(now: Double) -> Answer {
         if askedAt != nil { askedAt = now; return .folded }
