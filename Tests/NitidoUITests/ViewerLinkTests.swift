@@ -918,6 +918,16 @@ final class ViewerLinkTests: XCTestCase {
         let skips = try mark.entries("view").filter { $0.composedMessage.contains("keyframe") && $0.composedMessage.contains("behind") }
         XCTAssertEqual(skips.map(\.composedMessage), ["the video decoder fell behind with 3 frames waiting; skipping to the next keyframe"])
         XCTAssertEqual(skips.first?.level, .info)
+        // How close together the frames that filled the queue came: here in one burst, as from a main thread that was
+        // busy or a network that delivered them at once, not about 50 ms apart, as from a decoder slower than the
+        // stream.
+        let spread = try mark.entries("view").filter {
+            $0.composedMessage.hasPrefix("the last 4 frames reached the decoder within ")
+        }
+        XCTAssertEqual(spread.count, 1, "the skip says how close together the waiting frames arrived")
+        XCTAssertEqual(spread.first?.level, .info)
+        let ms = spread.first.flatMap { Double($0.composedMessage.dropFirst(45).prefix { $0 != " " }) }
+        XCTAssertLessThan(try XCTUnwrap(ms, "a figure in ms"), 20)
         viewer.disconnect()
         await share.stop()
     }

@@ -75,6 +75,10 @@ public final class ViewModel {
     /// (`handleIncoming`). Forgotten when the link is ready again and when a new setup makes a new decoder (a new
     /// encoder starts at 0), so frames lost with a drop never count.
     @ObservationIgnored private var lastSeq: UInt32?
+    /// When the latest frames went to the decoder, oldest first, one more than may wait (`VideoDecoder.maxPending`). A
+    /// skip says how close together they came: a few milliseconds is a burst (a main thread that was busy, a network
+    /// that delivered several frames at once), about 50 ms, three frame intervals, a decoder slower than the stream.
+    @ObservationIgnored private var submittedAt: [CFTimeInterval] = []
 
     public init() {
         ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
@@ -266,6 +270,7 @@ public final class ViewModel {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
         case .ready:
             state = .connected; connectionCount += 1; decodeFailures = 0; lastSeq = nil; reportedClockMismatch = false
+            submittedAt = []
             awaitingKeyframe = true
             askForKeyframe()
         case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
@@ -301,7 +306,7 @@ public final class ViewModel {
                 }.attach(to: d)
                 // A RealTime setting rejected inside `init` arrives the moment this is set: hop to the main actor.
                 d.onError = { [weak self] err in Task { @MainActor in self?.handleDecoderError(err) } }
-                decoder = d; decoderConfig = cfg; lastSeq = nil
+                decoder = d; decoderConfig = cfg; lastSeq = nil; submittedAt = []
                 pixelSize = CGSize(width: Int(cfg.width), height: Int(cfg.height))
                 codecLabel = cfg.codec == .hevc ? "HEVC" : "H.264"
             } catch {
@@ -332,6 +337,8 @@ public final class ViewModel {
             guard let decoder else { askForKeyframeAtMostOnceASecond(now: now); return }
             // Decoded off the main actor (`decoded`, `decodeFailed`), so ink, cursor and the presented handlers the
             // pacer depends on never wait behind a hardware decode.
+            submittedAt.append(now)
+            if submittedAt.count > VideoDecoder.maxPending + 1 { submittedAt.removeFirst() }
             if case .skipped(let first) = decoder.submit(f) {
                 // The decoder has fallen behind: this frame and every delta up to the next keyframe are dropped, and
                 // that keyframe drops the frames still waiting (`superseded`). The first one asks for that keyframe; a
@@ -339,6 +346,8 @@ public final class ViewModel {
                 telemetry.recordDrop(at: now)
                 if first {
                     log.info("the video decoder fell behind with \(VideoDecoder.maxPending, privacy: .public) frames waiting; skipping to the next keyframe")
+                    let spreadMs = (now - (submittedAt.first ?? now)) * 1000
+                    log.info("the last \(self.submittedAt.count, privacy: .public) frames reached the decoder within \(spreadMs, format: .fixed(precision: 1), privacy: .public) ms")
                     askForKeyframe()
                 } else {
                     askForKeyframeAtMostOnceASecond(now: now)
