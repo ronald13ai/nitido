@@ -1117,6 +1117,45 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// The evening two-Mac test of 2026-10-09: under a storm of keyframes VideoToolbox dropped ten frames in a row
+    /// ("flags 3: frameDropped"), and the share failed with "Video encoding keeps failing." and Retry. A realtime
+    /// encoder that lets frames go is dropping them, not failing: ten drops in a row leave the share capturing and
+    /// count ten dropped frames, and do not count towards the failures. Ten real failures in a row still fail the
+    /// codec.
+    @MainActor
+    func testFramesVideoToolboxDropsAreDropsNotFailures() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "d")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 0))
+        try await waitUntil("the loop makes an encoder") { model.encoder != nil }
+        let encoder = try XCTUnwrap(model.encoder)
+        try await Task.sleep(for: .milliseconds(300))   // the first frame is through
+        let report = try XCTUnwrap(encoder.onError)
+
+        let before = model.droppedFramesTotal
+        for _ in 0..<10 { report(.frameDropped) }
+        try await waitUntil("the ten drops are counted") { model.droppedFramesTotal == before + 10 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(model.state, .capturing, "ten drops in a row are not a failure")
+        XCTAssertTrue(model.encoder === encoder, "the encoder goes on")
+
+        for _ in 0..<9 { report(.encode(-12902)) }
+        report(.frameDropped)                             // a drop in between neither counts nor starts the count again
+        report(.encode(-12902))
+        try await waitUntil("ten real failures in a row fail the codec") {
+            model.state == .failed("Video encoding keeps failing.")
+        }
+        XCTAssertEqual(model.codecLabel, "raw")
+        await model.stop()
+    }
+
     /// Stop Sharing in the menu bar ends the stream with an error, as does a stream that stops or cannot start: the
     /// share fails and offers Retry. The session's system picker stays up, though, and a new pick starts a fresh stream
     /// on the same session (`.started`): the share resumes as a fresh one, with the card gone, the listener back and a

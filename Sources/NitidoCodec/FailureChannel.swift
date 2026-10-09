@@ -32,6 +32,12 @@ final class FailureChannel: @unchecked Sendable {
 
     func report(_ error: CodecError, _ context: String) {
         log.error("\(context, privacy: .public): \(String(describing: error), privacy: .public)")
+        deliver(error)
+    }
+
+    /// Hands `error` to the handler, or holds it, without logging it: for what the caller logged itself, at another
+    /// level (a frame VideoToolbox dropped is not an error, `VideoEncoder`).
+    func deliver(_ error: CodecError) {
         let target: Handler? = lock.withLock {
             if let handler { return handler }
             if held.count < Self.capacity { held.append(error) }

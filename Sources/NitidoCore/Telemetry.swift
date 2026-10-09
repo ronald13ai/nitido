@@ -61,6 +61,9 @@ public struct Telemetry: Sendable {
     private var rtt = RollingWindow(seconds: 1)
     private var bytes = RollingWindow(seconds: 1)
     private var drops = RollingWindow(seconds: 1)
+    /// Every dropped frame recorded so far, not only the last second's: what a check that must not depend on when the
+    /// snapshot is taken reads.
+    public private(set) var droppedTotal = 0
 
     public init(now: Double) {}
 
@@ -69,7 +72,7 @@ public struct Telemetry: Sendable {
     public mutating func recordLatency(ms: Double, at t: Double) { latency.add(ms, at: t); latencySeries.add(ms, at: t) }
     public mutating func recordRTT(ms: Double, at t: Double) { rtt.add(ms, at: t) }
     public mutating func recordBytes(_ n: Int, at t: Double) { bytes.add(Double(n), at: t) }
-    public mutating func recordDrop(at t: Double) { drops.add(1, at: t) }
+    public mutating func recordDrop(at t: Double) { drops.add(1, at: t); droppedTotal += 1 }
 
     public func snapshot(now: Double) -> Snapshot {
         let lat = latency.stats(now: now)

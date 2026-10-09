@@ -16,7 +16,8 @@ public enum CodecError: Error, Equatable {
     case property(String, OSStatus)
     /// `VTCompressionSessionPrepareToEncodeFrames` failed.
     case prepare(OSStatus)
-    /// VideoToolbox dropped a frame that `encode` had accepted.
+    /// VideoToolbox dropped a frame that `encode` had accepted: a realtime encoder under load lets frames go. A dropped
+    /// frame, not a failure (`VideoEncoder.onError`).
     case frameDropped
     /// VideoToolbox emitted an encoded frame with no data.
     case missingData
@@ -99,10 +100,11 @@ public final class VideoEncoder: @unchecked Sendable {
     }
     /// Every encoder failure that does not throw: a frame `encode` accepted that VideoToolbox then
     /// failed or dropped, a frame VideoToolbox refused inside `encode`, and a tuning property
-    /// VideoToolbox rejected (in `init` or `setBitrate`). Each one is also logged. The encoder keeps
-    /// running; the caller decides what the UI shows. Failures raised before this is set (a property
-    /// rejected inside `init`) are delivered as soon as it is set. Frames cut short by `invalidate()`
-    /// are not failures and are not reported.
+    /// VideoToolbox rejected (in `init` or `setBitrate`). Each one is also logged: a failure as an
+    /// error, a dropped frame (`.frameDropped`, a realtime encoder under load) at info and at most once
+    /// a second (`DropLog`). The encoder keeps running; the caller decides what the UI shows. Failures
+    /// raised before this is set (a property rejected inside `init`) are delivered as soon as it is
+    /// set. Frames cut short by `invalidate()` are not failures and are not reported.
     public var onError: (@Sendable (CodecError) -> Void)? {
         get { failures.onError }
         set { failures.onError = newValue }
@@ -117,6 +119,7 @@ public final class VideoEncoder: @unchecked Sendable {
     private var seq: UInt32 = 0
     private var forceKey = true
     private var inFlight = 0
+    private var drops = DropLog()
 
     public init(width: Int, height: Int, preferred: Codec = .hevc, bitsPerSecond: Int) throws(CodecError) {
         self.width = width; self.height = height
@@ -206,8 +209,9 @@ public final class VideoEncoder: @unchecked Sendable {
     /// `invalidate()` does not, since nothing follows it).
     public func requestKeyframe() { lock.lock(); forceKey = true; lock.unlock() }
 
-    /// True while a keyframe request waits for a frame to carry it. Internal, for tests.
-    var isKeyframeRequested: Bool { lock.withLock { forceKey } }
+    /// True while a keyframe request waits for a frame to carry it: one asked for, or one a frame VideoToolbox failed
+    /// or dropped was carrying, which stands for the next frame.
+    public var isKeyframeRequested: Bool { lock.withLock { forceKey } }
 
     public var nextSeq: UInt32 { lock.lock(); defer { lock.unlock() }; return seq }
 
@@ -241,7 +245,13 @@ public final class VideoEncoder: @unchecked Sendable {
             } else if status != noErr {
                 self.failures.report(.encode(status), "encode callback, frame \(n)")
             } else {
-                self.failures.report(.frameDropped, "encoder dropped frame \(n), flags \(flags.rawValue)")
+                // A realtime encoder under load lets frames go: a dropped frame, said at info at most once a second.
+                let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+                if let count = self.lock.withLock({ self.drops.dropped(now: now) }) {
+                    let carried = key ? ", which carried a keyframe request; it stands for the next frame" : ""
+                    log.info("VideoToolbox dropped \(count, privacy: .public) frame\(count == 1 ? "" : "s", privacy: .public) since the last line, the last \(n, privacy: .public) (flags \(flags.rawValue, privacy: .public))\(carried, privacy: .public)")
+                }
+                self.failures.deliver(.frameDropped)
             }
         }
         if status != noErr {

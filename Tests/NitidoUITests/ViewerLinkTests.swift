@@ -1199,6 +1199,30 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A frame VideoToolbox drops that carried a keyframe request leaves the request standing (`VideoEncoder`). Over a
+    /// still source no next frame comes to carry it, so the share encodes the newest frame again: the keyframe still
+    /// reaches the viewer, rather than a viewer that took over or drained waiting for the content to move.
+    @MainActor
+    func testAKeyframeVideoToolboxDroppedFromAStillSourceStillReachesTheViewer() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let encoder = try XCTUnwrap(share.encoder)
+        let report = try XCTUnwrap(encoder.onError)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(received.keyframeTimes.count, 1)
+
+        // As VideoToolbox drops a frame forced to be a keyframe: the request stands again, and the drop is reported.
+        encoder.requestKeyframe()
+        report(.frameDropped)
+        try await waitUntil("the keyframe reaches the viewer all the same") { received.keyframeTimes.count == 2 }
+        XCTAssertEqual(share.state, .capturing)
+        viewer.close()
+        await share.stop()
+    }
+
     /// Spec 1 point 6 and spec 8: a viewer that takes over, or pairs again, has none of the frames the encoder's deltas in
     /// flight refer to (or only the one from before the drop), so it gets nothing before its keyframe: the deltas that
     /// were already in the encoder are held back, and the keyframe goes out with its setup.

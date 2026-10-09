@@ -79,8 +79,11 @@ public final class ShareModel {
     private var codecWindow = RollingWindow(seconds: 1)
     /// A codec setting VideoToolbox rejected (`CodecError.property` through `onError`), shown over the picture.
     public private(set) var codecNotice: String?
-    /// Frames the encoder failed, dropped or emitted empty in a row; ten fail the share (`handleCodecError`).
+    /// Frames the encoder failed or emitted empty in a row; ten fail the share (`handleCodecError`). A frame
+    /// VideoToolbox dropped is a dropped frame, and neither counts here nor starts the count again.
     private var encodeFailures = 0
+    /// Every frame counted as dropped since the model was made. Internal for tests.
+    var droppedFramesTotal: Int { telemetry.droppedTotal }
     /// Frames the loop's decoder could not read in a row; ten fail the share (`loopDecodeFailed`). Only a frame decoded
     /// resets it. Internal, not private, so a test can wait for a failure to land.
     private(set) var decodeFailures = 0
@@ -573,12 +576,15 @@ public final class ShareModel {
         forceKeyframe()
     }
 
-    /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed,
-    /// dropped or emitted empty counts in the strip's dropped figure, and ten in a row fail the share with Retry, like
-    /// the viewer's ten-failure rule for decoding (Task 14). A rejected setting is said in a notice over the picture.
+    /// Codec failures that are not thrown (Task 9's `onError`); the codec has logged them. A frame the encoder failed
+    /// or emitted empty counts in the strip's dropped figure, and ten in a row fail the share with Retry, like the
+    /// viewer's ten-failure rule for decoding (Task 14). A frame VideoToolbox dropped is only a dropped frame
+    /// (`droppedByEncoder`). A rejected setting is said in a notice over the picture.
     private func handleCodecError(_ error: CodecError, from part: String = "encoder") {
         switch error {
-        case .encode, .frameDropped, .missingData:
+        case .frameDropped:
+            droppedByEncoder()
+        case .encode, .missingData:
             let now = CACurrentMediaTime()
             telemetry.recordDrop(at: now)
             encodeStarts = encodeStarts.filter { now - $0.value < 1 }   // a failed frame never decodes; drop its start
@@ -593,6 +599,23 @@ public final class ShareModel {
         case .sessionCreate, .decode, .formatDescription, .prepare:
             codecNotice = error.plainDescription   // Task 9 throws these instead; shown all the same if one ever arrives
         }
+    }
+
+    /// A frame VideoToolbox dropped (`CodecError.frameDropped`): a realtime encoder under load lets frames go, as it
+    /// did ten in a row under the keyframe storm of the evening two-Mac test of 2026-10-09, which failed the share. It
+    /// is a dropped frame in the strip, and never counts towards the ten failures in a row. Its slot is free, so the
+    /// newest frame the cap turned away goes in. A keyframe request it carried stands for the next frame
+    /// (`VideoEncoder`), and a still source sends none: `sendKeyframe` encodes the newest frame again if no frame gets
+    /// in first. That is the same keyframe asked for again, not another one forced, so the viewer's half-second limit
+    /// does not hold it back.
+    private func droppedByEncoder() {
+        let now = CACurrentMediaTime()
+        telemetry.recordDrop(at: now)
+        encodeStarts = encodeStarts.filter { now - $0.value < 1 }   // a dropped frame never decodes; drop its start
+        // Not once the encoder is gone (the loop turned off, a share retired): a late drop from it makes no new one.
+        guard let encoder else { return }
+        encodePendingNewest()
+        if encoder.isKeyframeRequested { sendKeyframe() }
     }
 
     /// The encoder or the decoder (`part`) is not coming back by itself: stop both, keep the raw picture, offer Retry

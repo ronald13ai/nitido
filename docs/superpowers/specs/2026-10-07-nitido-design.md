@@ -165,6 +165,7 @@ Motion, following the design engineering rules in use at RONAR:
 | Link drops | Both sides show "Reconnecting…": the viewer over the last frame (dimmed), the sharer next to the viewer's name in the pairing panel until the viewer pairs again (30 s at most). Backoff retries, keyframe on reconnect, strip shows the gap. |
 | Quit or window closed mid-session | The session stops first, so the other side hears `bye`; the app quits once it is out (2 s at most). |
 | Backlog grows | Skip non-key frames, lower bitrate, request keyframe; the strip shows the dropped count. |
+| Encoder drops or fails a frame | A frame VideoToolbox drops (a realtime encoder under load) is a dropped frame: the strip counts it, the log says so at info at most once a second, and a keyframe it carried is asked for again; it never counts as a failure. Ten real encode failures in a row stop the codec and offer Retry (amended 2026-10-09: ten drops in a row under a keyframe storm had failed the share). |
 | Decode error | Request keyframe; after three failures rebuild the decoder; after ten, show an error with Reconnect. |
 | Wrong code | Reject with a shake of the code field (one 180 ms shake, respects reduce motion); three wrong codes regenerate the sharer's code (section 13 says how they are counted). |
 | Protocol mismatch | `bye(1)` and a message naming both versions. |
