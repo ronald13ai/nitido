@@ -240,3 +240,99 @@ final class InkOverlayTests: XCTestCase {
         XCTAssertEqual(ribbons.first?.opacity, 0, "⌘Z fades the stroke out")
     }
 }
+
+/// The crash of the evening two-Mac test (2026-10-09 21:52:50): a share stopped and a new one started, SwiftUI kept the
+/// ink canvas and handed it the new share's controller, and the canvas's tick reached the old controller, gone by then,
+/// through an unowned reference (`swift_abortRetainUnowned` in `InkCanvasView.init(controller:)`'s timer). The canvas
+/// holds its controller weakly, follows the one it is handed, ticks only while it is in a window, and stops when it
+/// leaves it or goes.
+final class InkCanvasLifetimeTests: XCTestCase {
+    @MainActor
+    private func offscreenWindow() -> NSWindow {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: 320, height: 200),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    /// A canvas whose controller has gone ticks without crashing, and does nothing.
+    @MainActor
+    func testACanvasWhoseControllerIsGoneTicksWithoutCrashing() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        var controller: InkController? = InkController(role: .share)
+        let canvas = InkCanvasView(controller: try XCTUnwrap(controller))
+        window.contentView?.addSubview(canvas)
+        let tick = try XCTUnwrap(canvas.tickTimer, "a canvas in a window ticks")
+        weak let gone = controller
+        controller = nil
+        XCTAssertNil(gone, "the controller went with its share")
+        tick.fire()
+        XCTAssertNil(canvas.controller)
+    }
+
+    /// The canvas ticks only while it is in a window, and a canvas let go while its tick is scheduled takes the tick
+    /// with it: firing it afterwards ticks nothing (the test seam starts the tick without a window).
+    @MainActor
+    func testACanvasOutOfItsWindowOrGoneStopsTicking() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let controller = InkController(role: .share)
+        let canvas = InkCanvasView(controller: controller)
+        XCTAssertNil(canvas.tickTimer, "out of a window there is nothing to fade")
+        window.contentView?.addSubview(canvas)
+        let first = try XCTUnwrap(canvas.tickTimer)
+        let before = controller.ticks
+        first.fire()
+        XCTAssertEqual(controller.ticks, before + 1, "the tick reaches the controller")
+        canvas.removeFromSuperview()
+        XCTAssertFalse(first.isValid, "out of its window the canvas stops ticking")
+        XCTAssertNil(canvas.tickTimer)
+
+        var scheduled: Timer?
+        weak var gone: InkCanvasView?
+        autoreleasepool {
+            let other = InkCanvasView(controller: controller)
+            other.startTicking()
+            scheduled = other.tickTimer
+            gone = other
+        }
+        XCTAssertNil(gone, "the canvas is gone")
+        XCTAssertEqual(scheduled?.isValid, false, "its tick went with it")
+        let after = controller.ticks
+        scheduled?.fire()
+        RunLoop.main.run(until: Date() + 0.1)
+        XCTAssertEqual(controller.ticks, after, "nothing ticks once the canvas is gone")
+    }
+
+    /// SwiftUI keeps the canvas when the share on screen is replaced by a new one and hands it the new controller: the
+    /// canvas draws for that one from then on, the old one no longer points at it, and the old one going away leaves
+    /// the tick working.
+    @MainActor
+    func testACanvasSwiftUIKeepsFollowsItsNewController() async throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        var first: InkController? = InkController(role: .share)
+        let second = InkController(role: .share)
+        let host = NSHostingView(rootView: InkOverlay(controller: try XCTUnwrap(first)))
+        window.contentView = host
+        for _ in 0..<6 { await Task.yield(); try await Task.sleep(for: .milliseconds(10)) }
+        host.layoutSubtreeIfNeeded()
+        let canvas = try XCTUnwrap(first?.canvas, "the overlay made its canvas")
+
+        host.rootView = InkOverlay(controller: second)
+        for _ in 0..<6 { await Task.yield(); try await Task.sleep(for: .milliseconds(10)) }
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(second.canvas === canvas, "SwiftUI kept the canvas")
+        XCTAssertTrue(canvas.controller === second, "the canvas follows the controller it is handed")
+        XCTAssertNil(first?.canvas, "the old controller no longer draws into it")
+
+        weak let gone = first
+        first = nil
+        XCTAssertNil(gone)
+        let before = second.ticks
+        try XCTUnwrap(canvas.tickTimer).fire()
+        XCTAssertEqual(second.ticks, before + 1)
+    }
+}

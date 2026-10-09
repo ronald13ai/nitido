@@ -52,8 +52,11 @@ public final class InkController {
     }
     public func clearLocal() { document.clear(); canvas?.removeAll(); onOutgoing?(.clear) }
 
+    /// How many times the canvas ticked this controller. Internal for tests.
+    private(set) var ticks = 0
     /// Called 30 times a second by the canvas: starts fades and drops finished strokes.
     func tick() {
+        ticks += 1
         let now = CACurrentMediaTime()
         for s in document.strokes where s.endedAt != nil && document.opacity(of: s, now: now) < 1 { canvas?.fade(id: s.id, duration: document.fadeDuration) }
         document.prune(now: now)
@@ -62,18 +65,23 @@ public final class InkController {
 
 /// Transparent AppKit view over the video: draws strokes as filled variable-width ribbons, one layer per stroke.
 public final class InkCanvasView: NSView {
-    unowned let controller: InkController
+    /// The controller whose strokes the canvas draws and takes. Weak: SwiftUI keeps the canvas when the share or view
+    /// on screen is replaced by a new one and hands it the new controller (`attach`), while the old controller goes
+    /// with its model. Held unowned, the canvas's next tick read the old one after it was gone and aborted the app
+    /// (`swift_abortRetainUnowned`, the evening two-Mac test of 2026-10-09: a share stopped, then a new one started).
+    private(set) weak var controller: InkController?
     private var layers: [UInt32: CAShapeLayer] = [:]
     private var fading: Set<UInt32> = []
     private var activeId: UInt32?
     private var strokeStart: Double = 0
     private var lastPoint: StrokePoint?
-    private var timer: Timer?
+    /// The 30 Hz tick that starts fades and drops finished strokes (`InkController.tick`): scheduled while the canvas
+    /// is in a window, invalidated when it leaves it or goes. Internal so a test can fire it.
+    private(set) var tickTimer: Timer?
     private let cursorDot = CALayer()
     private let cursorLabel = CATextLayer()
 
     init(controller: InkController) {
-        self.controller = controller
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -82,12 +90,42 @@ public final class InkCanvasView: NSView {
         cursorLabel.fontSize = 10; cursorLabel.foregroundColor = NSColor(srgbRed: 243 / 255, green: 227 / 255, blue: 186 / 255, alpha: 1).cgColor
         cursorLabel.contentsScale = 2; cursorLabel.opacity = 0; cursorLabel.alignmentMode = .left
         layer?.addSublayer(cursorDot); layer?.addSublayer(cursorLabel)
-        timer = Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.controller.tick() }
-        }
+        attach(to: controller)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
-    isolated deinit { timer?.invalidate() }
+    isolated deinit { tickTimer?.invalidate() }
+
+    /// Draws and takes `controller`'s strokes from now on (`InkOverlay`): the canvas SwiftUI kept is handed the
+    /// controller of the share or view on screen now. The strokes drawn for the controller before are taken off, and
+    /// that controller no longer points at this canvas.
+    func attach(to controller: InkController) {
+        if let old = self.controller, old !== controller {
+            if old.canvas === self { old.canvas = nil }
+            layers.values.forEach { $0.removeFromSuperlayer() }
+            layers = [:]; fading = []; activeId = nil; lastPoint = nil
+        }
+        self.controller = controller
+        controller.canvas = self
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { stopTicking() } else { startTicking() }
+    }
+
+    /// Schedules the tick, unless it is scheduled already. Internal so a test can start it without a window.
+    func startTicking() {
+        guard tickTimer == nil else { return }
+        // Weak: the timer's run loop holds the closure, and must not keep a canvas that left its window alive.
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+    }
+
+    private func stopTicking() { tickTimer?.invalidate(); tickTimer = nil }
+
+    /// One tick, for the controller if it is still there.
+    private func tick() { controller?.tick() }
 
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
@@ -110,25 +148,28 @@ public final class InkCanvasView: NSView {
     }
 
     public override func mouseDown(with event: NSEvent) {
+        guard let controller else { return }
         strokeStart = CACurrentMediaTime()
         let p = normalized(event)
         activeId = controller.beginLocal(p)
         lastPoint = p
     }
     public override func mouseDragged(with event: NSEvent) {
-        guard let id = activeId else { return }
+        guard let id = activeId, let controller else { return }
         let p = normalized(event)
         controller.appendLocal(id, [p]); lastPoint = p
         controller.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
     }
     public override func mouseUp(with event: NSEvent) {
         guard let id = activeId else { return }
-        controller.endLocal(id); activeId = nil
+        controller?.endLocal(id); activeId = nil
     }
     public override func mouseMoved(with event: NSEvent) {
-        let p = normalized(event); controller.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
+        let p = normalized(event); controller?.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
     }
-    public override func mouseExited(with event: NSEvent) { controller.cursorMoved(Cursor(x: 0, y: 0, visible: false)) }
+    public override func mouseExited(with event: NSEvent) {
+        controller?.cursorMoved(Cursor(x: 0, y: 0, visible: false))
+    }
     public override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
@@ -222,6 +263,7 @@ public final class InkCanvasView: NSView {
 public struct InkOverlay: NSViewRepresentable {
     public let controller: InkController
     public init(controller: InkController) { self.controller = controller }
-    public func makeNSView(context: Context) -> InkCanvasView { let v = InkCanvasView(controller: controller); controller.canvas = v; return v }
-    public func updateNSView(_ view: InkCanvasView, context: Context) { controller.canvas = view }
+    public func makeNSView(context: Context) -> InkCanvasView { InkCanvasView(controller: controller) }
+    /// SwiftUI keeps the canvas when the model on screen changes: it draws for the controller it is handed now.
+    public func updateNSView(_ view: InkCanvasView, context: Context) { view.attach(to: controller) }
 }
