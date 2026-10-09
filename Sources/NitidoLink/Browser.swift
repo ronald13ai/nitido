@@ -23,14 +23,18 @@ public struct Peer: Identifiable, Hashable, Sendable {
         self.addresses = addresses; self.port = port
     }
 
-    /// Where a viewer tries to reach the sharer, in order (`LinkSession`): the first address it published, the next one,
-    /// then the Bonjour service. The Bonjour service resolves to every address the sharer has (IPv6 link-local, IPv4,
-    /// AWDL), which Network.framework tries one after another: on two Macs a wrong code through it failed the handshake
-    /// four times on the sharer and never came back to the viewer, which gave up after its deadline. One address gives
-    /// one handshake, whose failure comes back as on one Mac.
-    public var routes: [NWEndpoint] {
+    /// Where a viewer on `subnets` (its own networks, `IPv4Subnet.local`) tries to reach the sharer, in order
+    /// (`LinkSession`): the first address the sharer published on one of those networks, the next one, then the Bonjour
+    /// service. Most likely reading of the two-Mac logs (2026-10-09): the Bonjour service resolves to every address the
+    /// sharer has (IPv6 link-local, IPv4, AWDL), which Network.framework tries one after another, so a wrong code through
+    /// it failed the handshake several times on the sharer and never came back to the viewer, which gave up after its
+    /// deadline. One address gives one handshake, whose failure comes back as on one Mac. An address on none of the
+    /// viewer's networks (a desktop's Ethernet on another network, a sharer found only over AWDL) is not dialled: its
+    /// silence would only take time from the Bonjour service, the one route that can work then.
+    public func routes(on subnets: [IPv4Subnet]) -> [NWEndpoint] {
         let published = port.flatMap { NWEndpoint.Port(rawValue: $0) }.map { port in
-            addresses.prefix(2).map { NWEndpoint.hostPort(host: .ipv4($0), port: port) }
+            addresses.filter { address in subnets.contains { $0.contains(address) } }
+                .prefix(2).map { NWEndpoint.hostPort(host: .ipv4($0), port: port) }
         } ?? []
         return published.filter { $0 != endpoint } + [endpoint]
     }

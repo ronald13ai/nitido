@@ -191,7 +191,7 @@ public final class ViewModel {
         let hello = Hello(protocolVersion: protocolVersion, role: .view, name: name, pixelWidth: 0, pixelHeight: 0,
                           scale: Float(NSScreen.main?.backingScaleFactor ?? 2))
         // Under the name the sharer keyed its listener with (Task 13; Bonjour may show it renamed, as "Name (2)"), through
-        // the address it published first (`Peer.routes`), as discovery says now.
+        // the address it published first on this Mac's networks (`Peer.routes(on:)`), as discovery says now.
         let session = LinkSession(peer: Self.latest(peer, in: peers), code: code, hello: hello)
         link?.close()
         link = session

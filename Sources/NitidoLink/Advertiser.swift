@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 import Network
 import NitidoCore
 import os
@@ -112,7 +111,7 @@ public final class Advertiser: @unchecked Sendable {
 
     static let serviceType = "_nitido._tcp"
 
-    /// At most this many addresses go in the TXT record; a viewer tries two (`Peer.routes`).
+    /// At most this many addresses go in the TXT record; a viewer tries two (`Peer.routes(on:)`).
     static let maxPublishedAddresses = 4
 
     /// The TXT record: the protocol version (`v`), the name the key was derived from (`name`, since Bonjour may show the
@@ -129,19 +128,12 @@ public final class Advertiser: @unchecked Sendable {
     /// left out: Wi-Fi and Ethernet (`en0`, `en1`...) first, in interface order, then the rest (a bridge, Internet
     /// Sharing), self-assigned 169.254 addresses last. No interface scope: the address alone is what a viewer dials.
     public static func localIPv4Addresses() -> [IPv4Address] {
-        var first: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&first) == 0, let first else { return [] }
-        defer { freeifaddrs(first) }
         var found: [(rank: Int, address: IPv4Address)] = []
-        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let flags = Int32(entry.pointee.ifa_flags)
-            guard let sockaddr = entry.pointee.ifa_addr, sockaddr.pointee.sa_family == UInt8(AF_INET),
-                  flags & IFF_UP != 0, flags & IFF_RUNNING != 0, flags & IFF_LOOPBACK == 0, flags & IFF_POINTOPOINT == 0
-            else { continue }
-            let interface = String(cString: entry.pointee.ifa_name)
-            let raw = sockaddr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { withUnsafeBytes(of: $0.pointee.sin_addr) { Data($0) } }
-            guard let address = IPv4Address(raw), !found.contains(where: { $0.address == address }) else { continue }
-            found.append((address.isLinkLocal ? 2 : interface.hasPrefix("en") ? 0 : 1, address))
+        for interface in IPv4Interface.all()
+        where interface.isUpAndRunning && !interface.isLoopback && !interface.isPointToPoint
+            && !found.contains(where: { $0.address == interface.address }) {
+            let address = interface.address
+            found.append((address.isLinkLocal ? 2 : interface.name.hasPrefix("en") ? 0 : 1, address))
         }
         // A stable sort: interfaces of one rank keep the order the system lists them in.
         return found.enumerated()

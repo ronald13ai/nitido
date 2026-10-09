@@ -12,8 +12,8 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 /// unreachable, Local Network denied, no answer), so a right code is never called wrong. A reconnect the sharer turns
 /// away with another key ends it too: its code changed (a new one every launch, or after three wrong codes).
 ///
-/// Every attempt goes through the peer's routes in order (`Peer.routes`): an address the sharer published, the next
-/// one, then the Bonjour service, all within `Link.defaultConnectTimeout` (8 s). A published address that does not
+/// Every attempt goes through the peer's routes in order (`Peer.routes(on:)`): an address the sharer published on one of
+/// this Mac's networks, the next one, then the Bonjour service, all within `Link.defaultConnectTimeout` (8 s). A published address that does not
 /// reach the sharer (refused, no route, no answer within `unreachableAfter`: `Link.noPathErrors`) hands over to the next
 /// route at once; anything else it says (a failed handshake above all, or a connection it took and reset) is the
 /// attempt's answer.
@@ -34,8 +34,9 @@ public final class LinkSession: @unchecked Sendable {
     public var clockOffsetNs: Int64? { current?.clockOffsetNs }
     public var backlogBytes: Int { current?.backlogBytes ?? 0 }
 
-    /// Where the sharer may be reached, in the order they are tried; the last one is the Bonjour service (`Peer.routes`).
-    private let routes: [NWEndpoint]
+    /// Where the sharer may be reached, in the order they are tried; the last one is the Bonjour service
+    /// (`Peer.routes(on:)`). Asked again for every attempt: this Mac's networks may have changed since the last one.
+    private let findRoutes: @Sendable () -> [NWEndpoint]
     private let code: String, sharerName: String, hello: Hello
     /// Handed to every `Link` this session makes (`Link.connect`); only tests shorten them.
     private let connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double
@@ -65,9 +66,21 @@ public final class LinkSession: @unchecked Sendable {
                   connectTimeout: Link.defaultConnectTimeout, waitingTimeout: 5)
     }
 
-    convenience init(peer: Peer, code: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double) {
-        self.init(routes: peer.routes, code: code, sharerName: peer.keyName, hello: hello, connectTimeout: connectTimeout,
-                  waitingTimeout: waitingTimeout, unreachableAfter: unreachableAfter)
+    /// `subnets` lists this Mac's networks (`IPv4Subnet.local`; tests give their own): a published address on none of
+    /// them is not dialled, so a sharer reached only over AWDL, or one whose Ethernet is on another network, leaves the
+    /// Bonjour service the whole deadline instead of 2 s after two silent addresses.
+    convenience init(peer: Peer, code: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double,
+                     subnets: @escaping @Sendable () -> [IPv4Subnet] = IPv4Subnet.local) {
+        self.init(findRoutes: {
+            let networks = subnets()
+            let elsewhere = peer.port == nil ? [] : peer.addresses.filter { address in !networks.contains { $0.contains(address) } }
+            if !elsewhere.isEmpty {
+                let shown = elsewhere.map { "\($0)" }.joined(separator: ", ")
+                log.info("not dialling \(shown, privacy: .public): on none of this Mac's networks")
+            }
+            return peer.routes(on: networks)
+        }, code: code, sharerName: peer.keyName, hello: hello, connectTimeout: connectTimeout, waitingTimeout: waitingTimeout,
+                  unreachableAfter: unreachableAfter)
     }
 
     convenience init(endpoint: NWEndpoint, code: String, sharerName: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double) {
@@ -75,10 +88,17 @@ public final class LinkSession: @unchecked Sendable {
                   waitingTimeout: waitingTimeout, unreachableAfter: Self.unreachableAfter)
     }
 
-    init(routes: [NWEndpoint], code: String, sharerName: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double,
-         unreachableAfter: Double) {
+    convenience init(routes: [NWEndpoint], code: String, sharerName: String, hello: Hello, connectTimeout: Double,
+                     waitingTimeout: Double, unreachableAfter: Double) {
         precondition(!routes.isEmpty, "a session needs a route")
-        self.routes = routes; self.code = code; self.sharerName = sharerName; self.hello = hello
+        self.init(findRoutes: { routes }, code: code, sharerName: sharerName, hello: hello, connectTimeout: connectTimeout,
+                  waitingTimeout: waitingTimeout, unreachableAfter: unreachableAfter)
+    }
+
+    /// `findRoutes` never gives an empty list: the Bonjour service, or the one endpoint, is always the last route.
+    private init(findRoutes: @escaping @Sendable () -> [NWEndpoint], code: String, sharerName: String, hello: Hello,
+                 connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double) {
+        self.findRoutes = findRoutes; self.code = code; self.sharerName = sharerName; self.hello = hello
         self.connectTimeout = connectTimeout; self.waitingTimeout = waitingTimeout; self.unreachableAfter = unreachableAfter
         (messages, messageOut) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
@@ -100,16 +120,17 @@ public final class LinkSession: @unchecked Sendable {
     }
 
     private func attemptConnection() {
+        let routes = findRoutes()
         lock.lock()
         guard open else { lock.unlock(); return }
         attempt += 1
         let n = attempt
         let deadline = CACurrentMediaTime() + connectTimeout
-        let link = makeLink(route: 0, deadline: deadline)
+        let link = makeLink(routes, route: 0, deadline: deadline)
         _current = link
         lock.unlock()
         stateOut.yield(.connecting(attempt: n))
-        follow(link, route: 0, deadline: deadline)
+        follow(link, routes, route: 0, deadline: deadline)
     }
 
     /// Under `lock`: the link for `routes[index]`, with what is left of the attempt's `deadline`. A route before the last
@@ -117,18 +138,18 @@ public final class LinkSession: @unchecked Sendable {
     /// at most `unreachableAfter` seconds, fewer if more would leave the Bonjour service, the last route, under a quarter
     /// of the deadline (2 of the 8 s). The connection stays off AWDL there; the Bonjour service keeps it, as the browser
     /// does, since a sharer found only over AWDL is reached only that way.
-    private func makeLink(route index: Int, deadline: Double) -> Link {
+    private func makeLink(_ routes: [NWEndpoint], route index: Int, deadline: Double) -> Link {
         let left = max(0, deadline - CACurrentMediaTime())
         let last = index == routes.count - 1
         let limit = last ? nil : max(0.25, min(unreachableAfter, left - connectTimeout / 4))
-        log.info("trying \(String(describing: self.routes[index]), privacy: .public) (route \(index + 1) of \(self.routes.count))")
+        log.info("trying \(String(describing: routes[index]), privacy: .public) (route \(index + 1) of \(routes.count))")
         return Link.connect(to: routes[index], code: code, sharerName: sharerName, hello: hello,
                             connectTimeout: connectTimeout, waitingTimeout: waitingTimeout, timeLeft: left,
                             unreachableAfter: limit, peerToPeer: last)
     }
 
     /// Forwards `link`'s messages and answers its states; a route that did not reach the sharer hands over to the next.
-    private func follow(_ link: Link, route index: Int, deadline: Double) {
+    private func follow(_ link: Link, _ routes: [NWEndpoint], route index: Int, deadline: Double) {
         Task { [weak self] in
             guard let self else { return }
             for await m in link.messages { messageOut.yield(m) }
@@ -141,9 +162,9 @@ public final class LinkSession: @unchecked Sendable {
                     lock.withLock { everReady = true; attempt = 0 }
                     stateOut.yield(.ready)
                 case .failed(let reason):
-                    if link.unreachable, index + 1 < routes.count, let next = nextRoute(after: index, deadline: deadline) {
-                        log.info("\(String(describing: self.routes[index]), privacy: .public) did not reach \(self.sharerName, privacy: .public) (\(reason, privacy: .public)); trying the next route")
-                        follow(next, route: index + 1, deadline: deadline)
+                    if link.unreachable, index + 1 < routes.count, let next = nextRoute(routes, after: index, deadline: deadline) {
+                        log.info("\(String(describing: routes[index]), privacy: .public) did not reach \(self.sharerName, privacy: .public) (\(reason, privacy: .public)); trying the next route")
+                        follow(next, routes, route: index + 1, deadline: deadline)
                     } else {
                         scheduleRetry(after: reason, codeRejected: link.keyMismatch)
                     }
@@ -165,10 +186,10 @@ public final class LinkSession: @unchecked Sendable {
     }
 
     /// The link for the route after `index`, made the current one, or nil once the session is closed.
-    private func nextRoute(after index: Int, deadline: Double) -> Link? {
+    private func nextRoute(_ routes: [NWEndpoint], after index: Int, deadline: Double) -> Link? {
         lock.lock(); defer { lock.unlock() }
         guard open else { return nil }
-        let link = makeLink(route: index + 1, deadline: deadline)
+        let link = makeLink(routes, route: index + 1, deadline: deadline)
         _current = link
         return link
     }

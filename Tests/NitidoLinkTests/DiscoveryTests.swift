@@ -96,7 +96,8 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertEqual(older.keyName, "Old Mac")
         XCTAssertEqual(older.addresses, [])
         XCTAssertNil(older.port)
-        XCTAssertEqual(older.routes, [service], "with nothing published, the Bonjour service is the only route")
+        let everywhere = [IPv4Subnet(address: IPv4Address("10.0.0.1")!, mask: IPv4Address("255.0.0.0")!)]
+        XCTAssertEqual(older.routes(on: everywhere), [service], "with nothing published, the Bonjour service is the only route")
 
         let bare = try XCTUnwrap(Browser.peer(endpoint: service, metadata: .none))
         XCTAssertEqual(bare.keyName, "Ronald's MacBook Pro (2)", "no TXT record: the key name is the name shown")
@@ -108,8 +109,12 @@ final class DiscoveryTests: XCTestCase {
         let odd = try XCTUnwrap(Browser.peer(endpoint: service, metadata: .bonjour(forged)))
         XCTAssertEqual(odd.addresses, [IPv4Address("10.0.0.9")!])
         XCTAssertNil(odd.port)
-        XCTAssertEqual(odd.routes, [service], "an address without a port is no route")
+        XCTAssertEqual(odd.routes(on: everywhere), [service], "an address without a port is no route")
         XCTAssertNil(Browser.peer(endpoint: .hostPort(host: "10.0.0.1", port: 1), metadata: .none), "not a Bonjour service")
+    }
+
+    private func subnet(_ address: String, _ mask: String) -> IPv4Subnet {
+        IPv4Subnet(address: IPv4Address(address)!, mask: IPv4Address(mask)!)
     }
 
     /// A viewer tries the first published address, then the next one, then the Bonjour service; never more addresses.
@@ -117,11 +122,61 @@ final class DiscoveryTests: XCTestCase {
         let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
         let peer = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service,
                         addresses: [IPv4Address("192.168.1.20")!, IPv4Address("10.0.0.5")!, IPv4Address("172.16.0.2")!], port: 50_000)
-        XCTAssertEqual(peer.routes, [
+        let viewer = [subnet("192.168.1.31", "255.255.255.0"), subnet("10.0.0.9", "255.0.0.0"), subnet("172.16.0.9", "255.240.0.0")]
+        XCTAssertEqual(peer.routes(on: viewer), [
             .hostPort(host: .ipv4(IPv4Address("192.168.1.20")!), port: 50_000),
             .hostPort(host: .ipv4(IPv4Address("10.0.0.5")!), port: 50_000),
             service,
         ])
+    }
+
+    /// Only the published addresses on one of the viewer's own networks are dialled. A desktop Mac whose Ethernet is on
+    /// another network publishes that address first, and a sharer found only over AWDL publishes addresses the viewer
+    /// cannot reach: dialling them cost 4 s and 2 s of silence and left the Bonjour service, the one route that works
+    /// there, 2 s of the deadline.
+    func testOnlyPublishedAddressesOnOneOfTheViewersNetworksAreDialled() {
+        let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
+        let published = ["10.20.0.7", "192.168.1.20", "192.168.1.21", "169.254.10.1"].map { IPv4Address($0)! }
+        let peer = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: published, port: 50_000)
+        let wifi = subnet("192.168.1.31", "255.255.255.0")
+        XCTAssertEqual(peer.routes(on: [wifi]), [
+            .hostPort(host: .ipv4(IPv4Address("192.168.1.20")!), port: 50_000),
+            .hostPort(host: .ipv4(IPv4Address("192.168.1.21")!), port: 50_000),
+            service,
+        ], "the Ethernet address on another network is skipped, not tried first")
+        XCTAssertEqual(peer.routes(on: [subnet("172.20.4.9", "255.255.0.0")]), [service],
+                       "on none of the viewer's networks: the Bonjour service alone, with the whole deadline")
+        XCTAssertEqual(peer.routes(on: []), [service])
+        XCTAssertEqual(peer.routes(on: [subnet("169.254.80.2", "255.255.0.0"), wifi]), [
+            .hostPort(host: .ipv4(IPv4Address("192.168.1.20")!), port: 50_000),
+            .hostPort(host: .ipv4(IPv4Address("192.168.1.21")!), port: 50_000),
+            service,
+        ], "in the order the sharer published them")
+    }
+
+    /// A network holds the addresses whose bits under its mask match its own.
+    func testANetworkHoldsTheAddressesUnderItsMask() {
+        let home = subnet("192.168.1.31", "255.255.255.0")
+        XCTAssertTrue(home.contains(IPv4Address("192.168.1.20")!))
+        XCTAssertTrue(home.contains(IPv4Address("192.168.1.255")!))
+        XCTAssertFalse(home.contains(IPv4Address("192.168.2.20")!))
+        XCTAssertFalse(home.contains(IPv4Address("10.168.1.20")!))
+        let office = subnet("10.20.30.40", "255.255.240.0")
+        XCTAssertTrue(office.contains(IPv4Address("10.20.17.1")!))
+        XCTAssertFalse(office.contains(IPv4Address("10.20.48.1")!))
+        let alone = subnet("192.168.1.31", "255.255.255.255")
+        XCTAssertTrue(alone.contains(IPv4Address("192.168.1.31")!))
+        XCTAssertFalse(alone.contains(IPv4Address("192.168.1.30")!))
+    }
+
+    /// This Mac's networks hold every address it would publish as a sharer, and the loopback address, so two copies on
+    /// one Mac dial each other's published addresses.
+    func testThisMacsNetworksHoldWhatItPublishesAndLoopback() {
+        let networks = IPv4Subnet.local()
+        for address in Advertiser.localIPv4Addresses() {
+            XCTAssertTrue(networks.contains { $0.contains(address) }, "\(address) is on none of \(networks)")
+        }
+        XCTAssertTrue(networks.contains { $0.contains(IPv4Address("127.0.0.1")!) })
     }
 
     /// Live: the advertiser publishes the port its listener got and this Mac's addresses, and a browser hands both on.
