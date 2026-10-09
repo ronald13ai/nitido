@@ -927,6 +927,56 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(pacer.cap, 1, "a pool of two never has two in flight")
     }
 
+    /// ProMotion runs the panel at 60 Hz for a 60 fps source while the screen still says 120 Hz. The pacer measures the
+    /// cadence of the presentations over each second: every one 16.7 ms or a whole multiple of it after the last means
+    /// a 60 Hz panel, so two in flight, however long it stays calm. Back at 120 Hz (presentations 16.7 or 25 ms apart
+    /// for a 58 fps source, which only a 120 Hz panel shows) the floor is the screen's again within a second or so, and
+    /// the cap steps down to one after ten calm seconds from then, not before.
+    @MainActor
+    func testTheCapFollowsThePresentationCadenceUnderTheScreensRate() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        var clock = 10.0
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        pacer.displayChanged()
+        XCTAssertEqual(pacer.cap, 1, "the screen says 120 Hz")
+        let buffer = try makeBuffer()
+        var ns: UInt64 = 0
+        var shownNs: UInt64?
+        /// A 58 fps source for `seconds`. Each drawable is presented at the last refresh of a `refresh`-second grid
+        /// before the next frame arrives and comes back then, so nothing waits and nothing starves. The caps seen on
+        /// the way.
+        func run(for seconds: Double, refresh: Double) -> Set<Int> {
+            var caps: Set<Int> = []
+            let end = clock + seconds
+            while clock + 1.0 / 58 <= end {
+                clock += 1.0 / 58
+                if let shown = shownNs {
+                    let presentedAt = (clock / refresh).rounded(.down) * refresh
+                    pacer.drawableReturned(kind: .live, captureHostTimeNs: shown, presentedAt: presentedAt)
+                }
+                ns += 1
+                pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns))
+                shownNs = ns
+                caps.insert(pacer.cap)
+            }
+            return caps
+        }
+
+        _ = run(for: 2, refresh: 1.0 / 60)
+        XCTAssertEqual(pacer.cap, 2, "two in flight within two seconds of presentations at 60 Hz")
+        XCTAssertEqual(run(for: 30, refresh: 1.0 / 60), [2], "thirty calm seconds at 60 Hz leave two in flight")
+        XCTAssertEqual(run(for: 10, refresh: 1.0 / 120), [2], "back at 120 Hz: not before ten calm seconds")
+        _ = run(for: 2, refresh: 1.0 / 120)
+        XCTAssertEqual(pacer.cap, 1, "then one again")
+        XCTAssertEqual(run(for: 30, refresh: 1.0 / 120), [1], "and it stays there")
+        XCTAssertTrue(host.drops.isEmpty)
+    }
+
     /// No drawable back for over a second: the count resets and drawing resumes (a lost presented handler).
     @MainActor
     func testStalledBacklogResetsAfterOneSecond() throws {
@@ -1241,7 +1291,9 @@ final class FramePacerDisplayTests: XCTestCase {
     }
 
     /// The same source and compositor on a 120 Hz panel: two of its refreshes are shorter than a capture interval, so
-    /// one drawable in flight shows every frame without adding a refresh of latency, and the pacer keeps one.
+    /// one drawable in flight shows every frame without adding a refresh of latency, and the pacer keeps one. The
+    /// presentations come 16.7 or 25 ms apart, and a 25 ms gap is one only a panel faster than 60 Hz shows, so the
+    /// presentation cadence (`FramePacer`) never takes this panel for one at 60 Hz.
     @MainActor
     func testOneTwentyHertzPanelShowsAFiftyEightFpsSourceWithOneInFlight() throws {
         let sim = try DisplaySim(.init(period: 1.0 / 120, depth: 2, sourcePeriod: 1.0 / 58, refreshRate: 120))
@@ -1253,6 +1305,59 @@ final class FramePacerDisplayTests: XCTestCase {
         XCTAssertEqual(caps, [1])
         XCTAssertTrue(sim.host.drops.isEmpty)
         XCTAssertGreaterThan(Double(sim.host.presented.count) / 20, 57.5)
+        sim.assertAccounting()
+    }
+
+    /// The Pro's own window on the second two-Mac test (2026-10-09): ProMotion ran its panel at 60 Hz for the 60 fps
+    /// source while the screen still said 120 Hz, so the pacer started at one drawable in flight, starved, rose to two,
+    /// stepped back to one after ten calm seconds and starved again, every 20 to 30 s, with bursts of 5 to 15 backlog
+    /// drops. A compositor at 60 Hz that shows a drawable at the second refresh after its commit, a 58 fps source and a
+    /// screen that says 120 Hz: the cap settles at two within two seconds (the starving rule raises it, the
+    /// presentation cadence keeps it there) and stays at two for 40 s, four times the calm that lowered it, with no
+    /// frame dropped.
+    @MainActor
+    func testAPanelPresentingAtSixtyHertzUnderAScreenSayingOneTwentyKeepsTwoInFlight() throws {
+        let sim = try DisplaySim(.init(depth: 2, sourcePeriod: 1.0 / 58, refreshRate: 120))
+        XCTAssertEqual(sim.pacer.cap, 1, "the screen says 120 Hz")
+        sim.run(refreshes: 120)
+        XCTAssertEqual(sim.pacer.cap, 2, "two in flight within two seconds")
+        let settled = sim.host.drops.count
+        let shownBefore = sim.host.presented.count
+        var caps: Set<Int> = []
+        for _ in 0..<400 {
+            sim.run(refreshes: 6)
+            caps.insert(sim.pacer.cap)
+        }
+        XCTAssertEqual(caps, [2], "never back to one")
+        XCTAssertEqual(sim.host.drops.count, settled, "no frame dropped once settled: \(Array(sim.host.drops.dropFirst(settled)))")
+        XCTAssertGreaterThan(Double(sim.host.presented.count - shownBefore) / 40, 57.5, "close to the source's 58 fps")
+        sim.assertAccounting()
+    }
+
+    /// A 60 fps source in step with a 120 Hz panel is presented every 16.7 ms too, which the pacer cannot tell from a
+    /// panel at 60 Hz, so it keeps two in flight. That costs nothing here: each drawable comes back before the next
+    /// frame arrives, so the second is used only by a burst, nothing is dropped and every frame is shown at the
+    /// compositor's own delay but the one a burst queued. (A 58 fps source on that panel is told apart:
+    /// `testOneTwentyHertzPanelShowsAFiftyEightFpsSourceWithOneInFlight`.)
+    @MainActor
+    func testASixtyFpsSourceInStepWithAOneTwentyHertzPanelLooksLikeSixtyHertzAndCostsNothing() throws {
+        let sim = try DisplaySim(.init(period: 1.0 / 120, depth: 2, sourceEvery: 2, refreshRate: 120))
+        sim.run(refreshes: 480)
+        XCTAssertEqual(sim.pacer.cap, 2)
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        XCTAssertGreaterThanOrEqual(sim.latencies.count, 238)
+        for l in sim.latencies.map(\.refreshes) { XCTAssertEqual(l, 2, accuracy: 0.001) }
+        // A burst queues one frame behind another for a refresh, and the next frame is on time again: the panel shows
+        // a drawable every refresh and the source changes every other one, so the queue drains by itself.
+        let burstAt = sim.refresh
+        sim.burst(1)
+        sim.run(refreshes: 120)
+        XCTAssertEqual(sim.pacer.cap, 2)
+        XCTAssertTrue(sim.host.drops.isEmpty)
+        XCTAssertLessThanOrEqual(sim.latencies(capturedFromRefresh: burstAt).max() ?? 0, 3 + 0.001)
+        let after = sim.latencies(capturedFromRefresh: burstAt + 1)
+        XCTAssertGreaterThanOrEqual(after.count, 58)
+        for l in after { XCTAssertEqual(l, 2, accuracy: 0.001) }
         sim.assertAccounting()
     }
 

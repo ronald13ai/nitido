@@ -14,7 +14,9 @@ protocol FrameDrawing: AnyObject {
     var canShowFrames: Bool { get }
     /// The layer's drawable pool size.
     var drawableCount: Int { get }
-    /// The highest refresh rate, in Hz, of the screen the window is on; 0 when it is not known.
+    /// The highest refresh rate, in Hz, of the screen the window is on; 0 when it is not known. Nominal: ProMotion may
+    /// run the panel slower, which the pacer sees in when its drawables are presented
+    /// (`FramePacer.slowRefreshInterval`).
     var refreshRate: Double { get }
     /// Renders `frame` into a fresh drawable and commits it. Returns nil once the drawable is committed; the
     /// host then calls `FramePacer.drawableReturned` when it is presented or discarded. Returns why otherwise.
@@ -37,15 +39,19 @@ protocol FrameDrawing: AnyObject {
 /// on the glass at the second refresh after its commit, and the presented handler that frees the slot comes no sooner),
 /// so a panel slower than twice the capture rate, 60 Hz among them, could show only every other frame of a 60 fps
 /// source with one: it starts at two and never goes below (`minimumCap`, taken from the screen the window is on by
-/// `displayChanged`). A 120 Hz panel starts at one. A frame that waited at the cap through a refresh (the drawable
-/// ahead of it was shown after it arrived) is held back for one capture interval with the drawable free: a newer frame
-/// replaces it (one `.backlog` drop) and is drawn at once into the emptier queue, which brings latency back to the
-/// display's own; if none comes, the source went still and the held-back frame is drawn then. A frame that waited only
-/// because the presented handler reached the main actor after it is drawn at once. If frames keep starving at the cap,
-/// the display keeps each drawable longer than the pacer expected, and the cap rises by one, up to the pool size minus
-/// one. It steps back down by one after ten seconds without starving (on `now`, whatever the refresh rate), never below
-/// `minimumCap`, so a transient (a Space switch, Mission Control, a main-thread hitch) does not cost a refresh of
-/// latency for the rest of the session.
+/// `displayChanged`). A 120 Hz panel starts at one. A screen's nominal rate is not always the rate its panel runs at:
+/// ProMotion ran a MacBook Pro's panel at 60 Hz for a 60 fps source while the screen still said 120 Hz (the second
+/// two-Mac test, 2026-10-09), so the pacer also measures when its drawables are presented, over each second, and takes
+/// a panel that presents at 1.5 times the nominal interval or slower for the slower rate it shows
+/// (`slowRefreshInterval`): two in flight while that lasts. A frame that waited at the cap through a refresh (the
+/// drawable ahead of it was shown after it arrived) is held back for one capture interval with the drawable free: a
+/// newer frame replaces it (one `.backlog` drop) and is drawn at once into the emptier queue, which brings latency back
+/// to the display's own; if none comes, the source went still and the held-back frame is drawn then. A frame that
+/// waited only because the presented handler reached the main actor after it is drawn at once. If frames keep starving
+/// at the cap, the display keeps each drawable longer than the pacer expected, and the cap rises by one, up to the pool
+/// size minus one. It steps back down by one after ten seconds without starving (on `now`, whatever the refresh rate),
+/// never below `minimumCap`, so a transient (a Space switch, Mission Control, a main-thread hitch) does not cost a
+/// refresh of latency for the rest of the session.
 @MainActor
 final class FramePacer {
     struct Frame {
@@ -74,6 +80,11 @@ final class FramePacer {
     static let starvedReturnsBeforeRaise = 6
     /// Seconds without a starved frame before one drawable fewer may be in flight again.
     static let calmBeforeLower: CFTimeInterval = 10
+    /// The presentations the cadence is measured over, and how often it is: the last second of them, every second.
+    static let cadenceWindow: CFTimeInterval = 1
+    /// Gaps between presentations a second must hold before its cadence says anything about the panel: a source near
+    /// the capture rate. A slower one is presented as slowly on any panel.
+    static let cadenceSamples = 40
 
     weak var host: (any FrameDrawing)?
     var now: () -> CFTimeInterval = { CACurrentMediaTime() }
@@ -89,9 +100,19 @@ final class FramePacer {
     /// Drawables allowed in flight: `minimumCap` to start, raised while frames keep starving, lowered after a calm.
     private(set) var cap = 1
     /// The fewest drawables in flight the display needs to show a source at the capture rate: two on a panel slower
-    /// than twice the capture rate, one on a faster one (`minimumCap(refreshRate:drawableCount:)`). One until the pacer
-    /// knows the display (`displayChanged`).
-    private(set) var minimumCap = 1
+    /// than twice the capture rate, one on a faster one (`minimumCap(refreshRate:drawableCount:)`), by the screen's
+    /// rate or by the rate its presentations show, whichever needs more. One until the pacer knows the display.
+    var minimumCap: Int { max(screenFloor, cadenceFloor) }
+    /// What the screen's nominal rate needs (`displayChanged`).
+    private var screenFloor = 1
+    /// What the rate the presentations show needs (`measureCadence`); one while they show the nominal rate.
+    private var cadenceFloor = 1
+    /// The screen's nominal rate, in Hz; 0 until `displayChanged` knows it, and the cadence is not measured until then.
+    private var nominalRate: Double = 0
+    /// Presented times of the last `cadenceWindow`, oldest first.
+    private var presentations: [Double] = []
+    /// When the cadence was last measured, on `now`; nil until the first presentation after the rate became known.
+    private var cadenceMeasuredAt: CFTimeInterval?
     /// The held frame met the cap and is drawn as this kind when a drawable is free, unless a live frame is
     /// committed first. `.live`: a captured frame not drawn yet, counted as displayed once it is shown, or as
     /// dropped if a newer frame replaces it first. `.redraw`: the held frame drawn again (resize, reveal).
@@ -226,6 +247,7 @@ final class FramePacer {
             let spacing = lastPresentedAt > 0 ? (presentedAt - lastPresentedAt) * 1000 : 0
             log.debug("Presented \(kind == .live ? "live" : "redraw", privacy: .public) at \(presentedAt, format: .fixed(precision: 4), privacy: .public), \(spacing, format: .fixed(precision: 1), privacy: .public) ms after the previous one, latency \((presentedAt - Double(captureHostTimeNs) / 1e9) * 1000, format: .fixed(precision: 1), privacy: .public) ms; \(self.inFlight, privacy: .public) of \(self.cap, privacy: .public) still in flight, waiting \(self.pending == .live, privacy: .public)")
             lastPresentedAt = presentedAt
+            notePresentation(at: presentedAt, returnedAt: returnedAt)
         }
         if kind == .live {
             // A discarded drawable reports 0: count it as dropped, never as a display at time zero.
@@ -250,18 +272,82 @@ final class FramePacer {
 
     /// The window is on a screen for the first time, moved to another, or its screen changed mode: the cap starts again
     /// from what this display needs (`minimumCap(refreshRate:drawableCount:)`), and the rule that raises and lowers it
-    /// starts afresh on top of that. Nothing when the display needs what the last one did, or does not say its rate.
+    /// starts afresh on top of that. Nothing when the display needs what the last one did, or does not say its rate. A
+    /// new rate also starts the presentation cadence afresh: what it showed was measured against the old one.
     func displayChanged() {
         guard let host, host.refreshRate > 0 else { return }
+        if host.refreshRate != nominalRate {
+            nominalRate = host.refreshRate
+            presentations.removeAll()
+            cadenceMeasuredAt = nil
+            cadenceFloor = 1
+        }
         let needed = Self.minimumCap(refreshRate: host.refreshRate, drawableCount: host.drawableCount)
-        guard needed != minimumCap else { return }
-        minimumCap = needed
-        cap = needed
+        guard needed != screenFloor else { return }
+        screenFloor = needed
+        cap = minimumCap
         starvedReturns = 0
         calmSince = now()
         lowerAfter = Self.calmBeforeLower
         loweredAt = nil
         log.info("The display refreshes at \(host.refreshRate, format: .fixed(precision: 0), privacy: .public) Hz: allowing \(self.cap, privacy: .public) in flight")
+    }
+
+    /// Keeps the last second of presented times and, once a second, measures their cadence (`measureCadence`).
+    private func notePresentation(at presentedAt: Double, returnedAt: CFTimeInterval) {
+        guard nominalRate > 0 else { return }
+        if let last = presentations.last, presentedAt <= last { return }
+        presentations.append(presentedAt)
+        if let stale = presentations.firstIndex(where: { $0 >= presentedAt - Self.cadenceWindow }), stale > 0 {
+            presentations.removeFirst(stale)
+        }
+        guard let measured = cadenceMeasuredAt else { cadenceMeasuredAt = returnedAt; return }
+        guard returnedAt - measured >= Self.cadenceWindow else { return }
+        cadenceMeasuredAt = returnedAt
+        measureCadence(at: returnedAt)
+    }
+
+    /// The rate the last second's presentations show sets `cadenceFloor`: two in flight while the panel presents at 1.5
+    /// times the nominal interval or slower, the screen's own floor otherwise. Raised, the cap follows at once;
+    /// lowered, the cap steps down by the usual rule, after `lowerAfter` seconds of calm counted from now.
+    private func measureCadence(at now: CFTimeInterval) {
+        guard let host else { return }
+        let gaps = zip(presentations.dropFirst(), presentations).map { $0 - $1 }
+        guard gaps.count >= Self.cadenceSamples else { return }
+        let slow = Self.slowRefreshInterval(gaps: gaps, nominal: 1 / nominalRate)
+        let floor = slow.map { Self.minimumCap(refreshRate: 1 / $0, drawableCount: host.drawableCount) } ?? 1
+        guard floor != cadenceFloor else { return }
+        let raised = floor > cadenceFloor
+        cadenceFloor = floor
+        calmSince = now
+        let shown = (slow ?? gaps.min() ?? 0) * 1000
+        if raised {
+            cap = max(cap, minimumCap)
+            log.info("Drawables are presented every \(shown, format: .fixed(precision: 1), privacy: .public) ms although the display says \(self.nominalRate, format: .fixed(precision: 0), privacy: .public) Hz: allowing \(self.cap, privacy: .public) in flight")
+        } else {
+            log.info("Drawables are presented as often as the display's \(self.nominalRate, format: .fixed(precision: 0), privacy: .public) Hz allows again: \(self.cap, privacy: .public) in flight until \(self.lowerAfter, format: .fixed(precision: 0), privacy: .public) s of calm")
+        }
+    }
+
+    /// The refresh interval a second of gaps between presentations shows, when it is at least 1.5 times the nominal
+    /// one: the longest interval of which every gap is a whole multiple, to within a quarter of a nominal refresh,
+    /// tried among the shortest gap and its half, third and quarter. Nil when only a shorter one fits: the panel shows
+    /// frames at a rate closer to its nominal one. A 58 fps source on a 120 Hz panel is presented 16.7 or 25 ms apart,
+    /// and 25 ms is no multiple of 16.7: nil. On a panel at 60 Hz the gaps are 16.7 or 33.3 ms: 16.7 ms. A 60 fps
+    /// source in step with a 120 Hz panel is presented every 16.7 ms as well, which no cadence can tell from 60 Hz.
+    static func slowRefreshInterval(gaps: [Double], nominal: Double) -> Double? {
+        guard let shortest = gaps.min(), shortest > 0 else { return nil }
+        let tolerance = nominal / 4
+        for divisor in 1...4 {
+            let interval = shortest / Double(divisor)
+            guard interval >= 1.5 * nominal else { return nil }
+            let fits = gaps.allSatisfy { gap in
+                let multiple = (gap / interval).rounded()
+                return multiple >= 1 && abs(gap - multiple * interval) <= tolerance
+            }
+            if fits { return interval }
+        }
+        return nil
     }
 
     /// Two drawables in flight on a panel slower than twice the capture rate (60 Hz, also 59.94, 75, 90 or 100 Hz), one
