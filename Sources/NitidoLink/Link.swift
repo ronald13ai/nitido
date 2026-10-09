@@ -11,8 +11,8 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "link")
 ///
 /// Threading: everything that changes the link runs on `queue` (Network.framework callbacks, the ping timer,
 /// the connect deadlines, `close()` and `abort()`). The values callers read from other threads (`state`, `peerHello`,
-/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`), the ping bookkeeping and `closing`, which
-/// `close()` sets before it returns, live behind `lock`.
+/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`, `unreachable`), the ping bookkeeping and
+/// `closing`, which `close()` sets before it returns, live behind `lock`.
 public final class Link: @unchecked Sendable {
     public enum State: Sendable, Equatable { case connecting, ready, failed(String), cancelled }
 
@@ -34,6 +34,27 @@ public final class Link: @unchecked Sendable {
     public var keyMismatch: Bool { lock.withLock { _keyMismatch } }
     /// The reason the other side gave in its `bye` (`ByeReason`), once one came. Set before `states` reports `.cancelled`.
     public var byeReason: UInt8? { lock.withLock { _byeReason } }
+    /// True when a link made with `unreachableAfter` failed because its address does not reach the sharer: refused, no
+    /// route, or no answer at all in that time. A viewer's session then tries its next route (`LinkSession`). Set before
+    /// `states` reports the failure.
+    public var unreachable: Bool { lock.withLock { _unreachable } }
+    /// The other side's address, without its port or an interface: on the sharer, where a connection came from, which is
+    /// what failed handshakes are counted by. Nil when the endpoint is not an address.
+    public var remoteHost: String? {
+        guard case .hostPort(let host, _) = connection.endpoint else { return nil }
+        let text: String
+        switch host {
+        case .ipv4(let address): text = "\(address)"
+        case .ipv6(let address): text = "\(address)"
+        case .name(let name, _): text = name
+        @unknown default: text = "\(host)"
+        }
+        return String(text.prefix { $0 != "%" })
+    }
+
+    /// Longest one attempt to reach the sharer may take, over every route a viewer tries (`LinkSession`), and longest a
+    /// connection the sharer took may take to prove the code.
+    public static let defaultConnectTimeout: Double = 8
 
     private let connection: NWConnection
     private let hello: Hello
@@ -43,6 +64,13 @@ public final class Link: @unchecked Sendable {
     /// Longest a link may stay `.connecting` after Network.framework first reports `.waiting` for a reason
     /// other than TLS (connection refused, host unreachable, Local Network denied).
     private let waitingTimeout: Double
+    /// When `connectTimeout` runs out (`CACurrentMediaTime`): a viewer's session hands each route what is left of its
+    /// attempt (`LinkSession`), and a wait is never given longer than that.
+    private let connectDeadline: Double
+    /// A viewer's link to an address the sharer published: a POSIX failure (refused, no route) or no answer within this
+    /// many seconds fails it at once as `unreachable`, so the session goes on to its next route. Nil on the last route
+    /// and on the sharer, where a wait gets `waitingTimeout`.
+    private let unreachableAfter: Double?
     private let queue = DispatchQueue(label: "ai.ronar.nitido.link", qos: .userInteractive)
 
     // Behind `lock`.
@@ -56,6 +84,7 @@ public final class Link: @unchecked Sendable {
     private var _wasReady = false
     private var _keyMismatch = false
     private var _byeReason: UInt8?
+    private var _unreachable = false
     private var nextPing: UInt32 = 0
     /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
     private var pingSentAt: [UInt32: UInt64] = [:]
@@ -75,21 +104,32 @@ public final class Link: @unchecked Sendable {
     private let messageOut: AsyncStream<Message>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
 
-    init(connection: NWConnection, role: Role, hello: Hello, connectTimeout: Double = 15, waitingTimeout: Double = 5) {
+    /// `timeLeft` is how much of `connectTimeout` this link has (all of it unless a viewer's session already spent some on
+    /// another route); the message on running out names `connectTimeout`, the attempt's whole deadline.
+    init(connection: NWConnection, role: Role, hello: Hello, connectTimeout: Double = Link.defaultConnectTimeout,
+         waitingTimeout: Double = 5, timeLeft: Double? = nil, unreachableAfter: Double? = nil) {
         self.connection = connection; self.role = role; self.hello = hello
         self.connectTimeout = connectTimeout; self.waitingTimeout = waitingTimeout
+        connectDeadline = CACurrentMediaTime() + (timeLeft ?? connectTimeout)
+        self.unreachableAfter = unreachableAfter
         (messages, messageOut) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
     }
 
     public static func connect(to endpoint: NWEndpoint, code: String, sharerName: String, hello: Hello) -> Link {
-        connect(to: endpoint, code: code, sharerName: sharerName, hello: hello, connectTimeout: 15, waitingTimeout: 5)
+        connect(to: endpoint, code: code, sharerName: sharerName, hello: hello, connectTimeout: defaultConnectTimeout, waitingTimeout: 5)
     }
 
+    /// `peerToPeer` false keeps the connection off AWDL: an address the sharer published is reached on the network it
+    /// is on (`LinkSession`).
     static func connect(to endpoint: NWEndpoint, code: String, sharerName: String, hello: Hello,
-                        connectTimeout: Double, waitingTimeout: Double) -> Link {
-        let link = Link(connection: NWConnection(to: endpoint, using: LinkTLS.parameters(code: code, sharerName: sharerName)),
-                        role: .view, hello: hello, connectTimeout: connectTimeout, waitingTimeout: waitingTimeout)
+                        connectTimeout: Double, waitingTimeout: Double, timeLeft: Double? = nil,
+                        unreachableAfter: Double? = nil, peerToPeer: Bool = true) -> Link {
+        let parameters = LinkTLS.parameters(code: code, sharerName: sharerName)
+        parameters.includePeerToPeer = peerToPeer
+        let link = Link(connection: NWConnection(to: endpoint, using: parameters), role: .view, hello: hello,
+                        connectTimeout: connectTimeout, waitingTimeout: waitingTimeout, timeLeft: timeLeft,
+                        unreachableAfter: unreachableAfter)
         link.start()
         return link
     }
@@ -97,6 +137,8 @@ public final class Link: @unchecked Sendable {
     func start() {
         connection.stateUpdateHandler = { [weak self] s in
             guard let self else { return }
+            // What Network.framework does on the way: the record a two-Mac session needs (`log stream --debug`).
+            log.debug("\(self.role.logName, privacy: .public) connection with \(String(describing: self.connection.endpoint), privacy: .public): \(String(describing: s), privacy: .public)")
             switch s {
             case .ready:
                 // A deadline or close() may already have ended this link while `.ready` was queued.
@@ -106,6 +148,7 @@ public final class Link: @unchecked Sendable {
             case .failed(let e):
                 log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
                 noteKeyMismatch(e)
+                noteUnreachable(e)
                 // Network.framework expects a failed connection to be cancelled; until then it holds on to it.
                 finish(.failed(e.localizedDescription)); connection.cancel()
             case .cancelled: finish(.cancelled)
@@ -116,14 +159,20 @@ public final class Link: @unchecked Sendable {
                     log.error("handshake failed: \(e.localizedDescription, privacy: .public)")
                     noteKeyMismatch(e)
                     finish(.failed(e.localizedDescription)); connection.cancel()
+                } else if unreachableAfter != nil, case .posix = e {
+                    // An address the sharer published that does not take the connection (refused, no route): the
+                    // session has another route, so this one ends now rather than after `waitingTimeout`.
+                    giveUpUnreachable("Could not reach \(connection.endpoint): \(e.plainDescription)")
                 } else {
                     // Refused, unreachable or Local Network denied: Network.framework retries on its own, which
-                    // can last forever (a stale Bonjour peer). Give it `waitingTimeout`, then fail.
+                    // can last forever (a stale Bonjour peer). Give it `waitingTimeout`, or what is left of the connect
+                    // deadline if that is sooner, so the reason is said rather than "No answer", then fail.
                     log.error("waiting: \(e.localizedDescription, privacy: .public)")
                     guard state == .connecting, !waitingDeadlineArmed else { return }
                     waitingDeadlineArmed = true
                     let reason = e.plainDescription
-                    queue.asyncAfter(deadline: .now() + waitingTimeout) { [weak self] in
+                    let wait = max(0, min(waitingTimeout, connectDeadline - CACurrentMediaTime() - 0.05))
+                    queue.asyncAfter(deadline: .now() + wait) { [weak self] in
                         self?.giveUpConnecting("Could not reach the other Mac: \(reason)")
                     }
                 }
@@ -131,8 +180,15 @@ public final class Link: @unchecked Sendable {
             }
         }
         connection.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + connectTimeout) { [weak self, connectTimeout] in
+        queue.asyncAfter(deadline: .now() + max(0, connectDeadline - CACurrentMediaTime())) { [weak self, connectTimeout] in
             self?.giveUpConnecting("No answer from the other Mac within \(connectTimeout.formatted()) seconds.")
+        }
+        if let unreachableAfter {
+            // No answer at all from a published address: a stale one, or a host that drops the packets.
+            queue.asyncAfter(deadline: .now() + unreachableAfter) { [weak self] in
+                guard let self else { return }
+                giveUpUnreachable("No answer from \(connection.endpoint) within \(unreachableAfter.formatted()) seconds.")
+            }
         }
     }
 
@@ -202,6 +258,23 @@ public final class Link: @unchecked Sendable {
         guard case .tls(let status) = e, Self.keyMismatchStatuses.contains(status), state == .connecting else { return }
         lock.withLock { _keyMismatch = true }
     }
+
+    /// On `queue`, before the failure is reported: remembers that a published address did not take the connection.
+    private func noteUnreachable(_ e: NWError) {
+        guard unreachableAfter != nil, case .posix = e, state == .connecting else { return }
+        lock.withLock { _unreachable = true }
+    }
+
+    /// On `queue`: fails a link to a published address that is still connecting as `unreachable`.
+    private func giveUpUnreachable(_ reason: String) {
+        guard state == .connecting else { return }
+        log.error("\(self.role.logName, privacy: .public) link: \(reason, privacy: .public)")
+        lock.withLock { _unreachable = true }
+        finish(.failed(reason)); connection.cancel()
+    }
+
+    /// Test only: whether the connection may use AWDL.
+    var includesPeerToPeerForTesting: Bool { connection.parameters.includePeerToPeer }
 
     /// On `queue`: fails a link that is still connecting; does nothing once it is ready or ended.
     private func giveUpConnecting(_ reason: String) {

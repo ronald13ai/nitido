@@ -194,8 +194,9 @@ public final class ViewModel {
         guard case .enteringCode(let peer) = state, code.count == 4, code.allSatisfy({ ("0"..."9").contains($0) }) else { return }
         let hello = Hello(protocolVersion: protocolVersion, role: .view, name: name, pixelWidth: 0, pixelHeight: 0,
                           scale: Float(NSScreen.main?.backingScaleFactor ?? 2))
-        // The name the sharer keyed its listener with (Task 13): Bonjour may show it renamed, as "Name (2)".
-        let session = LinkSession(endpoint: peer.endpoint, code: code, sharerName: peer.keyName, hello: hello)
+        // Under the name the sharer keyed its listener with (Task 13; Bonjour may show it renamed, as "Name (2)"), through
+        // the address it published first (`Peer.routes`), as discovery says now.
+        let session = LinkSession(peer: Self.latest(peer, in: peers), code: code, hello: hello)
         link?.close()
         link = session
         currentPeer = peer
@@ -220,6 +221,10 @@ public final class ViewModel {
         ]
         session.start()
     }
+
+    /// What discovery says now about `peer`, chosen from the list earlier: the entry with its id (a sharer whose code
+    /// rotated listens on a new port, and publishes it), or `peer` as it was chosen once the list no longer has it.
+    nonisolated static func latest(_ peer: Peer, in list: [Peer]) -> Peer { list.first { $0.id == peer.id } ?? peer }
 
     public func retry() {
         wrongCodeCount = 0; failureOffersReconnect = false

@@ -56,8 +56,8 @@ nitido (app)  ->  NitidoUI  ->  NitidoCapture, NitidoCodec, NitidoLink  ->  Niti
 - Both drop work rather than queue it: the encoder always takes the newest captured frame; the decoder decodes on its own queue with at most three frames waiting: when more would wait it skips to the next keyframe and asks for one, and a keyframe drops the frames still waiting before it; the renderer shows the newest.
 
 ### NitidoLink (Network.framework)
-- `Advertiser` (sharer): `NWListener` over TCP with TLS PSK, Bonjour service `_nitido._tcp`, TXT record with display name and protocol version.
-- `Browser` (viewer): `NWBrowser` for `_nitido._tcp`; list of sharers updated live.
+- `Advertiser` (sharer): `NWListener` over TCP with TLS PSK, Bonjour service `_nitido._tcp`, TXT record with display name, protocol version, the listener's port and the Mac's IPv4 addresses (Wi-Fi and Ethernet first).
+- `Browser` (viewer): `NWBrowser` for `_nitido._tcp`; list of sharers updated live. A viewer dials the first address the sharer published, off AWDL, then the next one, then the Bonjour service, within 8 s for the whole attempt; an address that refuses, has no route or gives no answer within 4 s hands over to the next route at once. Through the Bonjour service alone Network.framework tries every resolved address in turn (IPv6 link-local, IPv4, AWDL), and between two Macs a wrong code failed the handshake on each without a word to the viewer, which gave up after its deadline (2026-10-09).
 - `Link`: one connection, both directions, `send(Message)` and an `AsyncStream<Message>`. Measures send backlog (bytes accepted by `send` whose completion has not fired). Ping every 500 ms. Reconnects with exponential backoff (0.5 s, 1 s, 2 s, max 5 s) while the user keeps the session open.
 
 ### NitidoUI (SwiftUI, AppKit, Metal)

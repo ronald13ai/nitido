@@ -118,6 +118,116 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertEqual(tried, 1, "the sharer sees one failed handshake")
     }
 
+    /// A Bonjour service that never resolves: a session that tried it would wait for its deadline, so one that ends at
+    /// once went another way.
+    private func absentService() -> NWEndpoint {
+        .service(name: "Absent \(UInt32.random(in: 0..<1_000_000))", type: "_nitido._tcp", domain: "local.", interface: nil)
+    }
+
+    private func states(of session: LinkSession, within seconds: Double) async -> [LinkSession.State] {
+        let deadline = Task { try await Task.sleep(for: .seconds(seconds)); session.close() }
+        session.start()
+        var seen: [LinkSession.State] = []
+        for await s in session.states { seen.append(s) }
+        deadline.cancel()
+        return seen
+    }
+
+    /// Two Macs, wrong code: through the Bonjour service Network.framework tried the handshake on each address it
+    /// resolved, failed it on every one, reported nothing and the viewer gave up after 15 s with "No answer". Through
+    /// the address the sharer published, the failed handshake comes back at once and the session ends as a wrong code,
+    /// after one handshake on the sharer. The right code pairs the same way.
+    func testAWrongCodeThroughThePublishedAddressIsRejectedAtOnce() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let attempts = Task { () -> Int in var n = 0; for await _ in advertiser.incoming { n += 1 }; return n }
+        let sharer = Peer(id: "published", name: "Sharer", keyName: "Sharer", endpoint: absentService(),
+                          addresses: [IPv4Address("127.0.0.1")!], port: port)
+        let clock = ContinuousClock(), started = clock.now
+        let wrong = LinkSession(peer: sharer, code: "0000", hello: hello(.view))
+        let seen = await states(of: wrong, within: 15)
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .codeRejected])
+        XCTAssertLessThan(clock.now - started, .seconds(2), "the failed handshake came back at once")
+
+        let right = LinkSession(peer: sharer, code: "1234", hello: hello(.view))
+        let watcher = Task { () -> Bool in for await s in right.states where s == .ready { return true }; return false }
+        right.start()
+        let ready = await watcher.value
+        XCTAssertTrue(ready, "the right code pairs through the published address")
+        XCTAssertEqual(right.includesPeerToPeerForTesting, false, "a published address is reached on the network it is on, not over AWDL")
+        right.close()
+        try await Task.sleep(for: .milliseconds(200))
+        advertiser.stop()
+        let tried = await attempts.value
+        XCTAssertEqual(tried, 2, "one connection per attempt reached the sharer")
+    }
+
+    /// The published address refuses (a port the sharer no longer listens on): the next route is tried at once, without
+    /// the five seconds a refusal on the last route waits for.
+    func testARefusedPublishedAddressFallsBackAtOnce() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        let sharer = Peer(id: "stale", name: "Sharer", keyName: "Sharer",
+                          endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!),
+                          addresses: [IPv4Address("127.0.0.1")!], port: 1)
+        let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view))
+        let clock = ContinuousClock(), started = clock.now
+        let watcher = Task { () -> [LinkSession.State] in
+            var seen: [LinkSession.State] = []
+            for await s in session.states { seen.append(s); if s == .ready { break } }
+            return seen
+        }
+        session.start()
+        let seen = await watcher.value
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .ready], "one attempt, two routes")
+        XCTAssertLessThan(clock.now - started, .seconds(2))
+        session.close(); advertiser.stop()
+    }
+
+    /// The published address takes the connection and never answers (a stale address, a host that drops the packets):
+    /// after `unreachableAfter` with no answer the next route is tried.
+    func testAPublishedAddressThatNeverAnswersFallsBackAfterItsLimit() async throws {
+        let silent = try SilentListener()
+        let silentPort = try await silent.start()
+        defer { silent.stop() }
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "silent", name: "Sharer", keyName: "Sharer",
+                          endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!),
+                          addresses: [IPv4Address("127.0.0.1")!], port: silentPort)
+        let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view), connectTimeout: 8, waitingTimeout: 5, unreachableAfter: 0.5)
+        let clock = ContinuousClock(), started = clock.now
+        let watcher = Task { () -> [LinkSession.State] in
+            var seen: [LinkSession.State] = []
+            for await s in session.states { seen.append(s); if s == .ready { break } }
+            return seen
+        }
+        session.start()
+        let seen = await watcher.value
+        let took = clock.now - started
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .ready])
+        XCTAssertGreaterThanOrEqual(took, .milliseconds(450), "the silent address had its half second")
+        XCTAssertLessThan(took, .seconds(3))
+        XCTAssertEqual(silent.accepted, 1)
+        session.close()
+    }
+
+    /// One attempt gives up after 8 seconds over all its routes (15 before): "No answer" says so.
+    func testAnAttemptGivesUpAfterEightSeconds() async throws {
+        let silent = try SilentListener()
+        let port = try await silent.start()
+        defer { silent.stop() }
+        let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234",
+                                  sharerName: "Sharer", hello: hello(.view))
+        let clock = ContinuousClock(), started = clock.now
+        let seen = await states(of: session, within: 20)
+        let took = clock.now - started
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .closed("Could not connect to Sharer. No answer from the other Mac within 8 seconds.")])
+        XCTAssertGreaterThanOrEqual(took, .milliseconds(7_900))
+        XCTAssertLessThan(took, .seconds(10))
+    }
+
     func testBackoffDoublesFromHalfASecondUpToFive() {
         XCTAssertEqual((1...6).map { LinkSession.retryDelay(attempt: $0) }, [0.5, 1, 2, 4, 5, 5])
     }

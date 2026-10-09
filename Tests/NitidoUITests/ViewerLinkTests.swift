@@ -1145,6 +1145,45 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Two Macs, wrong code: the viewer said "No answer from the other Mac within 15 seconds" because it connected to
+    /// the Bonjour service, whose several addresses Network.framework tried one after another without a word. It now
+    /// connects to the address the sharer published (here the loopback address, behind a Bonjour service that never
+    /// resolves), and the failed handshake comes back at once as "Wrong code", one wrong code on the sharer. The right
+    /// code pairs the same way.
+    @MainActor
+    func testAWrongCodeThroughThePublishedAddressSaysWrongCodeAtOnce() async throws {
+        let (share, _) = try await listeningShare()
+        let viewer = ViewModel()
+        let absent = NWEndpoint.service(name: "Absent \(UInt32.random(in: 0..<1_000_000))", type: "_nitido._tcp", domain: "local.", interface: nil)
+        let sharer = Peer(id: "published", name: share.name, keyName: share.name, endpoint: absent,
+                          addresses: [IPv4Address("127.0.0.1")!], port: try XCTUnwrap(share.listeningPort))
+        viewer.select(sharer)
+        viewer.code = String(format: "%04d", (Int(share.code)! + 1) % 10_000)
+        let started = CACurrentMediaTime()
+        viewer.connect()
+        try await waitUntil("the viewer says Wrong code", timeout: 5) { viewer.wrongCodeCount == 1 }
+        XCTAssertLessThan(CACurrentMediaTime() - started, 2, "the failed handshake came back at once")
+        XCTAssertEqual(viewer.state, .enteringCode(sharer))
+        try await waitUntil("the sharer lets the attempt go") { share.unpairedCount == 0 }
+
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the right code connects") { viewer.state == .connected && share.isSending }
+        viewer.disconnect()
+        await share.stop()
+    }
+
+    /// A sharer whose code rotated listens on a new port and publishes it; the viewer chose it from the list before. It
+    /// connects with what discovery says now, so the new code goes to the new port, not to a refused one first.
+    func testTheViewerConnectsWithWhatDiscoverySaysNow() {
+        let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
+        let chosen = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: [IPv4Address("192.168.1.20")!], port: 50_000)
+        let now = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: [IPv4Address("192.168.1.20")!], port: 50_123)
+        let other = Peer(id: "o", name: "Other", keyName: "Other", endpoint: service, addresses: [], port: nil)
+        XCTAssertEqual(ViewModel.latest(chosen, in: [other, now]), now)
+        XCTAssertEqual(ViewModel.latest(chosen, in: [other]), chosen, "gone from the list: as it was chosen")
+    }
+
     /// A Mac that has just stopped sharing refuses the connection, and a refusal says nothing about the code: the viewer
     /// shows a failure screen with the reason instead of "Wrong code", the field does not shake (`wrongCodeCount` stays
     /// 0), and Try again goes back to the code for that Mac with the code kept.

@@ -10,7 +10,30 @@ public struct Peer: Identifiable, Hashable, Sendable {
     public let name: String
     /// The name the sharer derived its key from (`Pairing.presharedKey`), from its TXT record; `name` without one.
     public let keyName: String
+    /// The Bonjour service (in tests, any endpoint): the last route a viewer tries.
     public let endpoint: NWEndpoint
+    /// The IPv4 addresses the sharer published in its TXT record, Wi-Fi and Ethernet first; none from a sharer that
+    /// publishes none.
+    public let addresses: [IPv4Address]
+    /// The port the sharer's listener is on, from its TXT record.
+    public let port: UInt16?
+
+    public init(id: String, name: String, keyName: String, endpoint: NWEndpoint, addresses: [IPv4Address] = [], port: UInt16? = nil) {
+        self.id = id; self.name = name; self.keyName = keyName; self.endpoint = endpoint
+        self.addresses = addresses; self.port = port
+    }
+
+    /// Where a viewer tries to reach the sharer, in order (`LinkSession`): the first address it published, the next one,
+    /// then the Bonjour service. The Bonjour service resolves to every address the sharer has (IPv6 link-local, IPv4,
+    /// AWDL), which Network.framework tries one after another: on two Macs a wrong code through it failed the handshake
+    /// four times on the sharer and never came back to the viewer, which gave up after its deadline. One address gives
+    /// one handshake, whose failure comes back as on one Mac.
+    public var routes: [NWEndpoint] {
+        let published = port.flatMap { NWEndpoint.Port(rawValue: $0) }.map { port in
+            addresses.prefix(2).map { NWEndpoint.hostPort(host: .ipv4($0), port: port) }
+        } ?? []
+        return published.filter { $0 != endpoint } + [endpoint]
+    }
 }
 
 /// Finds sharers on the local network; emits the full list on every change.
@@ -34,18 +57,41 @@ public final class Browser: @unchecked Sendable {
         (peers, out) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            let list = results.compactMap { r -> Peer? in
-                guard case .service(let name, _, _, _) = r.endpoint else { return nil }
-                var keyName = name
-                if case .bonjour(let txt) = r.metadata, let published = txt["name"], !published.isEmpty { keyName = published }
-                return Peer(id: "\(r.endpoint)", name: name, keyName: keyName, endpoint: r.endpoint)
-            }.sorted { $0.name < $1.name }
+            let list = results.compactMap { Self.peer(endpoint: $0.endpoint, metadata: $0.metadata) }.sorted { $0.name < $1.name }
             self?.out.yield(list)
         }
         browser.stateUpdateHandler = { [weak self] s in self?.browserStateChanged(s) }
     }
 
     public func start() { browser.start(queue: queue) }
+
+    /// The peer a browse result describes, or nil for one that is not a Bonjour service. Its TXT record
+    /// (`Advertiser.txtRecord`) comes from the network: only plain dotted IPv4 unicast addresses and a port above 0 are
+    /// taken, the rest is ignored.
+    static func peer(endpoint: NWEndpoint, metadata: NWBrowser.Result.Metadata) -> Peer? {
+        guard case .service(let name, _, _, _) = endpoint else { return nil }
+        var keyName = name, addresses: [IPv4Address] = [], port: UInt16?
+        if case .bonjour(let txt) = metadata {
+            if let published = txt["name"], !published.isEmpty { keyName = published }
+            addresses = (txt["addrs"] ?? "").split(separator: ",", omittingEmptySubsequences: true)
+                .compactMap { unicastIPv4(String($0)) }
+                .prefix(Advertiser.maxPublishedAddresses).map { $0 }
+            port = txt["port"].flatMap { UInt16($0) }.flatMap { $0 > 0 ? $0 : nil }
+        }
+        return Peer(id: "\(endpoint)", name: name, keyName: keyName, endpoint: endpoint, addresses: addresses, port: port)
+    }
+
+    /// `text` as an IPv4 address a sharer could listen on: four decimal parts of 0 to 255, and not loopback, the
+    /// unspecified address, multicast or broadcast. `IPv4Address` alone also takes "1.2.3" and an interface ("%en0").
+    private static func unicastIPv4(_ text: String) -> IPv4Address? {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              parts.allSatisfy({ (1...3).contains($0.count) && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) && Int($0)! <= 255 }),
+              let address = IPv4Address(text),
+              !address.isLoopback, !address.isMulticast, address != .any, address != .broadcast
+        else { return nil }
+        return address
+    }
 
     public func stop() {
         browser.cancel()

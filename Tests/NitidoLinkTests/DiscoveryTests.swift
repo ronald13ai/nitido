@@ -76,4 +76,81 @@ final class DiscoveryTests: XCTestCase {
         }
         XCTAssertTrue(ready, "the viewer should pair with \(renamed.name) using its TXT name")
     }
+
+    /// The sharer's TXT record names the IPv4 addresses and the port it listens on, so a viewer can connect to one
+    /// address instead of the Bonjour service, which Network.framework resolves to several addresses and tries one after
+    /// another. A record from a sharer that publishes none (an older build) still gives a peer, with no address.
+    func testTheTXTRecordCarriesTheAddressesAndThePortAndReadsBack() throws {
+        let service = NWEndpoint.service(name: "Ronald's MacBook Pro (2)", type: "_nitido._tcp", domain: "local.", interface: nil)
+        let addresses = [IPv4Address("192.168.1.20")!, IPv4Address("10.0.0.5")!]
+        let txt = Advertiser.txtRecord(name: "Ronald's MacBook Pro", port: 51_234, addresses: addresses)
+        let peer = try XCTUnwrap(Browser.peer(endpoint: service, metadata: .bonjour(txt)))
+        XCTAssertEqual(peer.name, "Ronald's MacBook Pro (2)")
+        XCTAssertEqual(peer.keyName, "Ronald's MacBook Pro")
+        XCTAssertEqual(peer.addresses, addresses)
+        XCTAssertEqual(peer.port, 51_234)
+        XCTAssertEqual(peer.endpoint, service)
+        XCTAssertEqual(txt["v"], "\(protocolVersion)")
+
+        let older = try XCTUnwrap(Browser.peer(endpoint: service, metadata: .bonjour(NWTXTRecord(["v": "1", "name": "Old Mac"]))))
+        XCTAssertEqual(older.keyName, "Old Mac")
+        XCTAssertEqual(older.addresses, [])
+        XCTAssertNil(older.port)
+        XCTAssertEqual(older.routes, [service], "with nothing published, the Bonjour service is the only route")
+
+        let bare = try XCTUnwrap(Browser.peer(endpoint: service, metadata: .none))
+        XCTAssertEqual(bare.keyName, "Ronald's MacBook Pro (2)", "no TXT record: the key name is the name shown")
+        XCTAssertEqual(bare.addresses, [])
+        XCTAssertNil(bare.port)
+
+        // Everything in a TXT record comes from the network: only plain unicast IPv4 addresses and a real port are taken.
+        let forged = NWTXTRecord(["name": "Odd", "addrs": "999.1.1.1,not,127.0.0.1,1.2.3,224.0.0.1,0.0.0.0,255.255.255.255,10.0.0.7%en0, 10.0.0.8,10.0.0.9", "port": "0"])
+        let odd = try XCTUnwrap(Browser.peer(endpoint: service, metadata: .bonjour(forged)))
+        XCTAssertEqual(odd.addresses, [IPv4Address("10.0.0.9")!])
+        XCTAssertNil(odd.port)
+        XCTAssertEqual(odd.routes, [service], "an address without a port is no route")
+        XCTAssertNil(Browser.peer(endpoint: .hostPort(host: "10.0.0.1", port: 1), metadata: .none), "not a Bonjour service")
+    }
+
+    /// A viewer tries the first published address, then the next one, then the Bonjour service; never more addresses.
+    func testTheRoutesAreTwoPublishedAddressesThenTheService() {
+        let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
+        let peer = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service,
+                        addresses: [IPv4Address("192.168.1.20")!, IPv4Address("10.0.0.5")!, IPv4Address("172.16.0.2")!], port: 50_000)
+        XCTAssertEqual(peer.routes, [
+            .hostPort(host: .ipv4(IPv4Address("192.168.1.20")!), port: 50_000),
+            .hostPort(host: .ipv4(IPv4Address("10.0.0.5")!), port: 50_000),
+            service,
+        ])
+    }
+
+    /// Live: the advertiser publishes the port its listener got and this Mac's addresses, and a browser hands both on.
+    func testABrowsedSharerCarriesTheAddressesAndPortItListensOn() async throws {
+        let name = "Published \(UInt32.random(in: 0..<1_000_000))"
+        let advertiser = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let browser = Browser()
+        browser.start()
+        defer { browser.stop() }
+        let list = await firstList(from: browser, within: 10) { list in list.contains { $0.name == name && $0.port != nil } }
+        let found = try XCTUnwrap(list?.first { $0.name == name }, "the advertiser should be found with its port within 10 s")
+        XCTAssertEqual(found.port, port)
+        XCTAssertEqual(found.addresses, Advertiser.localIPv4Addresses())
+
+        // A wrong code through what discovery found (this Mac's Wi-Fi or Ethernet address, when it has one) comes back
+        // as a wrong code at once, after one handshake on the sharer.
+        let attempts = Task { () -> Int in var n = 0; for await _ in advertiser.incoming { n += 1 }; return n }
+        let session = LinkSession(peer: found, code: "0000", hello: hello(.view, name: "Viewer"))
+        let deadline = Task { try await Task.sleep(for: .seconds(15)); session.close() }
+        session.start()
+        var seen: [LinkSession.State] = []
+        for await s in session.states { seen.append(s) }
+        deadline.cancel()
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .codeRejected])
+        try await Task.sleep(for: .milliseconds(200))
+        advertiser.stop()
+        let tried = await attempts.value
+        XCTAssertEqual(tried, 1, "one handshake on the sharer")
+    }
 }
