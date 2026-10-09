@@ -39,10 +39,11 @@ protocol FrameDrawing: AnyObject {
 /// on the glass at the second refresh after its commit, and the presented handler that frees the slot comes no sooner),
 /// so a panel slower than twice the capture rate, 60 Hz among them, could show only every other frame of a 60 fps
 /// source with one: it starts at two and never goes below (`minimumCap`, taken from the screen the window is on by
-/// `displayChanged`). A 120 Hz panel starts at one. A screen's nominal rate is not always the rate its panel runs at:
-/// ProMotion ran a MacBook Pro's panel at 60 Hz for a 60 fps source while the screen still said 120 Hz (the second
-/// two-Mac test, 2026-10-09), so the pacer also measures when its drawables are presented, over each second, and takes
-/// a panel that presents at 1.5 times the nominal interval or slower for the slower rate it shows
+/// `displayChanged`). A 120 Hz panel starts at one. A screen's nominal rate is not always the rate drawables are
+/// presented at: on the second two-Mac test (2026-10-09) a MacBook Pro whose screen said 120 Hz presented them every
+/// 16.7 ms, which is a panel ProMotion runs at 60 Hz or a 60 fps source in step with a 120 Hz one, starving at one in
+/// flight either way. So the pacer also measures when its drawables are presented, over each second, and takes gaps
+/// of 1.5 times the nominal interval or more for the slower rate they show
 /// (`slowRefreshInterval`): two in flight while that lasts. A frame that waited at the cap through a refresh (the
 /// drawable ahead of it was shown after it arrived) is held back for one capture interval with the drawable free: a
 /// newer frame replaces it (one `.backlog` drop) and is drawn at once into the emptier queue, which brings latency back

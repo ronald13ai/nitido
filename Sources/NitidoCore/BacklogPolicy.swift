@@ -8,9 +8,10 @@ import Foundation
 ///
 /// The backlog is judged in time and with hysteresis, not by a byte count at one reading. The rule it replaces skipped
 /// as soon as one reading was over four frames' worth: on the two-Mac test of 2026-10-09 (2692×1756 HEVC over Wi-Fi 6,
-/// a TextEdit window scrolled with the trackpad) 144 kB, about 60 ms of traffic at 20 Mbps, tripped it on one Wi-Fi
-/// burst, the backlog drained 17 ms later, and the keyframe sent then refilled it and tripped it again: a slideshow of
-/// keyframes, 10 to 48 fps on the viewer for 58 captured. Now:
+/// a TextEdit window scrolled with the trackpad) 144 kB tripped it on one Wi-Fi burst. That is over four frames' worth,
+/// so the rate had already been cut under 17.3 Mbps from the 45.6 it starts at, at least four cuts (about 80 ms of
+/// traffic at 14.4 Mbps). The backlog drained 17 ms later, and the keyframe sent then refilled it and tripped it again:
+/// a slideshow of keyframes, 10 to 48 fps on the viewer for 58 captured. Now:
 /// - Deltas are skipped only once the backlog has stayed over `threshold` (150 ms worth, or four frames if that were
 ///   more) for `persistence`: from the first reading over it to one 100 ms later, with no reading at or under it in
 ///   between. Over `ceiling` (a second's worth) they are skipped at the first reading.
@@ -135,8 +136,9 @@ public struct BacklogPolicy: Sendable {
         return true
     }
 
-    /// Whether a skip started since the last call: congestion that lasted, which the bitrate controller cuts for at its
-    /// next update, hold or not (`BitrateController.update(skippedForBacklog:)`).
+    /// Whether a skip started since the last call: the backlog lasted 100 ms over 150 ms worth, or passed a second's
+    /// worth, which the bitrate controller cuts for at its next update, hold or not
+    /// (`BitrateController.update(skippedForBacklog:)`).
     public mutating func takeTrip() -> Bool {
         defer { tripped = false }
         return tripped

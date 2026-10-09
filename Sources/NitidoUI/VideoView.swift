@@ -223,8 +223,9 @@ extension VideoView: FrameDrawing {
 
     var drawableCount: Int { metalLayer.maximumDrawableCount }
 
-    /// The screen's nominal rate. A ProMotion screen keeps saying 120 while its panel runs at 60 Hz for a 60 fps
-    /// source; the pacer measures that from the presented times (`FramePacer.slowRefreshInterval`).
+    /// The screen's nominal rate. A ProMotion screen says 120 whether drawables are presented every 8.3 ms or every
+    /// 16.7 ms (a panel ProMotion runs at 60 Hz, or a 60 fps source in step with a 120 Hz one); the pacer measures that
+    /// from the presented times (`FramePacer.slowRefreshInterval`).
     var refreshRate: Double { Double((window?.screen ?? NSScreen.main)?.maximumFramesPerSecond ?? 0) }
 
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> Drop? {
