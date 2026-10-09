@@ -20,6 +20,9 @@ import Foundation
 /// - For `holdOff` after the keyframe that ends a skip, only the ceiling starts another: the link gets the time to
 ///   recover with the rate the bitrate controller just cut (`takeTrip`), instead of the keyframe starting the next
 ///   skip.
+/// - For `cutGrace` after the controller cuts the rate (`rateCut`), the threshold and the ceiling are judged at the
+///   rate before the cut (`judgedRate`): a cut shrinks them by a quarter, and must not trip an unchanged backlog by
+///   itself and cut again before the first cut could have drained anything.
 public struct BacklogPolicy: Sendable {
     /// Over this many seconds' worth of bytes the backlog starts to count against the link.
     public static let thresholdSeconds = 0.15
@@ -31,6 +34,8 @@ public struct BacklogPolicy: Sendable {
     public static let holdOff = 0.5
     /// A keyframe asked for after the drain and not gone out within this long is asked for again.
     public static let keyframeRetry = 1.0
+    /// After a cut of the rate, how long the threshold and the ceiling stay at the rate before it.
+    public static let cutGrace = 0.5
     /// Readings a few nanoseconds short of a period, from adding up times in seconds, still complete it.
     private static let slack = 1e-6
 
@@ -57,6 +62,9 @@ public struct BacklogPolicy: Sendable {
     private var keyframeAskedAt: Double?
     /// A skip started since `takeTrip` last said so.
     private var tripped = false
+    /// The rate before the last cut, and when it was cut (`rateCut`).
+    private var rateBeforeCut = 0
+    private var cutAt = -Double.infinity
 
     public init() {}
 
@@ -72,10 +80,23 @@ public struct BacklogPolicy: Sendable {
     /// A backlog over this skips at once: a second's worth.
     public static func ceiling(bitsPerSecond: Int) -> Int { Int(Double(bitsPerSecond) / 8 * ceilingSeconds) }
 
+    /// The bitrate controller cut the rate from `bitsPerSecond` at `now`: for `cutGrace` the threshold and the ceiling
+    /// are judged at that rate (`judgedRate`). The re-review of 2026-10-09: 684 kB is 120 ms worth at 45.6 Mbps and
+    /// 160 ms worth at the 34.2 Mbps an ordinary cut leaves, which tripped a skip, and its cut, 100 ms later.
+    public mutating func rateCut(from bitsPerSecond: Int, now: Double) {
+        rateBeforeCut = bitsPerSecond; cutAt = now
+    }
+
+    /// The rate the threshold and the ceiling are judged at: the encoder's, or for `cutGrace` after a cut, the rate
+    /// before it if that was more.
+    public func judgedRate(_ bitsPerSecond: Int, now: Double) -> Int {
+        now - cutAt < Self.cutGrace - Self.slack ? max(bitsPerSecond, rateBeforeCut) : bitsPerSecond
+    }
+
     /// A reading with no frame to decide on (the 250 ms loop): it starts or ends the time over the threshold.
     public mutating func observe(backlogBytes: Int, bitsPerSecond: Int, now: Double) {
         guard !skipping else { return }
-        if backlogBytes > Self.threshold(bitsPerSecond: bitsPerSecond) {
+        if backlogBytes > Self.threshold(bitsPerSecond: judgedRate(bitsPerSecond, now: now)) {
             if overSince == nil { overSince = now }
         } else {
             overSince = nil
@@ -88,7 +109,7 @@ public struct BacklogPolicy: Sendable {
         observe(backlogBytes: backlogBytes, bitsPerSecond: bitsPerSecond, now: now)
         guard let since = overSince else { return .send }
         let overFor = now - since
-        let overCeiling = backlogBytes > Self.ceiling(bitsPerSecond: bitsPerSecond)
+        let overCeiling = backlogBytes > Self.ceiling(bitsPerSecond: judgedRate(bitsPerSecond, now: now))
         let lasted = overFor >= Self.persistence - Self.slack && now >= holdOffUntil - Self.slack
         guard overCeiling || lasted else { return .send }
         skipping = true; skipped = 1; trippedAt = now; tripped = true

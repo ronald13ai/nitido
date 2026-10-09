@@ -310,6 +310,11 @@ public final class ShareModel {
                             let bps = controller.update(rttMs: snapshot.rttMs, backlogBytes: backlog, frameAgeMs: nil,
                                                         fps: max(snapshot.captureFPS, 30), now: now, skippedForBacklog: skipped)
                             if bps != currentBitrate {
+                                // For half a second after a cut, the dropping rule judges the backlog at the rate
+                                // before it, so the cut does not trip a skip, and a second cut, by itself.
+                                if bps < currentBitrate {
+                                    backlogPolicy.rateCut(from: currentBitrate, now: backlogClock())
+                                }
                                 let rtt = snapshot.rttMs.map { String(format: "%.1f ms", $0) } ?? "unknown"
                                 log.info("the bitrate goes from \(Double(self.currentBitrate) / 1e6, format: .fixed(precision: 1), privacy: .public) to \(Double(bps) / 1e6, format: .fixed(precision: 1), privacy: .public) Mbps: send backlog \(backlog, privacy: .public) bytes, RTT p50 \(rtt, privacy: .public)\(skipped ? ", frames skipped for the backlog" : "", privacy: .public)")
                                 currentBitrate = bps; encoder.setBitrate(bps)
@@ -456,7 +461,8 @@ public final class ShareModel {
                     send(f, on: link, at: now)
                 case .trip(let overFor):
                     let worth = Double(backlog) * 8 / Double(currentBitrate) * 1000
-                    let why = backlog > BacklogPolicy.ceiling(bitsPerSecond: currentBitrate)
+                    let judged = backlogPolicy.judgedRate(currentBitrate, now: at)
+                    let why = backlog > BacklogPolicy.ceiling(bitsPerSecond: judged)
                         ? "over a second's worth"
                         : "over \(Int(BacklogPolicy.thresholdSeconds * 1000)) ms worth for \(Int((overFor * 1000).rounded())) ms"
                     log.info("send backlog of \(backlog, privacy: .public) bytes, \(worth, format: .fixed(precision: 0), privacy: .public) ms at \(Double(self.currentBitrate) / 1e6, format: .fixed(precision: 1), privacy: .public) Mbps, \(why, privacy: .public); skipping frames until a keyframe")

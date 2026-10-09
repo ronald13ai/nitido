@@ -997,6 +997,39 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// The re-review of 2026-10-09: the controller's ordinary cut shrinks the dropping rule's threshold by a quarter,
+    /// and an unchanged backlog of 120 ms worth at the rate before the cut is 160 ms worth after it. For half a second
+    /// after the cut the rule judges it at the rate before, so the cut does not trip a skip, and a second cut, by
+    /// itself: 300 ms of deltas over it all go out.
+    @MainActor
+    func testAnOrdinaryCutDoesNotTripTheDroppingRuleByItself() async throws {
+        let (share, source) = try await listeningShare(width: 1920, height: 1080)
+        source.emit(frame: try stripedFrame(width: 1920, height: 1080))
+        await drain()
+        let clock = SharerClock()
+        share.backlogClock = { clock.now }
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let link = try XCTUnwrap(share.link)
+        let delta = try await realDelta()
+        let mark = LogMark()
+
+        // 7.2 frames are 120 ms worth: under the threshold of 150 ms (nine frames), over the controller's two frames.
+        let before = share.frameBytes
+        let backlog = before * 72 / 10
+        link.addBacklogForTesting(backlog)
+        try await waitUntil("the controller cuts the rate for the backlog") { share.frameBytes < before }
+        XCTAssertGreaterThan(backlog, 9 * share.frameBytes, "over 150 ms worth at the rate after the cut")
+        let sent = received.frames.count
+        for _ in 0..<18 { clock.now += 1.0 / 60; share.handleEncoded(delta) }
+        try await waitUntil("the 300 ms of deltas reach the viewer") { received.frames.count >= sent + 18 }
+        let skips = try mark.entries("share").map(\.composedMessage).filter { $0.contains("skipping frames") }
+        XCTAssertEqual(skips, [], "the cut tripped no skip by itself")
+        link.addBacklogForTesting(-backlog)
+        viewer.close()
+        await share.stop()
+    }
+
     /// Spec section 8: a backlog over a second's worth skips at its first reading, and for 500 ms after the keyframe
     /// that ends a skip only that does: a backlog over 150 ms worth that lasts longer than 100 ms in that time skips
     /// nothing, so the keyframe and the link get their time. At 2 Mbps a second's worth is 250 kB.
