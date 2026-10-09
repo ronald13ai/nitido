@@ -256,6 +256,14 @@ final class InkCanvasLifetimeTests: XCTestCase {
         return window
     }
 
+    /// The ribbon layers on `canvas`, one per stroke it draws.
+    @MainActor
+    private func ribbons(on canvas: InkCanvasView) -> [CAShapeLayer] {
+        (canvas.layer?.sublayers ?? []).compactMap { $0 as? CAShapeLayer }
+    }
+
+    private let point = StrokePoint(x: 0.25, y: 0.25, pressure: 1, tMs: 0)
+
     /// A canvas whose controller has gone ticks without crashing, and does nothing.
     @MainActor
     func testACanvasWhoseControllerIsGoneTicksWithoutCrashing() throws {
@@ -334,5 +342,52 @@ final class InkCanvasLifetimeTests: XCTestCase {
         let before = second.ticks
         try XCTUnwrap(canvas.tickTimer).fire()
         XCTAssertEqual(second.ticks, before + 1)
+    }
+
+    /// The canvas holds its controller weakly, so the old share and its controller can be gone before SwiftUI hands
+    /// the canvas the new one. Their strokes come off all the same: only the old controller's tick would have faded
+    /// them, and the new share starts on a clean canvas.
+    @MainActor
+    func testTheStrokesOfAControllerGoneBeforeTheSwitchComeOff() throws {
+        var first: InkController? = InkController(role: .share)
+        let second = InkController(role: .share)
+        let canvas = InkCanvasView(controller: try XCTUnwrap(first))
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        _ = try XCTUnwrap(first).beginLocal(point)
+        XCTAssertEqual(ribbons(on: canvas).count, 1, "the first share's stroke is on the canvas")
+        weak let gone = first
+        first = nil
+        XCTAssertNil(gone, "the first share went with its controller")
+        XCTAssertNil(canvas.controller)
+
+        canvas.attach(to: second)
+        XCTAssertEqual(ribbons(on: canvas).count, 0, "the gone share's stroke is taken off")
+        XCTAssertTrue(canvas.controller === second)
+        XCTAssertTrue(second.canvas === canvas)
+    }
+
+    /// A fade started for the old controller can end after the switch, and every share's ids start over: the new
+    /// share's first stroke has the id the old share's had. The fade takes off its own layer only, never the new
+    /// stroke's.
+    @MainActor
+    func testAFadeFromBeforeTheSwitchLeavesTheNewSharesStrokeUnderTheSameId() async throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let first = InkController(role: .share)
+        let second = InkController(role: .share)
+        let canvas = InkCanvasView(controller: first)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        let old = first.beginLocal(point)
+        canvas.fade(id: old, duration: 0.05)
+
+        canvas.attach(to: second)
+        let new = second.beginLocal(point)
+        XCTAssertEqual(new, old, "a new share's ids start over")
+        let stroke = try XCTUnwrap(ribbons(on: canvas).first, "the new share's stroke is on the canvas")
+        try await Task.sleep(for: .milliseconds(400))     // the old fade has ended
+        XCTAssertEqual(ribbons(on: canvas).count, 1, "the old fade left the new share's stroke")
+        XCTAssertTrue(ribbons(on: canvas).first === stroke)
+        XCTAssertEqual(stroke.opacity, 1)
     }
 }

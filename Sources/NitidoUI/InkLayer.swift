@@ -97,10 +97,12 @@ public final class InkCanvasView: NSView {
 
     /// Draws and takes `controller`'s strokes from now on (`InkOverlay`): the canvas SwiftUI kept is handed the
     /// controller of the share or view on screen now. The strokes drawn for the controller before are taken off, and
-    /// that controller no longer points at this canvas.
+    /// that controller no longer points at this canvas. That holds when the controller before is gone already (the
+    /// canvas holds it weakly, and the old model can go before SwiftUI hands over the new one): only its tick would
+    /// have faded those strokes, and the stroke under way and the fades in progress were its too.
     func attach(to controller: InkController) {
-        if let old = self.controller, old !== controller {
-            if old.canvas === self { old.canvas = nil }
+        if self.controller !== controller {
+            if let old = self.controller, old.canvas === self { old.canvas = nil }
             layers.values.forEach { $0.removeFromSuperlayer() }
             layers = [:]; fading = []; activeId = nil; lastPoint = nil
         }
@@ -228,10 +230,16 @@ public final class InkCanvasView: NSView {
         return path
     }
 
+    /// Fades the stroke's layer out and then takes it off. The end of the fade goes by the layer, not the id alone: a
+    /// fade can end after `attach` handed the canvas a new controller, whose ids start over, so by then the id can name
+    /// the new share's stroke.
     func fade(id: UInt32, duration: Double) {
         guard !fading.contains(id), let l = layers[id] else { return }
         fading.insert(id)
-        animateOpacity(l, to: 0, duration: duration) { [weak self] in self?.layers[id]?.removeFromSuperlayer(); self?.layers[id] = nil; self?.fading.remove(id) }
+        animateOpacity(l, to: 0, duration: duration) { [weak self] in
+            guard let self, layers[id] === l else { return }
+            l.removeFromSuperlayer(); layers[id] = nil; fading.remove(id)
+        }
     }
     func remove(id: UInt32, duration: Double) { fade(id: id, duration: duration) }
     func removeAll() { layers.keys.forEach { remove(id: $0, duration: 0.15) } }
