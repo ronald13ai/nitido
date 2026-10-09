@@ -1119,6 +1119,47 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A rotation lets go of the connections still in their handshake on the old listener: they were made for the old
+    /// code, which no longer pairs, so none of them can pair or count against the new code later. Counting starts again
+    /// from nothing: the first wrong code against the new code counts, even right after the change from the same address.
+    @MainActor
+    func testARotationLetsGoOfTheOldListenersHandshakesAndCountsAfresh() async throws {
+        let (share, _) = try await listeningShare()
+        let original = share.code, sharer = peer(for: share)
+        let clock = SharerClock()
+        share.handshakeClock = { clock.now }
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Guess", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        // A wrong code for the code the sharer shows now; the sharer lets it go, leaving `open` connections unproved.
+        func guess(_ i: Int, at endpoint: NWEndpoint, leaving open: Int) async throws {
+            let wrong = String(format: "%04d", (Int(share.code)! + i) % 10_000)
+            let guess = NitidoLink.Link.connect(to: endpoint, code: wrong, sharerName: share.name, hello: hello)
+            try await waitUntil("guess \(i) fails") { if case .failed = guess.state { return true }; return false }
+            // Well within the 8 s a sharer gives an unproved connection: only the rotation can let the held one go here.
+            try await waitUntil("the sharer lets guess \(i) go, leaving \(open)", timeout: 2) { share.unpairedCount == open }
+        }
+
+        // A connection that never finishes its handshake: held by the old listener, apart from any viewer.
+        let held = NWConnection(to: sharer.endpoint, using: .tcp)
+        held.start(queue: DispatchQueue(label: "held"))
+        defer { held.cancel() }
+        try await waitUntil("the sharer holds the connection") { share.unpairedCount == 1 }
+        for i in 1...2 {
+            try await guess(i, at: sharer.endpoint, leaving: 1)
+            clock.now += 3.5
+        }
+        XCTAssertEqual(share.wrongCodeAttempts, 2)
+        try await guess(3, at: sharer.endpoint, leaving: 0)
+        XCTAssertNotEqual(share.code, original, "three wrong codes rotate the code")
+        XCTAssertEqual(share.unpairedCount, 0, "the old listener's handshakes are let go with it")
+        XCTAssertEqual(share.wrongCodeAttempts, 0)
+
+        // The same address at the same moment on the sharer's clock: a new attempt, the first against the new code.
+        try await waitUntil("the new listener is ready") { share.listeningPort != nil }
+        try await guess(4, at: peer(for: share).endpoint, leaving: 0)
+        XCTAssertEqual(share.wrongCodeAttempts, 1, "the first wrong code against the new code counts")
+        await share.stop()
+    }
+
     /// Spec 12, "Link drops": both sides say Reconnecting. A viewer link that ends without `bye` (a cut network, a viewer
     /// that died) keeps the viewer's name in the sharer's pairing panel as reconnecting, until the viewer pairs again,
     /// or the grace period passes and the sharer goes back to waiting. A `bye` (Back) lets the viewer go at once.

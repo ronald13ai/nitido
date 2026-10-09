@@ -838,6 +838,13 @@ public final class ShareModel {
         let old = code
         repeat { code = Pairing.makeCode() } while code == old
         log.info("three wrong codes; showing a new one")
+        // The connections still in their handshake on the old listener were made for the old code, which no longer
+        // pairs: they go with it, so none can pair with the old code, nor fail later and count against the new one.
+        if !unpaired.isEmpty {
+            let n = unpaired.count
+            log.info("letting go of \(n, privacy: .public) connection\(n == 1 ? "" : "s", privacy: .public) still proving the old code")
+        }
+        unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         advertiser?.stop(); advertiser = nil
         listeningPort = nil   // the stopped listener's port; the new listener sets its own once ready
         startAdvertising()
