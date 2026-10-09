@@ -696,8 +696,12 @@ public final class ShareModel {
                 guard !Task.isCancelled else { return }
                 do {
                     let port = try await adv.start()
-                    log.info("listening for viewers on port \(port, privacy: .public)")
-                    self?.listeningPort = port
+                    // Ready just before a rotation or a failure retired it, this listener's port is no longer the one
+                    // viewers can reach.
+                    if let self, adv === advertiser {
+                        log.info("listening for viewers on port \(port, privacy: .public)")
+                        listeningPort = port
+                    }
                 } catch {
                     // A failure is also on `adv.states`, which fails the share (`advertiserStateChanged`). A listener
                     // stopped before it was ready throws too, and that is a retired session, not a failure.
@@ -705,6 +709,10 @@ public final class ShareModel {
                 }
                 for await incoming in adv.incoming {
                     guard let self else { return }
+                    // A connection the listener took before a rotation or a failure retired it (`rotateCode`,
+                    // `endViewers`) can still be in its stream: it was made for a code or a share that is gone, so it
+                    // goes, rather than pair with the old code or count against the new one.
+                    guard adv === advertiser else { incoming.close(); continue }
                     attach(incoming)
                 }
             })
@@ -831,8 +839,9 @@ public final class ShareModel {
 
     /// Three wrong codes over the share (a viewer pairing in between does not reset the count, spec 13) mean someone may
     /// be guessing: new code, new key, so a paired viewer can see the code change and need the new one after its next
-    /// drop. Port probes and handshakes cut short do not count (`HandshakeFailures`).
-    private func rotateCode() {
+    /// drop. Port probes and handshakes cut short do not count (`HandshakeFailures`). Internal so a test can change the
+    /// code between a connection reaching the old listener's stream and the share taking it from there.
+    func rotateCode() {
         handshakeFailures.rotated()
         // A new code, never the one being guessed (`makeCode` repeats one in 10,000 draws).
         let old = code

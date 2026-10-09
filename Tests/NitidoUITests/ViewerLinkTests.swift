@@ -1161,6 +1161,55 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A connection the old listener took and put in its stream just before the code changed reaches the share's loop
+    /// after the change. It is let go there, whatever its handshake did by then: it neither pairs with the old code nor
+    /// fails and counts against the new one. A listener of the test's own, with the old code, stands in for the old
+    /// listener's handshakes, so both have run before the share takes the connections.
+    @MainActor
+    func testAConnectionTheRetiredListenerTookIsLetGoWithoutPairingOrCounting() async throws {
+        let (share, _) = try await listeningShare()
+        let original = share.code
+        let retired = try XCTUnwrap(share.advertiser)
+        let standIn = try Advertiser(name: share.name, code: original,
+                                     hello: Hello(protocolVersion: protocolVersion, role: .share, name: share.name,
+                                                  pixelWidth: 320, pixelHeight: 180, scale: 2))
+        let port = try await standIn.start()
+        defer { standIn.stop() }
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Late", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        var taken = standIn.incoming.makeAsyncIterator()
+        // One that proved the old code...
+        let viewer = NitidoLink.Link.connect(to: endpoint, code: original, sharerName: share.name, hello: hello)
+        defer { viewer.abort() }
+        guard let proved = await taken.next() else { return XCTFail("no connection") }
+        try await waitUntil("the old code pairs") { proved.state == .ready && viewer.state == .ready }
+        // ...and one with a wrong code, which failed on the keys.
+        let wrong = String(format: "%04d", (Int(original)! + 1) % 10_000)
+        let guess = NitidoLink.Link.connect(to: endpoint, code: wrong, sharerName: share.name, hello: hello)
+        defer { guess.abort() }
+        guard let guessed = await taken.next() else { return XCTFail("no connection") }
+        try await waitUntil("the wrong code fails") { if case .failed = guessed.state { return true }; return false }
+        XCTAssertTrue(guessed.keyMismatch, "a wrong code, which would count")
+
+        // Both are in the old listener's stream when the code changes; the share's loop takes them only after.
+        retired.deliver(proved)
+        retired.deliver(guessed)
+        share.rotateCode()
+        XCTAssertNotEqual(share.code, original)
+        XCTAssertFalse(share.advertiser === retired)
+
+        // The loop takes them as soon as the test lets the main actor go.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(share.connectionCount, 0, "nothing paired with the old code")
+        XCTAssertFalse(share.isSending)
+        XCTAssertNil(share.viewerName)
+        XCTAssertEqual(share.wrongCodeAttempts, 0, "a wrong code for the old code does not count against the new one")
+        XCTAssertEqual(share.unpairedCount, 0)
+        try await waitUntil("the share has let go of the one that proved the old code", timeout: 2) { proved.state == .cancelled }
+        try await waitUntil("its viewer hears so", timeout: 2) { viewer.state != .ready }
+        await share.stop()
+    }
+
     /// Spec 12, "Link drops": both sides say Reconnecting. A viewer link that ends without `bye` (a cut network, a viewer
     /// that died) keeps the viewer's name in the sharer's pairing panel as reconnecting, until the viewer pairs again,
     /// or the grace period passes and the sharer goes back to waiting. A `bye` (Back) lets the viewer go at once.

@@ -48,9 +48,13 @@ public final class Advertiser: @unchecked Sendable {
             guard let self else { return }
             let link = Link(connection: connection, role: .share, hello: self.hello.withLock { $0 })
             link.start()
-            out.yield(link)
+            deliver(link)
         }
     }
+
+    /// Puts a connection the listener took on `incoming`. Internal so a test can put one there as the listener does, just
+    /// before the share stops this listener (`ShareModel.rotateCode`).
+    func deliver(_ link: Link) { out.yield(link) }
 
     /// Starts listening and returns the bound port once ready. Throws if the listener fails, or is stopped,
     /// before it is ready; later changes arrive on `states`.
