@@ -25,9 +25,9 @@ final class CodecLoopTests: XCTestCase {
     }
 
     /// `count` frames from the hardware encoder, in order: a keyframe first and at every index in `keyframesAt`, deltas
-    /// otherwise.
-    private func encodeFrames(_ count: Int, keyframesAt: Set<Int> = []) throws -> [EncodedFrame] {
-        let encoder = try VideoEncoder(width: 640, height: 360, preferred: .hevc, bitsPerSecond: 4_000_000)
+    /// otherwise. HEVC unless `codec` says H.264.
+    private func encodeFrames(_ count: Int, keyframesAt: Set<Int> = [], codec: Codec = .hevc) throws -> [EncodedFrame] {
+        let encoder = try VideoEncoder(width: 640, height: 360, preferred: codec, bitsPerSecond: 4_000_000)
         defer { encoder.invalidate() }
         let encoded = expectation(description: "\(count) encoded"); encoded.expectedFulfillmentCount = count
         let box = Box<[EncodedFrame]>([])
@@ -63,20 +63,25 @@ final class CodecLoopTests: XCTestCase {
 
     /// The stream says what the capture is (BT.709 primaries, the sRGB transfer function, the BT.709 matrix), and every
     /// decoded picture carries it, in the decoder's own 4:2:0, so Core Image draws the captured colours back in sRGB.
+    /// With HEVC, and with the encoder forced to H.264, the codec a Mac without a hardware HEVC encoder uses.
     func testDecodedPicturesCarryTheCapturesColourTags() throws {
-        let frames = try encodeFrames(2)
-        let decoder = try VideoDecoder(config: try XCTUnwrap(frames.first?.videoConfig))
-        defer { decoder.invalidate() }
-        let out = Box<[DecodedFrame]>([])
-        decoder.onFrame = { out.append($0) }
-        for f in frames { try decoder.decode(f.videoFrame) }
-        XCTAssertEqual(out.value.count, 2)
-        for picture in out.value.map(\.pixelBuffer) {
-            XCTAssertEqual(CVPixelBufferGetPixelFormatType(picture), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-            func tag(_ key: CFString) -> String? { CVBufferCopyAttachment(picture, key, nil) as? String }
-            XCTAssertEqual(tag(kCVImageBufferColorPrimariesKey), kCVImageBufferColorPrimaries_ITU_R_709_2 as String)
-            XCTAssertEqual(tag(kCVImageBufferTransferFunctionKey), kCVImageBufferTransferFunction_sRGB as String)
-            XCTAssertEqual(tag(kCVImageBufferYCbCrMatrixKey), kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String)
+        for codec in [Codec.hevc, .h264] {
+            let frames = try encodeFrames(2, codec: codec)
+            let config = try XCTUnwrap(frames.first?.videoConfig)
+            XCTAssertEqual(config.codec, codec)
+            let decoder = try VideoDecoder(config: config)
+            defer { decoder.invalidate() }
+            let out = Box<[DecodedFrame]>([])
+            decoder.onFrame = { out.append($0) }
+            for f in frames { try decoder.decode(f.videoFrame) }
+            XCTAssertEqual(out.value.count, 2, "\(codec)")
+            for picture in out.value.map(\.pixelBuffer) {
+                XCTAssertEqual(CVPixelBufferGetPixelFormatType(picture), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, "\(codec)")
+                func tag(_ key: CFString) -> String? { CVBufferCopyAttachment(picture, key, nil) as? String }
+                XCTAssertEqual(tag(kCVImageBufferColorPrimariesKey), kCVImageBufferColorPrimaries_ITU_R_709_2 as String, "\(codec)")
+                XCTAssertEqual(tag(kCVImageBufferTransferFunctionKey), kCVImageBufferTransferFunction_sRGB as String, "\(codec)")
+                XCTAssertEqual(tag(kCVImageBufferYCbCrMatrixKey), kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String, "\(codec)")
+            }
         }
     }
 
