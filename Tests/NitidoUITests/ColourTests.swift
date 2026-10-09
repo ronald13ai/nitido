@@ -112,6 +112,81 @@ final class ColourTests: XCTestCase {
     }
 }
 
+extension ColourTests {
+    /// One flat sRGB colour over a whole frame, in BGRA tagged sRGB as `CaptureSession` delivers it.
+    private func flat(_ c: (r: UInt8, g: UInt8, b: UInt8), width: Int, height: Int) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
+        let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &buffer)
+        guard status == kCVReturnSuccess, let buffer else { throw XCTSkip("CVPixelBufferCreate failed: \(status)") }
+        CVBufferSetAttachment(buffer, kCVImageBufferCGColorSpaceKey, VideoView.colorSpace, .shouldPropagate)
+        CVPixelBufferLockBaseAddress(buffer, [])
+        let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        for y in 0..<height {
+            for x in 0..<width {
+                let p = base + y * stride + x * 4
+                p[0] = c.b; p[1] = c.g; p[2] = c.r; p[3] = 0xff
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        return buffer
+    }
+
+    /// The evening's two-Mac test still saw colours "not exactly the same" on the Air after the colour tags. The
+    /// decoder's pictures are 4:2:0 in video range (`VideoDecoder`): luma from 16 to 235. Read as full range, black would
+    /// come out at 16 and white at 234, and a dark grey of 30 at 42 (measured, 2026-10-09). A dark grey, a light grey and
+    /// a saturated red, each over a whole frame, captured, encoded, decoded and drawn as the view draws them into 8-bit
+    /// sRGB, come back within two code values on every channel; the decoded picture says its range, matrix, primaries
+    /// and transfer function.
+    func testFlatColoursComeBackWithinTwoCodeValues() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let context = VideoView.makeImageContext(device: device)
+        let width = 640, height = 360
+        let colours: [(r: UInt8, g: UInt8, b: UInt8)] = [(30, 30, 30), (240, 240, 240), (255, 0, 0), (0, 0, 0), (255, 255, 255)]
+        for colour in colours {
+            let source = try flat(colour, width: width, height: height)
+            let encoder = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: 20_000_000)
+            defer { encoder.invalidate() }
+            let frames = Box<[EncodedFrame]>([])
+            let encoded = expectation(description: "encoded \(colour)"); encoded.expectedFulfillmentCount = 4
+            encoder.onFrame = { frames.append($0); encoded.fulfill() }
+            for index in 0..<4 {
+                XCTAssertTrue(encoder.encode(source, captureHostTimeNs: UInt64(index)))
+                usleep(20_000)
+            }
+            wait(for: [encoded], timeout: 5)
+            let stream = frames.value.sorted { $0.seq < $1.seq }
+            let decoder = try VideoDecoder(config: try XCTUnwrap(stream.first?.videoConfig))
+            defer { decoder.invalidate() }
+            let decoded = Box<[DecodedFrame]>([])
+            decoder.onFrame = { decoded.append($0) }
+            for frame in stream { try decoder.decode(frame.videoFrame) }
+            let picture = try XCTUnwrap(decoded.value.last?.pixelBuffer)
+
+            XCTAssertEqual(CVPixelBufferGetPixelFormatType(picture), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, "video range")
+            func tag(_ key: CFString) -> String? { CVBufferCopyAttachment(picture, key, nil) as? String }
+            XCTAssertEqual(tag(kCVImageBufferYCbCrMatrixKey), kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String)
+            XCTAssertEqual(tag(kCVImageBufferColorPrimariesKey), kCVImageBufferColorPrimaries_ITU_R_709_2 as String)
+            XCTAssertEqual(tag(kCVImageBufferTransferFunctionKey), kCVImageBufferTransferFunction_sRGB as String)
+
+            let pixels = drawn(picture, context: context)
+            var sum = (r: 0.0, g: 0.0, b: 0.0), count = 0.0
+            for y in stride(from: 8, to: height - 8, by: 4) {
+                for x in stride(from: 8, to: width - 8, by: 4) {
+                    let p = (y * width + x) * 4
+                    sum.b += Double(pixels[p]); sum.g += Double(pixels[p + 1]); sum.r += Double(pixels[p + 2]); count += 1
+                }
+            }
+            let shown = (r: sum.r / count, g: sum.g / count, b: sum.b / count)
+            let what = "\(colour) came back as (\(shown.r), \(shown.g), \(shown.b))"
+            XCTAssertEqual(shown.r, Double(colour.r), accuracy: 2, what)
+            XCTAssertEqual(shown.g, Double(colour.g), accuracy: 2, what)
+            XCTAssertEqual(shown.b, Double(colour.b), accuracy: 2, what)
+        }
+    }
+}
+
 /// A value the encoder's and decoder's callbacks fill in from their own threads.
 private final class Box<Value>: @unchecked Sendable {
     private let lock = NSLock()
