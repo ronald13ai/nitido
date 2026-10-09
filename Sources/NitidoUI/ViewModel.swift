@@ -21,7 +21,8 @@ public final class ViewModel {
     }
 
     public private(set) var state: State = .browsing
-    public private(set) var peers: [Peer] = []
+    /// The sharers discovery lists now. Internal to set, so a test can say what discovery says.
+    public internal(set) var peers: [Peer] = []
     public var code = ""
     public private(set) var snapshot: Snapshot = .empty
     public private(set) var pixelSize: CGSize = .zero

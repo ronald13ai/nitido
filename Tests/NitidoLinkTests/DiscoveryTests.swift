@@ -191,7 +191,8 @@ final class DiscoveryTests: XCTestCase {
         let list = await firstList(from: browser, within: 10) { list in list.contains { $0.name == name && $0.port != nil } }
         let found = try XCTUnwrap(list?.first { $0.name == name }, "the advertiser should be found with its port within 10 s")
         XCTAssertEqual(found.port, port)
-        XCTAssertEqual(found.addresses, Advertiser.localIPv4Addresses())
+        XCTAssertEqual(found.addresses, Array(Advertiser.localIPv4Addresses().prefix(Advertiser.maxPublishedAddresses)),
+                       "at most four go in the TXT record")
 
         // A wrong code through what discovery found (this Mac's Wi-Fi or Ethernet address, when it has one) comes back
         // as a wrong code at once, after one handshake on the sharer.

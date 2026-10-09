@@ -1273,14 +1273,32 @@ final class ViewerLinkTests: XCTestCase {
     }
 
     /// A sharer whose code rotated listens on a new port and publishes it; the viewer chose it from the list before. It
-    /// connects with what discovery says now, so the new code goes to the new port, not to a refused one first.
-    func testTheViewerConnectsWithWhatDiscoverySaysNow() {
-        let service = NWEndpoint.service(name: "Sharer", type: "_nitido._tcp", domain: "local.", interface: nil)
-        let chosen = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: [IPv4Address("192.168.1.20")!], port: 50_000)
-        let now = Peer(id: "s", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: [IPv4Address("192.168.1.20")!], port: 50_123)
-        let other = Peer(id: "o", name: "Other", keyName: "Other", endpoint: service, addresses: [], port: nil)
-        XCTAssertEqual(ViewModel.latest(chosen, in: [other, now]), now)
+    /// connects with what discovery says now: the new code goes to the new port first, not to the refused old one, and
+    /// pairs at once (through the old port it would end on the Bonjour service, which never resolves here).
+    @MainActor
+    func testTheViewerConnectsWithWhatDiscoverySaysNow() async throws {
+        let (share, _) = try await listeningShare()
+        let port = try XCTUnwrap(share.listeningPort)
+        let absent = NWEndpoint.service(name: "Absent \(UInt32.random(in: 0..<1_000_000))", type: "_nitido._tcp", domain: "local.", interface: nil)
+        // Port 1: nothing listens there, as nothing does on the port of a listener stopped by a rotation.
+        let chosen = Peer(id: "rotated", name: share.name, keyName: share.name, endpoint: absent, addresses: [IPv4Address("127.0.0.1")!], port: 1)
+        let now = Peer(id: "rotated", name: share.name, keyName: share.name, endpoint: absent, addresses: [IPv4Address("127.0.0.1")!], port: port)
+        let other = Peer(id: "other", name: "Other", keyName: "Other", endpoint: absent)
         XCTAssertEqual(ViewModel.latest(chosen, in: [other]), chosen, "gone from the list: as it was chosen")
+
+        let viewer = ViewModel()
+        viewer.select(chosen)
+        viewer.peers = [other, now]
+        viewer.code = share.code
+        let mark = LogMark()
+        let started = CACurrentMediaTime()
+        viewer.connect()
+        try await waitUntil("the viewer pairs through the new port", timeout: 5) { viewer.state == .connected && share.isSending }
+        XCTAssertLessThan(CACurrentMediaTime() - started, 2)
+        let tried = try mark.entries("session").map(\.composedMessage).filter { $0.hasPrefix("trying ") }
+        XCTAssertEqual(tried, ["trying 127.0.0.1:\(port) (route 1 of 2)"], "the new port first, and no other try")
+        viewer.disconnect()
+        await share.stop()
     }
 
     /// A Mac that has just stopped sharing refuses the connection, and a refusal says nothing about the code: the viewer
