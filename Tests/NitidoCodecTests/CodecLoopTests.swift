@@ -61,6 +61,25 @@ final class CodecLoopTests: XCTestCase {
         decoder.invalidate()
     }
 
+    /// The stream says what the capture is (BT.709 primaries, the sRGB transfer function, the BT.709 matrix), and every
+    /// decoded picture carries it, in the decoder's own 4:2:0, so Core Image draws the captured colours back in sRGB.
+    func testDecodedPicturesCarryTheCapturesColourTags() throws {
+        let frames = try encodeFrames(2)
+        let decoder = try VideoDecoder(config: try XCTUnwrap(frames.first?.videoConfig))
+        defer { decoder.invalidate() }
+        let out = Box<[DecodedFrame]>([])
+        decoder.onFrame = { out.append($0) }
+        for f in frames { try decoder.decode(f.videoFrame) }
+        XCTAssertEqual(out.value.count, 2)
+        for picture in out.value.map(\.pixelBuffer) {
+            XCTAssertEqual(CVPixelBufferGetPixelFormatType(picture), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+            func tag(_ key: CFString) -> String? { CVBufferCopyAttachment(picture, key, nil) as? String }
+            XCTAssertEqual(tag(kCVImageBufferColorPrimariesKey), kCVImageBufferColorPrimaries_ITU_R_709_2 as String)
+            XCTAssertEqual(tag(kCVImageBufferTransferFunctionKey), kCVImageBufferTransferFunction_sRGB as String)
+            XCTAssertEqual(tag(kCVImageBufferYCbCrMatrixKey), kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String)
+        }
+    }
+
     /// `submit` decodes on the decoder's own queue, never on the calling thread (the main actor, in the app), and in the
     /// order the frames came, which inter-coded frames need. Frames go in as many at a time as may wait, so none is
     /// skipped.

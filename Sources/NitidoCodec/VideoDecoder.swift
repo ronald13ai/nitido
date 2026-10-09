@@ -99,7 +99,11 @@ public final class VideoDecoder: @unchecked Sendable {
         }
         guard status == noErr, let fd else { throw CodecError.formatDescription(status) }
         format = fd
-        let attrs = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+        // The decoder's own 4:2:0, video range, with no conversion on the way out. Core Image turns it into RGB on the
+        // GPU as it draws, with the matrix and transfer function the stream's colour tags put on every picture
+        // (`VideoEncoder`). Measured on an M5 at 2692 × 1756: 1.2 ms to decode a picture this way against 4 ms as BGRA,
+        // 7 MB a picture against 19 MB, and no slower to draw.
+        let attrs = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                      kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
         var s: VTDecompressionSession?
         let st = VTDecompressionSessionCreate(allocator: nil, formatDescription: fd, decoderSpecification: nil,

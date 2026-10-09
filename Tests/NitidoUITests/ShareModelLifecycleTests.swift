@@ -2,6 +2,7 @@ import XCTest
 import CoreVideo
 import QuartzCore
 import CoreText
+import CoreImage
 import OSLog
 import NitidoTestSupport
 @testable import NitidoCapture
@@ -129,20 +130,22 @@ private func solidFrame(index: Int, width: Int, height: Int) throws -> CapturedF
                          contentRect: CGRect(x: 0, y: 0, width: width / 2, height: height / 2), scale: 2)
 }
 
-/// Mean absolute difference per colour channel between two BGRA buffers of the same size (0...255).
+/// Mean absolute difference per colour channel between two pictures of the same size as the view draws them (0...255):
+/// a decoded one is 4:2:0 YCbCr, a captured one BGRA, and both are drawn into 8-bit sRGB first (`VideoView.image(of:)`).
 private func meanError(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double {
     let width = min(CVPixelBufferGetWidth(a), CVPixelBufferGetWidth(b))
     let height = min(CVPixelBufferGetHeight(a), CVPixelBufferGetHeight(b))
-    CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
-    defer { CVPixelBufferUnlockBaseAddress(a, .readOnly); CVPixelBufferUnlockBaseAddress(b, .readOnly) }
-    let pa = CVPixelBufferGetBaseAddress(a)!.assumingMemoryBound(to: UInt8.self)
-    let pb = CVPixelBufferGetBaseAddress(b)!.assumingMemoryBound(to: UInt8.self)
-    let sa = CVPixelBufferGetBytesPerRow(a), sb = CVPixelBufferGetBytesPerRow(b)
+    let context = CIContext(options: [.workingColorSpace: VideoView.colorSpace])
+    func drawn(_ buffer: CVPixelBuffer) -> [UInt8] {
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        context.render(VideoView.image(of: buffer), toBitmap: &pixels, rowBytes: width * 4,
+                       bounds: CGRect(x: 0, y: 0, width: width, height: height), format: .BGRA8, colorSpace: VideoView.colorSpace)
+        return pixels
+    }
+    let pa = drawn(a), pb = drawn(b)
     var total = 0
-    for y in 0..<height {
-        for x in 0..<width {
-            for c in 0..<3 { total += abs(Int(pa[y * sa + x * 4 + c]) - Int(pb[y * sb + x * 4 + c])) }
-        }
+    for i in 0..<(width * height) {
+        for c in 0..<3 { total += abs(Int(pa[i * 4 + c]) - Int(pb[i * 4 + c])) }
     }
     return Double(total) / Double(width * height * 3)
 }

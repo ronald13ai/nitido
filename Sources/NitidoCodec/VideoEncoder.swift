@@ -61,6 +61,9 @@ public enum CodecError: Error, Equatable {
         kVTCompressionPropertyKey_ExpectedFrameRate as String: "frame rate",
         kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String: "speed priority",
         kVTCompressionPropertyKey_AllowFrameReordering as String: "frame reordering",
+        kVTCompressionPropertyKey_ColorPrimaries as String: "colour primaries",
+        kVTCompressionPropertyKey_TransferFunction as String: "transfer function",
+        kVTCompressionPropertyKey_YCbCrMatrix as String: "colour matrix",
     ]
 }
 
@@ -146,11 +149,20 @@ public final class VideoEncoder: @unchecked Sendable {
     /// back (lookahead, B-frames), which stalls the two-in-flight cap and breaks in-order decoding,
     /// so a rejection throws, and so does a failed prepare. The rest are tuning: a rejection leaves
     /// VideoToolbox's default in place and goes to `onError`.
+    ///
+    /// The colour tags say what the capture is: sRGB (`CaptureSession`), so BT.709 primaries with
+    /// the sRGB transfer function, and the BT.709 matrix the encoder turns its RGB into YCbCr with.
+    /// They travel in the stream, the decoder attaches them to every picture, and Core Image draws
+    /// the captured colours back into the sRGB layer. Untagged, the decoder took the sRGB values
+    /// for BT.709's transfer function, and the viewer's colours were off by up to 12 code values.
     private func configure(_ s: VTCompressionSession, codec: Codec, bitsPerSecond: Int) throws(CodecError) {
         try require(s, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         try require(s, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
         tune(s, kVTCompressionPropertyKey_ProfileLevel,
              codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
+        tune(s, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2)
+        tune(s, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_sRGB)
+        tune(s, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         tune(s, kVTCompressionPropertyKey_MaxKeyFrameInterval, 120 as CFNumber)
         tune(s, kVTCompressionPropertyKey_ExpectedFrameRate, 60 as CFNumber)
         tune(s, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanFalse)

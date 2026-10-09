@@ -39,8 +39,8 @@ public final class VideoView: NSView {
 
     private let device = MTLCreateSystemDefaultDevice()!
     private lazy var commandQueue = device.makeCommandQueue()!
-    private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-    private lazy var ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false, .workingColorSpace: colorSpace])
+    private let colorSpace = VideoView.colorSpace
+    private lazy var ciContext = VideoView.makeImageContext(device: device)
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
     /// Holds the newest frame, caps frames in flight and redraws after a resize or when the window shows again.
     let pacer = FramePacer()
@@ -54,6 +54,19 @@ public final class VideoView: NSView {
     private var longestDrawableWait: CFTimeInterval = 0
     /// A wait inside nextDrawable() longer than this blocked the main thread noticeably (a quarter of a 60 Hz frame).
     private static let slowDrawableWait: CFTimeInterval = 0.004
+
+    /// sRGB: the colour space of the capture (`CaptureSession`), of the layer and of Core Image's work here.
+    nonisolated static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+
+    /// Core Image as the view draws with it: on `device`, working in sRGB, nothing kept between frames.
+    nonisolated static func makeImageContext(device: MTLDevice) -> CIContext {
+        CIContext(mtlDevice: device, options: [.cacheIntermediates: false, .workingColorSpace: colorSpace])
+    }
+
+    /// A frame as Core Image draws it, its colours read from the buffer's colour attachments: a captured frame is sRGB
+    /// BGRA, a decoded one 4:2:0 YCbCr that Core Image turns into RGB on the GPU with the matrix and transfer function
+    /// the stream was tagged with (`VideoEncoder`).
+    nonisolated static func image(of pixelBuffer: CVPixelBuffer) -> CIImage { CIImage(cvPixelBuffer: pixelBuffer) }
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
@@ -228,9 +241,9 @@ extension VideoView: FrameDrawing {
         guard let command = commandQueue.makeCommandBuffer() else { return .failed("Metal could not create a command buffer.") }
 
         let content = CGSize(width: CVPixelBufferGetWidth(frame.pixelBuffer), height: CVPixelBufferGetHeight(frame.pixelBuffer))
-        var image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+        var image = Self.image(of: frame.pixelBuffer)
         if let raw = frame.compareWith {
-            let rawImage = CIImage(cvPixelBuffer: raw)
+            let rawImage = Self.image(of: raw)
             let cut = (rawImage.extent.width * frame.divider).rounded()
             let left = rawImage.cropped(to: CGRect(x: 0, y: 0, width: cut, height: rawImage.extent.height))
             let line = CIImage(color: CIColor(red: 201 / 255, green: 168 / 255, blue: 106 / 255))
