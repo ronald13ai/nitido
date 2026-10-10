@@ -15,9 +15,9 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 ///
 /// Every attempt goes through the peer's routes in order (`Peer.routes(on:)`): two addresses the sharer published, those
 /// on one of this Mac's networks before the others, then the Bonjour service, all within `Link.defaultConnectTimeout`
-/// (8 s). A published address that does not reach the sharer (refused, no route, no answer within `unreachableAfter`:
-/// `Link.noPathErrors`) hands over to the next route at once; anything else it says (a failed handshake above all, or a
-/// connection it took and reset) is the attempt's answer.
+/// (8 s). A published address that does not reach the sharer (refused, no route, or TCP not connected within
+/// `unreachableAfter`: `Link.noPathErrors`) hands over to the next route at once; anything else it says (a failed
+/// handshake above all, a connection it took and reset, or one it took and then said nothing on) is the attempt's answer.
 public final class LinkSession: @unchecked Sendable {
     public enum State: Sendable, Equatable {
         case connecting(attempt: Int)
@@ -57,7 +57,7 @@ public final class LinkSession: @unchecked Sendable {
     private let messageOut: AsyncStream<Message>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
 
-    /// The longest a published address may go without answering before the next route is tried.
+    /// The longest a published address may go without taking the connection (TCP's setup) before the next route is tried.
     static let unreachableAfter: Double = 4
 
     /// To the sharer on `peer`, under the name it keyed its listener with (`Peer.keyName`), through its routes as
@@ -143,10 +143,11 @@ public final class LinkSession: @unchecked Sendable {
     }
 
     /// Under `lock`: the link for `routes[index]`, with what is left of the attempt's `deadline`. A route before the last
-    /// is an address the sharer published: it fails fast as `unreachable` when it does not take the connection, and gets
-    /// at most `unreachableAfter` seconds, fewer if more would leave the Bonjour service, the last route, under a quarter
-    /// of the deadline (2 of the 8 s). The connection stays off AWDL there; the Bonjour service keeps it, as the browser
-    /// does, since a sharer found only over AWDL is reached only that way.
+    /// is an address the sharer published: it fails fast as `unreachable` when it does not take the connection, and TCP
+    /// gets at most `unreachableAfter` seconds to connect there (rounded up to a whole second), fewer if more would leave
+    /// the Bonjour service, the last route, under a quarter of the deadline (2 of the 8 s); a handshake under way once TCP
+    /// is up is never cut for the next route. The connection stays off AWDL there; the Bonjour service keeps it, as the
+    /// browser does, since a sharer found only over AWDL is reached only that way.
     private func makeLink(_ routes: [NWEndpoint], route index: Int, deadline: Double) -> Link {
         let left = max(0, deadline - CACurrentMediaTime())
         let last = index == routes.count - 1

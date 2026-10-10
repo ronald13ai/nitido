@@ -97,8 +97,10 @@ public final class Link: @unchecked Sendable {
     /// attempt (`LinkSession`), and a wait is never given longer than that.
     private let connectDeadline: Double
     /// A viewer's link to an address the sharer published: a failure that says there is no path (`noPathErrors`:
-    /// refused, no route) or no answer within this many seconds fails it at once as `unreachable`, so the session goes
-    /// on to its next route. Nil on the last route and on the sharer, where a wait gets `waitingTimeout`.
+    /// refused, no route) fails it at once as `unreachable`, so the session goes on to its next route, and so does TCP
+    /// not connecting within this many seconds (its connection timeout, rounded up to a whole second, `connect`). Once
+    /// TCP is up only the attempt's deadline bounds the link: the sharer may be checking a handshake there, and another
+    /// route would make a second one. Nil on the last route and on the sharer, where a wait gets `waitingTimeout`.
     private let unreachableAfter: Double?
     private let queue = DispatchQueue(label: "ai.ronar.nitido.link", qos: .userInteractive)
 
@@ -164,6 +166,11 @@ public final class Link: @unchecked Sendable {
                         unreachableAfter: Double? = nil, peerToPeer: Bool = true) -> Link {
         let parameters = LinkTLS.parameters(code: code, sharerName: sharerName)
         parameters.includePeerToPeer = peerToPeer
+        if let unreachableAfter, let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            // A published address's limit is TCP's to keep, in whole seconds: once TCP is up the sharer may be checking
+            // a handshake there, which the attempt's own deadline bounds instead (`unreachableAfter`).
+            tcp.connectionTimeout = max(1, Int(unreachableAfter.rounded(.up)))
+        }
         let link = Link(connection: NWConnection(to: endpoint, using: parameters), role: .view, hello: hello,
                         connectTimeout: connectTimeout, waitingTimeout: waitingTimeout, timeLeft: timeLeft,
                         unreachableAfter: unreachableAfter, peerName: sharerName)
@@ -230,13 +237,6 @@ public final class Link: @unchecked Sendable {
         connection.start(queue: queue)
         queue.asyncAfter(deadline: .now() + max(0, connectDeadline - CACurrentMediaTime())) { [weak self, connectTimeout, peerName] in
             self?.giveUpConnecting("\(peerName) did not answer within \(Self.seconds(connectTimeout)).")
-        }
-        if let unreachableAfter {
-            // No answer at all from a published address: a stale one, or a host that drops the packets.
-            queue.asyncAfter(deadline: .now() + unreachableAfter) { [weak self] in
-                guard let self else { return }
-                giveUpUnreachable("No answer from \(connection.endpoint) within \(Self.seconds(unreachableAfter)).")
-            }
         }
     }
 

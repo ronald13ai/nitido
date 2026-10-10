@@ -263,19 +263,18 @@ final class LinkSessionTests: XCTestCase {
         session.close(); advertiser.stop()
     }
 
-    /// The published address takes the connection and never answers (a stale address, a host that drops the packets):
-    /// after `unreachableAfter` with no answer the next route is tried.
-    func testAPublishedAddressThatNeverAnswersFallsBackAfterItsLimit() async throws {
-        let silent = try SilentListener()
-        let silentPort = try await silent.start()
-        defer { silent.stop() }
+    /// A published address that never takes the connection (a stale address, a host that drops the packets) hands over
+    /// to the next route once TCP gives up on it: the route's limit is TCP's connection timeout, in whole seconds.
+    /// 192.0.2.1 is a documentation address that no host answers.
+    func testAPublishedAddressThatNeverTakesTheConnectionFallsBackAfterItsLimit() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
         defer { advertiser.stop() }
-        let sharer = Peer(id: "silent", name: "Sharer", keyName: "Sharer",
+        let sharer = Peer(id: "stale", name: "Sharer", keyName: "Sharer",
                           endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!),
-                          addresses: [IPv4Address("127.0.0.1")!], port: silentPort)
-        let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view), connectTimeout: 8, waitingTimeout: 5, unreachableAfter: 0.5)
+                          addresses: [IPv4Address("192.0.2.1")!], port: 47_219)
+        let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view), connectTimeout: 8, waitingTimeout: 5,
+                                  unreachableAfter: 1, subnets: { [] })
         let clock = ContinuousClock(), started = clock.now
         let watcher = Task { () -> [LinkSession.State] in
             var seen: [LinkSession.State] = []
@@ -284,12 +283,33 @@ final class LinkSessionTests: XCTestCase {
         }
         session.start()
         let seen = await watcher.value
-        let took = clock.now - started
         XCTAssertEqual(seen, [.connecting(attempt: 1), .ready])
-        XCTAssertGreaterThanOrEqual(took, .milliseconds(450), "the silent address had its half second")
-        XCTAssertLessThan(took, .seconds(3))
-        XCTAssertEqual(silent.accepted, 1)
+        XCTAssertLessThan(clock.now - started, .seconds(3), "within the route's second, and the handshake after it")
         session.close()
+    }
+
+    /// The published address takes the connection and then says nothing: TCP is up, so the sharer may be checking a
+    /// handshake there, and cutting it at the route's limit to try another route could count a second wrong code for
+    /// one typed (a slow first ARP to a sleeping Mac can put the handshake right at the limit). Only TCP's setup has the
+    /// route's limit; the handshake has what is left of the attempt, and its silence is the attempt's answer.
+    func testAPublishedAddressThatTakesTheConnectionAndStallsIsTheAttemptsAnswer() async throws {
+        let silent = try SilentListener()
+        let silentPort = try await silent.start()
+        defer { silent.stop() }
+        let next = try SilentListener()
+        let nextPort = try await next.start()
+        defer { next.stop() }
+        let sharer = Peer(id: "silent", name: "Sharer", keyName: "Sharer",
+                          endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: nextPort)!),
+                          addresses: [IPv4Address("127.0.0.1")!], port: silentPort)
+        let session = LinkSession(peer: sharer, code: "1234", hello: hello(.view), connectTimeout: 3, waitingTimeout: 5, unreachableAfter: 1)
+        let clock = ContinuousClock(), started = clock.now
+        let seen = await states(of: session, within: 10)
+        let took = clock.now - started
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .closed("Sharer did not answer within 3 seconds.")])
+        XCTAssertGreaterThanOrEqual(took, .milliseconds(2_900), "the handshake had the attempt's whole deadline")
+        XCTAssertEqual(silent.accepted, 1)
+        XCTAssertEqual(next.accepted, 0, "the next route was not tried")
     }
 
     /// The published address takes the connection and resets it: the sharer was reached and may already have failed a
