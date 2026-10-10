@@ -143,6 +143,24 @@ public final class AppModel {
     public var stopQuestion: String { Self.stopWording(sharing: sharing, viewing: viewing).question }
     public var stopAction: String { Self.stopWording(sharing: sharing, viewing: viewing).action }
 
+    /// The confirmation's message: who is disconnected, and what they will see. `viewer` is the share's viewer, if one is
+    /// connected; `sharer` the Mac this one is viewing.
+    nonisolated static func stopMessage(sharing: Bool, viewing: Bool, viewer: String?, sharer: String) -> String {
+        let mac = sharer.isEmpty ? "The other Mac" : sharer
+        switch (sharing, viewing) {
+        case (true, true):
+            let first = viewer.map { "\($0) will see that you stopped sharing" } ?? "Your share stops"
+            return "\(first), and \(mac) will see that you disconnected."
+        case (true, false):
+            return viewer.map { "\($0) will see that you stopped sharing." } ?? "The picture closes and the code stops working."
+        default:
+            return "\(mac) will see that you disconnected."
+        }
+    }
+    public var stopMessage: String {
+        Self.stopMessage(sharing: sharing, viewing: viewing, viewer: share?.viewerName, sharer: view?.sharerName ?? "")
+    }
+
     /// Asks first (`stopQuestion`, `RootView`) while a picture is being shared or a viewer is connected or
     /// reconnecting; with nothing live (a picker, a list of Macs, a failure) it stops at once.
     public func requestStop() {
@@ -157,22 +175,28 @@ public final class AppModel {
 public struct RootView: View {
     @Bindable var app: AppModel
     public init(app: AppModel) { self.app = app }
+    /// Screens come in with the entrance (opacity and scale 0.98) and go faster, opacity only (`screenTransition`).
     public var body: some View {
-        Group {
+        ZStack {
             switch app.screen {
-            case .welcome: WelcomeView(onShare: { app.startShare() }, onView: { app.startView() })
+            case .welcome:
+                WelcomeView(onShare: { app.startShare() }, onView: { app.startView() }).screenTransition()
             case .share:
                 if let share = app.share {
-                    ShareView(model: share).background(EscapeStops { app.escape() })
+                    ShareView(model: share).background(EscapeStops { app.escape() }).screenTransition()
                 }
             case .view:
-                if let view = app.view { ViewView(model: view).background(EscapeStops { app.escape() }) }
+                if let view = app.view { ViewView(model: view).background(EscapeStops { app.escape() }).screenTransition() }
             }
         }
+        .animation(Theme.Motion.enter, value: app.screen)
         .background(KeepWindowOnScreen())
-        // Raised by `requestStop` (Esc, the Stop menu item) while something is live; it names what stops.
+        // Raised by `requestStop` (Esc, the Stop menu item) while something is live; it names what stops, and who
+        // will see it.
         .confirmationDialog(app.stopQuestion, isPresented: $app.confirmStop) {
             Button(app.stopAction, role: .destructive) { Task { await app.stop() } }
+        } message: {
+            Text(app.stopMessage)
         }
     }
 }

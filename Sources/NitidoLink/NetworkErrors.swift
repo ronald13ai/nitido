@@ -53,3 +53,12 @@ extension NWError {
         }
     }
 }
+
+/// Local Network access, as the screens that say it is off offer its one fix (spec 9): System Settings, at Local
+/// Network.
+public enum LocalNetwork {
+    /// Whether `sentence` (a listener's, a browser's or a link's) says Local Network access is off for Nítido.
+    public static func isOff(_ sentence: String) -> Bool { sentence.contains(NWError.localNetworkOff) }
+    /// Privacy and Security, Local Network, in System Settings.
+    public static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!
+}

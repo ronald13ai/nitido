@@ -12,7 +12,8 @@ final class TelemetryStripLabelTests: XCTestCase {
         let font = CTFontCreateWithName("Marcellus-Regular" as CFString, 9, nil)
         XCTAssertEqual(CTFontCopyPostScriptName(font) as String, "Marcellus-Regular", "the bundled font, not a fallback")
         let labels = TelemetryStrip.fixedLabels + [ShareView.latencyLabel, ViewView.latencyLabel]
-            + ["code", "Macs sharing on this network", "Enter the 4-digit code shown on that Mac", "Quality · 20 Mbps"]
+            + ["code", "Macs sharing on this network", "Enter the 4-digit code shown on that Mac", "Quality", "Raw",
+               "HEVC · 60 Mbps", "H.264 · 60 Mbps"]
         for label in labels.map({ $0.uppercased() }) {
             let characters = Array(label.utf16)
             var glyphs = [CGGlyph](repeating: 0, count: characters.count)

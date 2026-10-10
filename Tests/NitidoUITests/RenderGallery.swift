@@ -61,7 +61,7 @@ final class RenderGallery: XCTestCase {
                                                                  reconnecting: true, connectionCount: 1, ringShownFor: .constant(1)).padding(24))
         try offscreen("buttons", VStack(spacing: 16) {
             HStack(spacing: 12) { GoldButton("Share") {}; QuietButton("View") {} }
-            HStack(spacing: 12) { QuietButton("Back") {}; GoldButton("Connect") {}.disabled(true).opacity(0.4) }
+            HStack(spacing: 12) { QuietButton("Back") {}; GoldButton("Connect") {}.disabled(true) }
         }.padding(24))
 
         let browsing = ViewModel(startingDiscovery: false)
@@ -149,6 +149,7 @@ final class RenderGallery: XCTestCase {
         viewer.code = share.code
         viewer.connect()
         try await waitUntil("the viewer is connected") { viewer.state == .connected && share.viewerName != nil }
+        try await viewStage.capture("view-connect-moment", settle: 0.15)
         try await viewStage.capture("view-connected", settle: 2)
         try await shareStage.capture("share-capturing-viewer-connected", settle: 0)
 
@@ -174,7 +175,7 @@ final class RenderGallery: XCTestCase {
         try await shareStage.capture("share-loopback-4mbps", settle: 1.5)
         share.loopback = false
 
-        share.networkNotice = "Viewers cannot reach this Mac. Local Network access is off for Nítido: turn it on in System Settings > Privacy & Security > Local Network."
+        share.networkNotice = "Viewers cannot reach this Mac. \(NWError.localNetworkOff)"
         share.codecNotice = "The video encoder rejected its real-time setting (error -12900); the picture goes on without it."
         try await shareStage.capture("share-notices", settle: 0.5)
         share.networkNotice = nil
@@ -182,6 +183,7 @@ final class RenderGallery: XCTestCase {
 
         // Esc's confirmation, the system's dialog.
         (dialog.question, dialog.action) = AppModel.stopWording(sharing: true, viewing: false)
+        dialog.message = AppModel.stopMessage(sharing: true, viewing: false, viewer: share.viewerName, sharer: "")
         dialog.shown = true
         try await shareStage.captureSheet("dialog-stop-sharing", settle: 0.8)
         dialog.shown = false
@@ -215,6 +217,7 @@ final class RenderGallery: XCTestCase {
         try await viewStage.capture("view-reconnecting", settle: 0.6)
         try await shareStage.capture("share-viewer-reconnecting", settle: 0)
         (dialog.question, dialog.action) = AppModel.stopWording(sharing: false, viewing: true)
+        dialog.message = AppModel.stopMessage(sharing: false, viewing: true, viewer: nil, sharer: viewer.sharerName)
         dialog.shown = true
         try await viewStage.captureSheet("dialog-disconnect", settle: 1.2)
         dialog.shown = false
@@ -348,11 +351,17 @@ private final class Stage {
         window = KeyWindow(contentRect: CGRect(origin: origin, size: host.fittingSize), styleMask: [.titled, .closable, .miniaturizable],
                            backing: .buffered, defer: false)
         window.title = "Nítido"
+        // The app's window chrome (`NitidoApp`): no title, a transparent title bar on the background.
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.backgroundColor = NSColor(hex: Theme.Hex.background)
         window.appearance = NSAppearance(named: .darkAqua)
         window.isReleasedWhenClosed = false
         window.contentView = host
         // Above every other app's windows, so the picture is not covered and Metal draws it.
         window.level = .floating
+        avoidPointer()
         window.orderFrontRegardless()
         window.makeKey()
     }
@@ -378,10 +387,25 @@ private final class Stage {
 
     func close() { window.orderOut(nil); window.close() }
 
+    /// Sizes the window to its content, keeping its top left corner, in one move that never lands on the pointer.
     private func fit() {
-        let size = host.fittingSize
-        if window.contentRect(forFrameRect: window.frame).size != size { window.setContentSize(size) }
+        let current = window.frame
+        var frame = window.frameRect(forContentRect: CGRect(origin: .zero, size: host.fittingSize))
+        frame.origin = CGPoint(x: current.minX, y: current.maxY - frame.height)
+        frame.origin.x = Self.clearOfPointer(frame)
+        if frame != current { window.setFrame(frame, display: true) }
     }
+
+    /// Where the window's left edge goes so the window is off the pointer: while a system picker is up (one another app
+    /// left open, say), it tints the window the pointer is over blue, and keeps that tint until the pointer moves, so
+    /// the window must never pass under it.
+    private static func clearOfPointer(_ frame: CGRect) -> CGFloat {
+        let pointer = NSEvent.mouseLocation
+        guard frame.insetBy(dx: -24, dy: -24).contains(pointer) else { return frame.minX }
+        return pointer.x - 48 - frame.width >= 0 ? pointer.x - 48 - frame.width : pointer.x + 48
+    }
+
+    private func avoidPointer() { window.setFrameOrigin(CGPoint(x: Self.clearOfPointer(window.frame), y: window.frame.minY)) }
 
     private static func screencapture(_ windowNumber: Int, as name: String) throws {
         let process = Process()
@@ -405,6 +429,7 @@ private final class DialogFlag {
     var shown = false
     var question = ""
     var action = ""
+    var message = ""
 }
 
 private struct DialogHost<Content: View>: View {
@@ -413,6 +438,8 @@ private struct DialogHost<Content: View>: View {
     var body: some View {
         content().confirmationDialog(flag.question, isPresented: $flag.shown) {
             Button(flag.action, role: .destructive) {}
+        } message: {
+            Text(flag.message)
         }
     }
 }

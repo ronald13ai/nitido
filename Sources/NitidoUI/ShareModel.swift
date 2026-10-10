@@ -30,6 +30,9 @@ public final class ShareModel {
     public let name = Host.current().localizedName ?? "Mac"
     /// True when the current failure most likely comes from a missing Screen Recording grant, so System Settings is the fix.
     public internal(set) var failureNeedsPermission = false
+    /// True when the current failure is Stop Sharing from the menu bar: the card says the share stopped, with a pause
+    /// symbol, instead of an error (`ShareView`).
+    public internal(set) var failureStoppedFromMenuBar = false
     /// The last reason a frame could not be rendered; cleared by the next frame that reaches the screen.
     public internal(set) var renderFailure: String?
     /// True when Screen Recording was not granted as the picker opened, so the picker screen explains the
@@ -224,9 +227,10 @@ public final class ShareModel {
         return Fit.factor(natural: naturalPointSize, limit: limit)
     }
 
-    /// 1:1 when it fits the screen, scaled down otherwise (VideoView then draws it with Lanczos), never up.
+    /// 1:1 when it fits the screen, scaled down otherwise (VideoView then draws it with Lanczos), never up. Before the
+    /// first pick, Welcome's 600 by 400, so the window does not jump while the picker is up.
     public var fittedPointSize: CGSize {
-        guard pixelSize != .zero else { return CGSize(width: 720, height: 450) }
+        guard pixelSize != .zero else { return CGSize(width: 600, height: 400) }
         guard let limit = pictureLimit else { return naturalPointSize }
         return Fit.size(natural: naturalPointSize, limit: limit)
     }

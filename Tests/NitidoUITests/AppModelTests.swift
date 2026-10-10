@@ -57,6 +57,18 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: true).action, "Stop and Disconnect")
     }
 
+    /// The confirmation's message names who is disconnected and what they will see (spec 11).
+    func testTheConfirmationNamesWhoWillSeeIt() {
+        XCTAssertEqual(AppModel.stopMessage(sharing: true, viewing: false, viewer: "Mac Studio de Ana", sharer: ""),
+                       "Mac Studio de Ana will see that you stopped sharing.")
+        XCTAssertEqual(AppModel.stopMessage(sharing: true, viewing: false, viewer: nil, sharer: ""),
+                       "The picture closes and the code stops working.")
+        XCTAssertEqual(AppModel.stopMessage(sharing: false, viewing: true, viewer: nil, sharer: "MacBook Pro de Ronald"),
+                       "MacBook Pro de Ronald will see that you disconnected.")
+        XCTAssertEqual(AppModel.stopMessage(sharing: true, viewing: true, viewer: "Mac Studio de Ana", sharer: "Mac mini"),
+                       "Mac Studio de Ana will see that you stopped sharing, and Mac mini will see that you disconnected.")
+    }
+
     /// The menu offers what the screen shown can do (spec 9): the Esc item says what it stops, and Undo Stroke, Clear
     /// Ink and Codec Loop are disabled where they would do nothing, or act on a share running behind the View screen.
     func testTheMenuOffersWhatTheScreenShownCanDo() {

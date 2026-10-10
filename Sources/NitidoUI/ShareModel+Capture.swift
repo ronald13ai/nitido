@@ -37,6 +37,7 @@ extension ShareModel {
         if case .capturing = state { return }
         excludedWindowIDs = excludingWindowIDs
         failureNeedsPermission = false
+        failureStoppedFromMenuBar = false
         renderFailure = nil
         mayAskForScreenRecording = !screenRecordingGranted()
         state = .picking
@@ -178,7 +179,7 @@ extension ShareModel {
                 // a fresh one. The card goes, the next frame makes a new encoder, and the listener starts again below.
                 log.info("the capture started again at \(w, privacy: .public)×\(h, privacy: .public) after it ended; the share resumes")
                 dropCodec()
-                failureNeedsPermission = false; codecNotice = nil
+                failureNeedsPermission = false; failureStoppedFromMenuBar = false; codecNotice = nil
             }
             captureFailed = false
             state = .capturing
@@ -212,6 +213,7 @@ extension ShareModel {
             log.error("the capture failed: \(failure.detail, privacy: .public)")
             // Before the first frame, a missing Screen Recording grant is the likely cause.
             failureNeedsPermission = failure.reason == .notPermitted || state != .capturing && !screenRecordingGranted()
+            failureStoppedFromMenuBar = failure.reason == .stoppedFromMenuBar && !failureNeedsPermission
             state = .failed(Self.plainMessage(for: failure, needsPermission: failureNeedsPermission))
             captureFailed = true
             endViewers()

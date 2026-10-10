@@ -19,34 +19,43 @@ public struct TelemetryStrip: View {
     public let codec: String
     public let latencyLabel: String
     public let codecMs: Double?
+    /// The codec figure is shown: while the codec loop is on (its figure says "·" until the loop has timed a frame),
+    /// or whenever there is a figure. The viewer has none.
+    public let showsCodec: Bool
     /// What the first figure counts: frames captured on the sharer, frames received on the viewer.
     public let captureLabel: String
 
     public init(snapshot: Snapshot, resolution: String, codec: String, latencyLabel: String, codecMs: Double? = nil,
-                captureLabel: String = Label.capture) {
+                showsCodec: Bool = false, captureLabel: String = Label.capture) {
         self.snapshot = snapshot; self.resolution = resolution; self.codec = codec; self.latencyLabel = latencyLabel
-        self.codecMs = codecMs; self.captureLabel = captureLabel
+        self.codecMs = codecMs; self.showsCodec = showsCodec || codecMs != nil; self.captureLabel = captureLabel
     }
 
     private var latencyHigh: Bool { (snapshot.latencyMs ?? 0) > 100 }
     private var dropping: Bool { snapshot.droppedLastSecond > 0 }
 
     /// One row when the strip is wide enough; narrower than that (the picture is narrower), the figures wrap
-    /// onto another row instead of widening the strip, so the window stays exactly as wide as the picture.
+    /// onto another row instead of widening the strip, so the window stays exactly as wide as the picture. The codec
+    /// figure is there only while it has one (the codec loop on the sharer; never on the viewer), which keeps a 720 pt
+    /// picture on one row. Solid, not glass: glass under the picture refracts nothing and only adds a grey band, so the
+    /// strip is the surface with a hairline along its top, one dark family with the canvas.
     public var body: some View {
-        StripRows(spacing: 18, rowSpacing: 6, sparklineGap: 8) {
+        StripRows(spacing: 16, rowSpacing: 6, sparklineGap: 8) {
             Figure(captureLabel, value: fps(snapshot.captureFPS), unit: "fps")
             Figure(Label.display, value: fps(snapshot.displayFPS), unit: "fps")
             Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", highlight: latencyHigh)
-            Figure(Label.codec, value: ms(codecMs), unit: "ms")
+            if showsCodec { Figure(Label.codec, value: ms(codecMs), unit: "ms") }
             Figure(Label.rtt, value: ms(snapshot.rttMs), unit: "ms")
             Figure(Label.bitrate, value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps")
-            Figure(Label.dropped, value: "\(snapshot.droppedLastSecond)", unit: "/s", highlight: dropping)
+            // "·" until frames come, as every other figure says nothing yet.
+            Figure(Label.dropped, value: snapshot.captureFPS > 0 || dropping ? "\(snapshot.droppedLastSecond)" : "·", unit: "/s",
+                   highlight: dropping)
             Figure(Label.size, value: resolution, unit: codec)
-            Sparkline(values: snapshot.latencySeries).frame(width: 96, height: 18)
+            Sparkline(values: snapshot.latencySeries).frame(width: 80, height: 18)
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
-        .modifier(GlassBar())
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(Theme.Colors.surface)
+        .overlay(alignment: .top) { Rectangle().fill(Theme.Colors.hairline).frame(height: 1) }
     }
 
     private func fps(_ v: Double) -> String { v > 0 ? "\(Int(v.rounded()))" : "·" }
@@ -61,7 +70,7 @@ private struct Figure: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(label.uppercased()).font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.secondaryText).tracking(1)
+            Text(label.uppercased()).font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.2)
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(value).font(Theme.Fonts.figures(12)).foregroundStyle(highlight ? Theme.Colors.gold : Theme.Colors.text)
                 Text(unit).font(Theme.Fonts.figures(10)).foregroundStyle(Theme.Colors.secondaryText)
@@ -72,13 +81,16 @@ private struct Figure: View {
     }
 }
 
-/// Latency over the last two seconds, scaled to at least 120 ms so the baseline reads as calm. An estimate below zero
-/// (a clock offset that is off) is drawn on the baseline, inside the strip; the figure says it as it is.
+/// Latency over the last two seconds, scaled to at least 120 ms so the baseline reads as calm, over a hairline at the
+/// 100 ms threshold so the gold line has a reference. An estimate below zero (a clock offset that is off) is drawn on
+/// the baseline, inside the strip; the figure says it as it is.
 private struct Sparkline: View {
     let values: [Double]
     var body: some View {
         GeometryReader { geo in
             let top = max(120, values.max() ?? 0)
+            Rectangle().fill(Theme.Colors.hairline).frame(height: 1)
+                .offset(y: (geo.size.height * (1 - CGFloat(100 / top))).rounded() - 0.5)
             Path { path in
                 guard values.count > 1 else { return }
                 for (i, v) in values.enumerated() {

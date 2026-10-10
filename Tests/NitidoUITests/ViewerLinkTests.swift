@@ -563,12 +563,16 @@ final class ViewerLinkTests: XCTestCase {
         viewer.code = share.code
         viewer.connect()
         try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+        try await waitUntil("the viewer has the picture's setup") { viewer.pixelSize != .zero }
 
         sources.made[0].emit(.failed(CaptureFailure(reason: .stoppedFromMenuBar, detail: "The user stopped the stream")))
         try await waitUntil("the share fails") { share.state == .failed("Sharing was stopped from the menu bar. Press Retry to share again.") }
         try await waitUntil("the viewer hears that the sharer stopped sharing") {
             viewer.state == .failed("\(share.name) stopped sharing.", sharer)
         }
+        XCTAssertTrue(share.failureStoppedFromMenuBar, "the card says the share stopped, with a pause symbol")
+        XCTAssertTrue(viewer.failedOverPicture, "the viewer says it over its last frame instead of resizing to a card")
+        XCTAssertFalse(viewer.failureIsFinal, "the same Mac may share again: Try again stays")
         XCTAssertFalse(share.isSending)
         XCTAssertNil(share.viewerName)
         XCTAssertNil(share.advertiser, "a failed share stops listening")
@@ -576,6 +580,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(share.unpairedCount, 0)
 
         share.retry()
+        XCTAssertFalse(share.failureStoppedFromMenuBar, "Retry clears the failure")
         try await waitUntil("Retry makes a fresh session") { sources.made.count == 2 }
         sources.made[1].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
         try await waitUntil("Retry listens again") { share.listeningPort != nil }
@@ -750,7 +755,10 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.state, .failed("Sharer runs a different version of Nítido (protocol \(protocolVersion + 1); this Mac speaks \(protocolVersion)). Update both Macs.", sharer))
         XCTAssertFalse(states.contains { if case .reconnecting = $0 { return true }; return false }, "\(states)")
         XCTAssertFalse(states.contains(.connected), "\(states)")
+        XCTAssertTrue(viewer.failureIsFinal, "no retry can pass: the failure offers Back alone")
+        XCTAssertFalse(viewer.failedOverPicture, "no picture came: the card takes the canvas")
         viewer.disconnect()
+        XCTAssertFalse(viewer.failureIsFinal)
     }
 
     /// A decoder that keeps throwing is not a silent freeze on the viewer: each throw counts as a dropped frame, every

@@ -46,6 +46,11 @@ public final class ViewModel {
     /// The failure is the decoder's (it could not start, or ten frames in a row failed), not the link's: the same Mac
     /// with the same code is the fix, so the failure screen offers Reconnect (`reconnect`) instead of Try again.
     public private(set) var failureOffersReconnect = false
+    /// The failure came while a picture was on screen (the link closed or gave up reconnecting): the View screen shows it
+    /// over the last frame, dimmed, instead of resizing the window to a card.
+    public private(set) var failedOverPicture = false
+    /// No retry can help (the sharer runs another protocol version): the failure offers only Back.
+    public private(set) var failureIsFinal = false
     public var showTelemetry = true
     public let sink = FrameSink()
     public let ink = InkController(role: .view)
@@ -209,7 +214,7 @@ public final class ViewModel {
         link?.close()
         link = session
         currentPeer = peer
-        failureOffersReconnect = false
+        failureOffersReconnect = false; failedOverPicture = false; failureIsFinal = false
         state = .connecting(peer)
         linkTasks.forEach { $0.cancel() }
         // As in Task 13: two plain loops (Swift 6.2 rejects a task group's `@MainActor` child tasks), weak on every
@@ -236,7 +241,7 @@ public final class ViewModel {
     nonisolated static func latest(_ peer: Peer, in list: [Peer]) -> Peer { list.first { $0.id == peer.id } ?? peer }
 
     public func retry() {
-        wrongCodeCount = 0; failureOffersReconnect = false
+        wrongCodeCount = 0; failureOffersReconnect = false; failedOverPicture = false; failureIsFinal = false
         if case .failed(_, let peer?) = state { state = .enteringCode(peer) } else { state = .browsing }
     }
 
@@ -250,10 +255,10 @@ public final class ViewModel {
     }
 
     public func disconnect() {
-        link?.close(); link = nil; currentPeer = nil; failureOffersReconnect = false
+        link?.close(); link = nil; currentPeer = nil; failureOffersReconnect = false; failedOverPicture = false; failureIsFinal = false
         linkTasks.forEach { $0.cancel() }; linkTasks = []
         decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil; awaitingKeyframe = false
-        ink.clearRemote()
+        ink.clearRemote(); ink.hideRemoteCursor()
         pixelSize = .zero; codecLabel = "·"; codecNotice = nil; renderFailure = nil; sharerName = ""
         state = .browsing
     }
@@ -300,8 +305,15 @@ public final class ViewModel {
         case .incompatible(let version):
             // Spec 12: both versions named, and the one fix.
             let theirs = version.map { " (protocol \($0); this Mac speaks \(protocolVersion))" } ?? ""
+            failureIsFinal = true
             state = .failed("\(peer.keyName) runs a different version of Nítido\(theirs). Update both Macs.", peer)
-        case .closed(let reason): ink.endRemoteStrokes(); state = .failed(reason ?? "Disconnected.", peer)
+        case .closed(let reason):
+            ink.endRemoteStrokes()
+            switch state {
+            case .connected, .reconnecting: failedOverPicture = pixelSize != .zero
+            default: break
+            }
+            state = .failed(reason ?? "Disconnected.", peer)
         }
     }
 
