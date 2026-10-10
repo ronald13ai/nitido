@@ -35,6 +35,7 @@ public final class LinkSession: @unchecked Sendable {
     public let messages: AsyncStream<Message>
     public let states: AsyncStream<State>
     public var lastRTTMs: Double? { current?.lastRTTMs }
+    public var lastRTTSample: RTTSample? { current?.lastRTTSample }
     public var clockOffsetNs: Int64? { current?.clockOffsetNs }
     public var backlogBytes: Int { current?.backlogBytes ?? 0 }
 

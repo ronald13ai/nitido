@@ -72,6 +72,8 @@ public final class ViewModel {
     @ObservationIgnored private var awaitingKeyframe = false
     private var telemetry = Telemetry(now: CACurrentMediaTime())
     private var tasks: [Task<Void, Never>] = []
+    /// When the pong last recorded in the strip's RTT came (`RTTSample.at`), so each pong counts once.
+    @ObservationIgnored private var rttRecordedAt: Double?
     /// A negative or huge glass-to-glass estimate was logged once already on this connection (reset on `.ready`).
     @ObservationIgnored private var reportedClockMismatch = false
     /// The sequence number of the last video frame that arrived: a gap is frames the sharer numbered and never sent
@@ -136,7 +138,8 @@ public final class ViewModel {
                     try? await Task.sleep(for: .milliseconds(250))
                     guard let self else { return }
                     let now = CACurrentMediaTime()
-                    if let rtt = link?.lastRTTMs { telemetry.recordRTT(ms: rtt, at: now) }
+                    // Each pong once: this loop runs twice as often as pings go out.
+                    if let rtt = link?.lastRTTSample, rtt.at != rttRecordedAt { rttRecordedAt = rtt.at; telemetry.recordRTT(ms: rtt.ms, at: rtt.at) }
                     snapshot = telemetry.snapshot(now: now)
                 }
             },

@@ -27,7 +27,14 @@ public final class Link: @unchecked Sendable {
     public var state: State { lock.withLock { _state } }
     public var peerHello: Hello? { lock.withLock { _peerHello } }
     /// The latest pong's RTT, milliseconds (nil until the first pong).
-    public var lastRTTMs: Double? { lock.withLock { _lastRTTMs } }
+    public var lastRTTMs: Double? { lock.withLock { _lastRTTSample?.ms } }
+    /// The latest pong's RTT and when it came, so a reader that looks more often than pongs come records each one once.
+    public var lastRTTSample: RTTSample? { lock.withLock { _lastRTTSample } }
+    /// How long the oldest ping still waiting for its pong has waited, milliseconds; nil when none waits. Pongs held up
+    /// behind a queue are the congestion the RTT measures, so this says it while they are still on their way.
+    public func oldestUnansweredPingMs(now: Double = CACurrentMediaTime()) -> Double? {
+        lock.withLock { pingSentAt.values.min() }.map { max(0, now - Double($0) / 1e9) * 1000 }
+    }
     /// Peer clock minus local clock, nanoseconds, from the pong with the lowest RTT in the last 10 s, so queueing
     /// behind video in one direction does not bias it (`ClockOffsetFilter`; nil until the first pong).
     public var clockOffsetNs: Int64? { lock.withLock { _clockOffsetNs } }
@@ -99,7 +106,7 @@ public final class Link: @unchecked Sendable {
     private let lock = NSLock()
     private var _state: State = .connecting
     private var _peerHello: Hello?
-    private var _lastRTTMs: Double?
+    private var _lastRTTSample: RTTSample?
     private var _clockOffsetNs: Int64?
     private var offsets = ClockOffsetFilter()
     private var backlog = 0
@@ -431,7 +438,7 @@ public final class Link: @unchecked Sendable {
                 return
             }
             lock.withLock {
-                _lastRTTMs = sample.rttMs
+                _lastRTTSample = RTTSample(ms: sample.rttMs, at: now)
                 offsets.add(rttMs: sample.rttMs, offsetNs: sample.offsetNs, at: now)
                 _clockOffsetNs = offsets.offsetNs(now: now)
             }
@@ -496,6 +503,12 @@ public final class Link: @unchecked Sendable {
         stateOut.yield(s)
         messageOut.finish(); stateOut.finish()
     }
+}
+
+/// One pong's RTT, milliseconds, and when it came (`CACurrentMediaTime`, seconds).
+public struct RTTSample: Sendable, Equatable {
+    public let ms: Double
+    public let at: Double
 }
 
 private extension Role {

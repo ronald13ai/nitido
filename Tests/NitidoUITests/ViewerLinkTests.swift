@@ -1831,6 +1831,31 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Pongs held up behind a queue are the congestion the RTT measures, so the controller hears about it while the
+    /// pong is still on its way: the oldest ping still waiting for its pong counts as an RTT that long. Before, every
+    /// 250 ms update repeated the last pong's RTT, so a stalled link read as healthy until the pongs came back (and could
+    /// even raise the rate). Here the viewer stops answering pings: the rate is cut within a second, before the link's
+    /// three seconds without a pong fail it.
+    @MainActor
+    func testPongsThatStallCutTheRateBeforeTheyComeBack() async throws {
+        let (share, source) = try await listeningShare(width: 1920, height: 1080)
+        source.emit(frame: try stripedFrame(width: 1920, height: 1080))
+        await drain()
+        let (viewer, _, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let initialFrameBytes = BitrateController.initialBitrate(width: 1920, height: 1080) / 8 / 60
+        try await Task.sleep(for: .milliseconds(1_200))  // pongs give the controller its baseline RTT
+        XCTAssertGreaterThanOrEqual(share.frameBytes, initialFrameBytes)
+        let rate = share.frameBytes
+        viewer.muteForTesting()
+        let muted = CACurrentMediaTime()
+        try await waitUntil("the controller cuts the rate", timeout: 2.5) { share.frameBytes < rate }
+        XCTAssertLessThan(CACurrentMediaTime() - muted, 1.5, "within a second or so of the pongs stalling")
+        XCTAssertTrue(share.isSending, "before the link fails for want of pongs")
+        viewer.close()
+        await share.stop()
+    }
+
     /// Three wrong codes mean someone is guessing: the sharer shows a new code and listens with its key, the old code no
     /// longer pairs, and the viewer who had paired goes on as it was. One attempt that fails the handshake several times
     /// in a row from one address (on two Macs, most likely Network.framework trying each address of the sharer) is one

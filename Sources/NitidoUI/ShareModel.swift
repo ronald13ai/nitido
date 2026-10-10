@@ -191,6 +191,8 @@ public final class ShareModel {
     @ObservationIgnored private var capture: (any CaptureSource)?
     @ObservationIgnored private var excludedWindowIDs: [CGWindowID] = []
     @ObservationIgnored private var telemetry = Telemetry(now: CACurrentMediaTime())
+    /// When the pong last recorded in the strip's RTT came (`RTTSample.at`), so each pong counts once.
+    @ObservationIgnored private var rttRecordedAt: Double?
     /// A negative or huge latency was logged once already for this model.
     @ObservationIgnored private var reportedClockMismatch = false
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
@@ -324,7 +326,8 @@ public final class ShareModel {
                     try? await Task.sleep(for: .milliseconds(250))
                     guard let self else { return }
                     let now = CACurrentMediaTime()
-                    if let rtt = link?.lastRTTMs { telemetry.recordRTT(ms: rtt, at: now) }
+                    // Each pong once: this loop runs twice as often as pings go out.
+                    if let rtt = link?.lastRTTSample, rtt.at != rttRecordedAt { rttRecordedAt = rtt.at; telemetry.recordRTT(ms: rtt.ms, at: rtt.at) }
                     // Frames the capture stream let go because the share had not taken the one before yet.
                     for _ in 0..<(capture?.takeDroppedFrames() ?? 0) { telemetry.recordDrop(at: now) }
                     snapshot = telemetry.snapshot(now: now)
@@ -335,9 +338,12 @@ public final class ShareModel {
                         backlogPolicy.observe(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: backlogClock())
                         let skipped = backlogPolicy.takeTrip()
                         if !loopback, let encoder {
-                            // Spec 8: the RTT p50 of the last second, the strip's own figure, not the latest ping alone.
+                            // Spec 8: the RTT p50 of the last second, the strip's own figure, not the latest ping alone,
+                            // or how long the oldest ping has waited for its pong, if that is longer: pongs held up
+                            // behind a queue would otherwise leave the last good RTT standing until they came back.
                             // A skip the dropping rule started since the last update cuts now, hold or not.
-                            let bps = controller.update(rttMs: snapshot.rttMs, backlogBytes: backlog, frameAgeMs: nil,
+                            let rttMs = [snapshot.rttMs, link.oldestUnansweredPingMs(now: now)].compactMap { $0 }.max()
+                            let bps = controller.update(rttMs: rttMs, backlogBytes: backlog, frameAgeMs: nil,
                                                         fps: max(snapshot.captureFPS, 30), now: now, skippedForBacklog: skipped)
                             if bps != currentBitrate {
                                 // For half a second after a cut, the dropping rule judges the backlog at the rate
@@ -345,8 +351,8 @@ public final class ShareModel {
                                 if bps < currentBitrate {
                                     backlogPolicy.rateCut(from: currentBitrate, now: backlogClock())
                                 }
-                                let rtt = snapshot.rttMs.map { String(format: "%.1f ms", $0) } ?? "unknown"
-                                log.info("the bitrate goes from \(Double(self.currentBitrate) / 1e6, format: .fixed(precision: 1), privacy: .public) to \(Double(bps) / 1e6, format: .fixed(precision: 1), privacy: .public) Mbps: send backlog \(backlog, privacy: .public) bytes, RTT p50 \(rtt, privacy: .public)\(skipped ? ", frames skipped for the backlog" : "", privacy: .public)")
+                                let rtt = rttMs.map { String(format: "%.1f ms", $0) } ?? "unknown"
+                                log.info("the bitrate goes from \(Double(self.currentBitrate) / 1e6, format: .fixed(precision: 1), privacy: .public) to \(Double(bps) / 1e6, format: .fixed(precision: 1), privacy: .public) Mbps: send backlog \(backlog, privacy: .public) bytes, RTT \(rtt, privacy: .public)\(skipped ? ", frames skipped for the backlog" : "", privacy: .public)")
                                 currentBitrate = bps; encoder.setBitrate(bps)
                             }
                         }

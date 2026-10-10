@@ -68,6 +68,25 @@ final class LinkTests: XCTestCase {
         advertiser.stop()
     }
 
+    /// Each pong is a sample with its own time, so a reader that looks more often than pings go out counts each once;
+    /// and a ping still waiting for its pong says how long it has waited, so a stalled queue shows before the pong does.
+    func testEachPongIsOneSampleAndAStalledPingSaysHowLongItHasWaited() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let (sharer, viewer) = try await readyPair(advertiser, port: port)
+        try await Task.sleep(for: .milliseconds(700))
+        let first = try XCTUnwrap(sharer.lastRTTSample)
+        try await Task.sleep(for: .milliseconds(600))
+        let second = try XCTUnwrap(sharer.lastRTTSample)
+        XCTAssertGreaterThan(second.at, first.at, "a new pong is a new sample")
+        XCTAssertLessThan(sharer.oldestUnansweredPingMs() ?? 0, 400, "pongs come back")
+        viewer.muteForTesting()
+        try await Task.sleep(for: .milliseconds(1_200))
+        XCTAssertGreaterThan(sharer.oldestUnansweredPingMs() ?? 0, 600, "the first ping the viewer left unanswered has waited")
+        sharer.close(); viewer.close()
+    }
+
     /// A pair of ready links on loopback: the sharer's end and the viewer's.
     private func readyPair(_ advertiser: Advertiser, port: UInt16) async throws -> (sharer: Link, viewer: Link) {
         let viewer = Link.connect(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234", sharerName: "Sharer", hello: hello(.view))
