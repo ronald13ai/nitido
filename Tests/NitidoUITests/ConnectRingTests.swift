@@ -3,7 +3,7 @@ import XCTest
 
 /// Spec 11: the connect moment's gold ring plays once per connection, and Reduce Motion removes it.
 final class ConnectRingTests: XCTestCase {
-    /// Spec 11, "accessibilityReduceMotion removes the scale and the ring", and docs/testing.md item 10: no ring at all,
+    /// Spec 11, "accessibilityReduceMotion removes the scale and the ring", and docs/testing.md item 35: no ring at all,
     /// not one drawn without its animation.
     func testReduceMotionRemovesTheRing() {
         XCTAssertEqual(ConnectRing.start(trigger: 1, shownFor: 0, reduceMotion: true), .hidden, "a new connection")

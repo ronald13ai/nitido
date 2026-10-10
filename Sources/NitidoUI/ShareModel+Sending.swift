@@ -96,7 +96,7 @@ extension ShareModel {
     /// picture until the content moves. Asks again only if no keyframe went out within a second. With no encoder (the
     /// codec loop turned off during the skip took it) `sendKeyframe` makes one from the newest frame, and a fresh
     /// encoder starts with a keyframe: a still source sends no next frame that would. The log line says whether the
-    /// keyframe goes now or when the limit lets it, as a tester reads it (docs/testing.md item 19): one held for up to
+    /// keyframe goes now or when the limit lets it, as a tester reads it (docs/testing.md item 24): one held for up to
     /// half a second, logged as sent, looked like the skips the item checks for.
     private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
         guard backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }

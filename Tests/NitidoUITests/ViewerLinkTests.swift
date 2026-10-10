@@ -400,8 +400,8 @@ final class ViewerLinkTests: XCTestCase {
         viewer.disconnect()
     }
 
-    /// Spec 17 and docs/testing.md item 3: a picture too large for the viewer's screen is scaled down, and the viewer's
-    /// strip says by how much, as the sharer's does; at 1:1 it says nothing more.
+    /// Spec 17 and docs/testing.md item 11: a picture too large for the viewer's screen is scaled down, and the
+    /// viewer's strip says by how much, as the sharer's does; at 1:1 it says nothing more.
     @MainActor
     func testAScaledDownPictureSaysItsScaleOnTheViewer() async throws {
         let viewer = ViewModel()
@@ -1319,7 +1319,7 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// The drain's log line says when its keyframe goes, as a tester reads it (docs/testing.md item 19): "sending a
+    /// The drain's log line says when its keyframe goes, as a tester reads it (docs/testing.md item 24): "sending a
     /// keyframe" only when it goes at once, "the keyframe goes when the half-second limit is up (in N ms)" when the
     /// viewer's limit holds it. A skip over a second's worth at 2 Mbps, drained, asks for the keyframe; a second later
     /// on the rule's clock, with none gone out, it asks again, within the same moment on the limiter's: that one is

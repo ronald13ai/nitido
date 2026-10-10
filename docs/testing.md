@@ -1,38 +1,108 @@
 # Manual checklist
 
-Run before tagging a release. Each line is a pass/fail.
+Run it on the build that will ship, before tagging a release. Each item is one action and the result it should give; it passes or fails.
 
-1. First run on a clean user: Share; while the picker is up, the Share screen says macOS may ask for Screen Recording after the pick and why; pick a window, macOS asks for Screen Recording; deny, the Share window says "Nítido is not allowed to record the screen." with the fix and offers System Settings and Retry, and shows no system wording (no "TCC"); grant; if macOS asks, Quit & Reopen; then Share works.
-2. Loopback at 1:1: TextEdit 12 pt text, Codec loop on at 40 Mbps, the right side matches the left to the pixel. At 2 Mbps the limit is honoured: while the text scrolls the strip shows the real rate, at or under 2 Mbps (1.5 in the two-Mac session), and once it stops 12 pt text on the right is as sharp as on the left (seen on still text on 2026-10-09). Whether it stays sharp while it scrolls is still to be checked: note what you see. The right side degrades on photographic or fast-moving content: scroll a web page with images to see it. Codec figure: (fill in) ms, with the window's size; on a 1346×878 @2x window the strip read 10 ms at 2 Mbps (2026-10-09).
-3. Window smaller than the content (big display shared to a small screen): downscaled, no horizontal blur bands, scale shown in the strip.
-4. Two instances on one Mac: discover, pair, stream, ink both ways, ⌘Z both ways, ⌘⌫ both ways.
-5. Two Macs on Wi-Fi: glass-to-glass under 100 ms at the sharer's native size; rtt shown; bitrate climbs to the ceiling within 10 s on a good network.
-6. Wi-Fi off on the viewer for 10 s: Reconnecting overlay with growing attempts, and the sharer's pairing panel shows the viewer as Reconnecting…; Wi-Fi on: recovery with a keyframe, no restart.
-7. Quit the sharer with ⌘Q, and again by closing its window, while connected: viewer shows "The sharer ended the session." each time. kill -9 the sharer: viewer shows "Reconnecting… attempt n" with growing gaps, and the sharer's log shows no failed handshake from it; relaunch the sharer: it has a new code on a new port, so the viewer says "The code on <Mac> has changed. Enter the new code to connect again." within a few seconds, and the new code does not change by itself meanwhile.
-8. Three wrong codes, each typed once the field has shaken (changing a digit of the code left in the field and pressing Return is enough): every one says Wrong code at once on the viewer, between two Macs too, and the sharer's code changes after the third, not before. The sharer counts a failed handshake less than a second after the last one from the same address as the same wrong code, up to four in a row, and a port scan never counts.
-9. Display resolution change mid-share (share the display), then share a TextEdit window and drag it larger and smaller: each time the picture restarts at the new size on both sides, 1:1 again, with the new size and scale in both strips.
-10. Reduce Motion on: no scale, ring or shake; fades still happen; nothing feels broken.
-11. ⌘H never animates. Esc asks only while something is live; on the list or the picker it leaves at once, and on Welcome it does nothing. With a share running behind the View screen it asks "Stop sharing and disconnect?".
-12. Share the display that holds Nítido: neither the Share window nor the viewer shows a Nítido window, sheet (Esc's Stop sharing? included) or mirror tunnel.
-13. While sharing, open the system's screen-sharing menu in the menu bar, choose to change the shared content, then cancel: the share goes on with the same content and the viewer stays connected.
-14. With a viewer connected, click Stop Sharing in the menu bar's screen-sharing menu: the Share window says "Sharing was stopped from the menu bar." and offers Retry, the code and the Codec loop switch leave the picture until the share is live again, the viewer says "<Mac> stopped sharing.", and after Retry the viewer can pair again with the same code.
-15. The menu bar shows Nítido once (the app menu); Share… and View… are in File, Undo Stroke and Clear Ink in Edit, Toggle Telemetry and Codec Loop in View, and every shortcut works from its menu. Items that would do nothing on the screen shown are dimmed (all of them but Share… and View… on Welcome, Codec Loop away from a live share), and the Esc item says what it stops: Stop Sharing, Disconnect, or Back on the list of Macs.
-16. Two Macs, both on this build, the viewer on a 60 Hz panel (a MacBook Air), its log open with `log stream --info --predicate 'subsystem == "ai.ronar.nitido"'` (the lines below are info lines, which a plain `log stream` does not show, except "nextDrawable() blocked the main thread", an error line; with `--debug` as well it adds the connection states, which a wrong-code check between two Macs reads): at connect it says "The display refreshes at 60 Hz: allowing 2 in flight", and after that no "Drawables come back in time again: allowing 1 in flight", no "Frames kept waiting for a drawable" and no "nextDrawable() blocked the main thread".
-17. The same session and the same `log stream --info` while a TextEdit window scrolls on the sharer: no "the video decoder fell behind" line in the viewer's log. If one appears, the wait it gives for the oldest frame says how far behind the decoder was.
-18. The same session: the viewer's strip shows display close to 58 fps with received 58 and dropped near 0.
-19. The same session, the sharer's log open with the same `log stream --info`: scroll a 120-line TextEdit window on the sharer with the trackpad, without stopping, for 30 s. The viewer's display fps stays close to the sharer's capture fps (with build cae00eb it swung between 10 and 48 for 58 captured). The sharer skips frames only for a backlog that lasts: no "skipping frames until a keyframe" line, or one now and then that says "over 150 ms worth for N ms" or "over a second's worth", never a run of them each followed tens of milliseconds later by "the send backlog drained after N skipped frames in M ms; sending a keyframe". A drained line that ends "the keyframe goes when the half-second limit is up (in N ms)" instead is the viewer's half-second limit holding that keyframe: the deltas skipped in those N ms (500 at most) wait for it and count as dropped, which is the limit at work, not another skip. The "the bitrate goes from X to Y Mbps" lines say where the rate settles: note it.
-20. The same session, on the sharer when it is a MacBook Pro with ProMotion, its log open with the same `log stream --info`, while the shared window scrolls: at most one "Drawables are presented every 16.7 ms although the display says 120 Hz: allowing 2 in flight" line (presented every 16.7 ms: a panel ProMotion runs at 60 Hz, or a 60 fps source in step with a 120 Hz one; two in flight either way, so the line says nothing about which), then no "Drawables come back in time again: allowing 1 in flight" and no run of "Frames kept waiting for a drawable" lines, and the sharer's strip shows dropped near 0 (with build cae00eb the cap swung between 1 and 2 every 20 to 30 s, with 5 to 15 drops each time).
-21. Colours: the same swatch (TextEdit's colour panel, or a page of the app's own palette) measured with Digital Color Meter, set to sRGB, on the sharer and on the viewer: the two readings agree within 2 code values per channel.
-22. A share stopped and another one started in the same session (Stop Sharing in the menu bar, then a new pick from the system's picker, or Esc and Share again on another window), then a stroke drawn on it and left to fade: the app keeps running (build cae00eb crashed here, in the ink canvas's tick).
-23. The scroll of item 19 with a viewer whose decoder falls behind now and then: any "VideoToolbox dropped N frames" line in the sharer's log is at info and at most one a second, and the Share window never shows "Video encoding keeps failing." for frames VideoToolbox dropped (build cae00eb did, after ten in a row).
-24. Two viewers: while one Mac views, pair another Mac (or a second instance) with the same code: the first says "Another Mac is now viewing <Mac>.", the second shows the picture, and the sharer's pairing panel shows the second one's name.
-25. Draw on the viewer and turn its Wi-Fi off before letting go: on the sharer the stroke stops growing and fades about four seconds after the link drops (the sharer shows the viewer as Reconnecting…), instead of staying until ⌘⌫.
+The log lines quoted below are info lines. Read them with `log stream --info --predicate 'subsystem == "ai.ronar.nitido"'` (a plain `log stream` leaves them out; add `--debug` for the connection states).
+
+## First run
+
+1. On a user account that has never granted Nítido Screen Recording, click Share.\
+   While the system picker is up, the Share window says macOS may ask for Screen Recording after the pick, and why.
+2. Pick a window, and deny Screen Recording when macOS asks.\
+   The Share window says "Nítido is not allowed to record the screen." with the fix, offers Open System Settings and Retry, and shows no system wording such as "TCC".
+3. Turn on Screen Recording for Nítido in System Settings (choose Quit & Reopen if macOS offers it), then click Share and pick the window again.\
+   The picture appears at 1:1 with the strip under it.
+4. Open each menu on Welcome, then again over a live share.\
+   Nítido appears once, as the app menu; File holds Share… (⌘N) and View… (⌘⇧V), Edit holds Undo Stroke and Clear Ink, View holds Toggle Telemetry and Codec Loop; every shortcut works from its menu, all of these but Share… and View… are dimmed on Welcome, and Codec Loop is dimmed away from a live share.
+5. Press Esc on Welcome, in the picker, and on the list of Macs.\
+   Welcome ignores it; the picker and the list go back to Welcome at once, without asking.
+6. Press Esc over a live share, then over a connected viewer.\
+   Each asks first ("Stop sharing?", "Disconnect?"), and the File menu's Esc item reads Stop Sharing or Disconnect to match.
+7. With a share running, open View (⌘⇧V) and press Esc on the list of Macs.\
+   It asks "Stop sharing?", because the share behind the list stops too.
+
+## Picture
+
+8. Share a TextEdit window with 12 pt text, turn on the Codec loop switch and set the slider to 40 Mbps.\
+   Wherever you drag the divider, the text on its right looks the same as on its left at 1:1.
+9. Set the slider to 2 Mbps, scroll the text, then stop.\
+   The strip's bitrate stays at or under 2 Mbps while it scrolls, and once it stops the text on the right is as sharp as on the left (sharpness while it scrolls is still open: note what you see).
+10. Still at 2 Mbps, scroll a web page with photos instead.\
+    The photos on the right lose detail while the left stays clean.
+11. Share a display larger than the screen that shows it: the whole display holding Nítido on one Mac, or a large display to a smaller viewer.\
+    The picture is scaled down with no blur bands, and the strip adds the scale as a percentage.
+12. Share the display that holds Nítido, press Esc, then cancel the question.\
+    No Nítido window, sheet (the "Stop sharing?" one included) or mirror tunnel appears in the picture.
+13. While sharing a display, change its resolution in System Settings, Displays.\
+    The picture restarts at the new size, and the strip shows the new size and scale.
+14. Share a TextEdit window and drag it larger, then smaller.\
+    Each time, once the size holds, the picture restarts at the window's new size, 1:1 again, with the new size in the strip.
+15. While sharing, open the screen-sharing menu in the menu bar, choose to change the shared content, then cancel.\
+    The share goes on with the same content.
+16. Stop a share and start another, once with Esc, Stop and Share on another window and once with Stop Sharing and a new pick in the menu bar's screen-sharing menu; after each, draw a stroke and let it fade.\
+    The app keeps running (build cae00eb crashed here, in the ink canvas's tick).
+
+## Two instances
+
+17. Start a second copy with `open -n build/Nítido.app`, then click Share in the first and View in the second.\
+    The second copy lists this Mac under the name the first one's pairing panel shows.
+18. Pick it and type the code.\
+    The picture appears with received fps and glass to glass (est.) in the strip, and the sharer's pairing panel shows the viewer's name with a gold ring drawn once.
+19. Draw on each side.\
+    Each side shows its own strokes in gold and the other side's in cream, and each stroke fades about four seconds after its last point.
+20. Draw on each side and press ⌘Z within four seconds, then draw again and press ⌘⌫.\
+    ⌘Z takes that side's newest stroke off both pictures, and ⌘⌫ clears both pictures.
+21. With the viewer connected, pair a third copy with the same code.\
+    The first viewer says "Another Mac is now viewing <Mac>.", the third copy shows the picture, and the sharer's panel shows its name.
+
+## Two Macs
+
+Both Macs on this build and the same Wi-Fi: the sharer a MacBook Pro with ProMotion, the viewer on a 60 Hz panel (a MacBook Air), both logs open.
+
+22. Pair the two Macs.\
+    The viewer's log says "The display refreshes at 60 Hz: allowing 2 in flight", and after that no "Frames kept waiting for a drawable", "Drawables come back in time again" or "nextDrawable() blocked the main thread" line.
+23. Scroll a TextEdit window on the sharer.\
+    The viewer's strip shows received and display close to 58 fps, dropped near 0, glass to glass (est.) under 100 ms and an RTT, and its log has no "the video decoder fell behind" line.
+24. Scroll a 120-line TextEdit window on the sharer with the trackpad, without stopping, for 30 s.\
+    The viewer's display fps stays close to the sharer's capture fps (build cae00eb swung between 10 and 48 for 58), and the sharer's log has at most an occasional "skipping frames until a keyframe" line, never a run of them each followed tens of milliseconds later by "the send backlog drained" (a drained line ending "the keyframe goes when the half-second limit is up" is the keyframe limit at work, not another skip).
+25. During the same scroll, watch the sharer's log and strip.\
+    The log shows at most one "Drawables are presented every 16.7 ms although the display says 120 Hz: allowing 2 in flight" line, then no "Drawables come back in time again" and no run of "Frames kept waiting for a drawable", and the strip shows dropped near 0 (build cae00eb swung between one and two in flight every 20 to 30 s).
+26. During the same scroll, look for VideoToolbox's drops in the sharer's log.\
+    Any "VideoToolbox dropped N frames" line is at info and at most one a second, and the Share window never says "Video encoding keeps failing."
+27. Measure the same colour swatch with Digital Color Meter, set to sRGB, on the sharer's screen and in the viewer's picture.\
+    The two readings agree within 2 code values per channel.
+28. Type three wrong codes on the viewer, each once the field has shaken (changing a digit and pressing Return is enough).\
+    Each says "Wrong code" at once, and the sharer's code changes after the third, not before.
+
+## Failure drills
+
+These need two Macs: two copies on one Mac may keep their link when the Wi-Fi goes off.
+
+29. Turn the viewer's Wi-Fi off for 10 s, then on again.\
+    While it is off the viewer shows "Reconnecting… attempt n" over the dimmed picture and the sharer's panel shows the viewer as Reconnecting…; once it is back, the picture recovers with a keyframe and no restart.
+30. Draw on the viewer and turn its Wi-Fi off before letting go.\
+    On the sharer the stroke stops growing and fades about four seconds after the link drops, instead of staying until ⌘⌫.
+31. With a viewer connected, quit the sharer with ⌘Q; then relaunch it, share, pair again and close the sharer's window.\
+    Each time the viewer says "The sharer ended the session."
+32. With a viewer connected, kill the sharer with `kill -9`.\
+    The viewer shows "Reconnecting… attempt n", with growing gaps between attempts.
+33. Relaunch the sharer and share again.\
+    Within a few seconds the viewer says "The code on <Mac> has changed. Enter the new code to connect again.", and the sharer's new code does not change by itself.
+34. With a viewer connected, choose Stop Sharing in the menu bar's screen-sharing menu, then press Retry on the sharer.\
+    The Share window says "Sharing was stopped from the menu bar." and hides the code and the Codec loop switch, the viewer says "<Mac> stopped sharing.", and after Retry the viewer pairs again with the same code.
+
+## Motion
+
+35. Turn on Reduce Motion (System Settings, Accessibility, Display), then pair a viewer, typing a wrong code first, and draw.\
+    No scale, connect ring or shake appears; fades still happen, at full length, and nothing looks broken.
+36. Press ⌘H on the Share and View screens.\
+    The strip hides and shows at once, with no animation.
 
 ## Before publishing
 
-On the build that will ship, in the two-Mac session; its commit goes in the README's "Measured on this Mac" heading.
+On the build that will ship, during the two-Mac session; its commit goes in the Build column of the README's Measured table.
 
-1. Read every row of the README's table from the strip again on that build, the two-Mac row included (the figures from build cae00eb, glass to glass 30 to 40 ms and RTT 9 to 10 ms, predate the pacer and backlog fixes). Delete a row you cannot measure.
-2. Capture `docs/screenshots/01-welcome.png`, `02-share-loopback.png`, `03-viewer.png` and `04-strip.png`, and record a 20-second GIF of the codec loop as `docs/screenshots/loop.gif`. Delete the link to any you skip, then delete `docs/screenshots/.gitkeep`.
+1. Read every figure in the README's Measured table from the strip again: the two-Mac rows (the 2026-10-09 figures predate that evening's fixes), the codec loop at 20 Mbps on the same 1346×878 window, and raw capture to display with the whole 3024×1964 display shared. Delete a row you cannot measure.
+2. Capture `docs/screenshots/01-welcome.png`, `02-share-loopback.png`, `03-viewer.png` and `04-strip.png`, and record a 20-second GIF of the codec loop as `docs/screenshots/loop.gif`. Delete the README's link to any you skip, then delete `docs/screenshots/.gitkeep`.
 3. Run `scripts/bundle.sh` and attach `build/Nitido-0.1-macOS15.zip` to a v0.1 release on GitHub.
-4. `scripts/check-readme.sh` passes: no "(fill in)" left, every image the README shows tracked by git, no em dash.
+4. Run `scripts/check-readme.sh`: it passes once no "(fill in)" is left, every image the README shows is tracked by git, and there is no em dash.

@@ -24,8 +24,8 @@ private final class EventLog {
 
 private struct TimedOut: Error {}
 
-/// Spec 4 and 12, testing.md item 9: a shared window resized, or a display whose mode changed, restarts the stream at
-/// the content's new native size and says so with a new `.started`, once, after the size has settled.
+/// Spec 4 and 12, docs/testing.md items 13 and 14: a shared window resized, or a display whose mode changed, restarts
+/// the stream at the content's new native size and says so with a new `.started`, once, after the size has settled.
 final class CaptureSessionResizeTests: XCTestCase {
     @MainActor
     private func waitUntil(_ what: String, timeout: Double = 5, _ condition: () -> Bool) async throws {
