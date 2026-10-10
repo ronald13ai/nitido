@@ -182,14 +182,30 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertFalse(alone.contains(IPv4Address("192.168.1.30")!))
     }
 
-    /// This Mac's networks hold every address it would publish as a sharer, and the loopback address, so two copies on
-    /// one Mac dial each other's published addresses.
-    func testThisMacsNetworksHoldWhatItPublishesAndLoopback() {
+    /// `getifaddrs` hands netmasks over trimmed: `sa_len` 5 for 255.0.0.0 (lo0), 7 for 255.255.255.0 (en0), the bytes past
+    /// it not part of the address. They are read no further than that length, the rest taken as zero, whatever follows
+    /// in memory.
+    func testATrimmedNetmaskIsReadNoFurtherThanItsLength() {
+        func read(_ bytes: [UInt8]) -> IPv4Address? {
+            var buffer = bytes + [UInt8](repeating: 0xAB, count: 16 - bytes.count)
+            return buffer.withUnsafeMutableBytes { IPv4Interface.ipv4($0.baseAddress!.assumingMemoryBound(to: sockaddr.self)) }
+        }
+        let inet = UInt8(AF_INET)
+        XCTAssertEqual(read([5, inet, 0, 0, 255]), IPv4Address("255.0.0.0"))
+        XCTAssertEqual(read([7, inet, 0, 0, 255, 255, 255]), IPv4Address("255.255.255.0"))
+        XCTAssertEqual(read([16, inet, 0, 0, 192, 168, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0]), IPv4Address("192.168.1.3"))
+        XCTAssertEqual(read([0, inet]), IPv4Address("0.0.0.0"), "a mask of no bits")
+        XCTAssertNil(read([16, UInt8(AF_INET6)]))
+    }
+
+    /// This Mac's networks are those of the addresses it publishes: loopback is not one, since no published address is
+    /// ever on it.
+    func testThisMacsNetworksHoldWhatItPublishes() {
         let networks = IPv4Subnet.local()
         for address in Advertiser.localIPv4Addresses() {
             XCTAssertTrue(networks.contains { $0.contains(address) }, "\(address) is on none of \(networks)")
         }
-        XCTAssertTrue(networks.contains { $0.contains(IPv4Address("127.0.0.1")!) })
+        XCTAssertFalse(networks.contains { $0.contains(IPv4Address("127.0.0.1")!) })
     }
 
     /// A sharer whose addresses change mid-share (a new DHCP lease, another network) publishes the new ones, on the port

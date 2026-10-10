@@ -26,10 +26,17 @@ struct IPv4Interface {
         }
     }
 
-    private static func ipv4(_ sockaddr: UnsafeMutablePointer<sockaddr>?) -> IPv4Address? {
+    /// The IPv4 address in one of `getifaddrs`'s sockaddrs, read no further than its `sa_len`: a netmask comes trimmed
+    /// (5 bytes for 255.0.0.0, 7 for 255.255.255.0), and the bytes it leaves out are zero, not whatever follows it in
+    /// memory. Internal so a test can hand it a trimmed one.
+    static func ipv4(_ sockaddr: UnsafeMutablePointer<sockaddr>?) -> IPv4Address? {
         guard let sockaddr, sockaddr.pointee.sa_family == UInt8(AF_INET) else { return nil }
-        let raw = sockaddr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { withUnsafeBytes(of: $0.pointee.sin_addr) { Data($0) } }
-        return IPv4Address(raw)
+        let offset = MemoryLayout<sockaddr_in>.offset(of: \sockaddr_in.sin_addr)!
+        let length = max(0, min(4, Int(sockaddr.pointee.sa_len) - offset))
+        var bytes = [UInt8](repeating: 0, count: 4)
+        let raw = UnsafeRawPointer(sockaddr)
+        for i in 0..<length { bytes[i] = raw.load(fromByteOffset: offset + i, as: UInt8.self) }
+        return IPv4Address(Data(bytes))
     }
 }
 
@@ -46,13 +53,14 @@ public struct IPv4Subnet: Hashable, Sendable {
         zip(zip(address.rawValue, other.rawValue), mask.rawValue).allSatisfy { pair, mask in pair.0 & mask == pair.1 & mask }
     }
 
-    /// The networks of this Mac's interfaces that are up and running. Point-to-point links (VPN tunnels) are left out,
-    /// as `Advertiser.localIPv4Addresses` leaves them out of what a sharer publishes; loopback is in, which costs
-    /// nothing (`Browser.peer` takes no loopback address from a TXT record) and lets two copies on one Mac reach each
-    /// other through it.
+    /// The networks of this Mac's interfaces that are up and running. Loopback and point-to-point links (VPN tunnels)
+    /// are left out, as `Advertiser.localIPv4Addresses` leaves them out of what a sharer publishes: no published address
+    /// is ever on them (`Browser.peer` takes no loopback address from a TXT record). Two copies on one Mac meet on the
+    /// network of the address the sharer publishes, Wi-Fi or Ethernet.
     public static func local() -> [IPv4Subnet] {
         IPv4Interface.all().compactMap { interface in
-            guard interface.isUpAndRunning, !interface.isPointToPoint, let mask = interface.mask else { return nil }
+            guard interface.isUpAndRunning, !interface.isLoopback, !interface.isPointToPoint, let mask = interface.mask
+            else { return nil }
             return IPv4Subnet(address: interface.address, mask: mask)
         }
     }
