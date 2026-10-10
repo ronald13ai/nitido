@@ -125,11 +125,13 @@ public struct GoldButton: View {
         .onChange(of: submits) { _, _ in pressThenRun() }
     }
 
-    /// The press ⏎ makes: held for 120 ms (`Theme.Motion.press`), then the action.
+    /// The press ⏎ makes: held for 120 ms (`Theme.Motion.press`, which `PressFeedback` animates), then the action. A
+    /// second ⏎ meanwhile (the field's and the hidden button's, for one key press) does nothing more.
     private func pressThenRun() {
         guard isEnabled, !held else { return }
         held = true
-        withAnimation(Theme.Motion.press) { held = true } completion: {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
             held = false
             action()
         }
