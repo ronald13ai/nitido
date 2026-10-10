@@ -367,6 +367,9 @@ public final class ShareModel {
     private func ingest(_ frame: CapturedFrame) {
         telemetry.recordCapture(at: Double(frame.captureHostTimeNs) / 1e9)
         lastCaptureAt = CACurrentMediaTime()
+        // The frame the cap turned away, still waiting for a slot, is replaced by this one and never reaches the encoder:
+        // only now is it dropped (`encode`).
+        if newestPending { telemetry.recordDrop(at: lastCaptureAt); newestPending = false }
         latestRaw = frame
         // Encode for the loop or a viewer, and only while capturing: after a failure (the encoder's included) the raw
         // picture goes on until Retry, and no encoder is made again for every frame. The sharer sees the raw picture
@@ -399,10 +402,11 @@ public final class ShareModel {
         } else {
             encodeStarts.removeValue(forKey: n)
             // `nextSeq` moves only once the encoder has taken the frame. A refusal after that went to `onError`, which
-            // counts it; a frame turned away at the two-in-flight cap is counted here, and is encoded again as soon as a
-            // slot frees, unless a newer frame gets in first. The model never holds an invalidated encoder (`dropCodec`
-            // goes with every invalidation), so a refusal here is always the cap.
-            if encoder.nextSeq == n { telemetry.recordDrop(at: CACurrentMediaTime()); newestPending = true }
+            // counts it. A frame turned away at the two-in-flight cap is not lost yet: it is encoded as soon as a slot
+            // frees (`encodePendingNewest`), and counts as dropped only if a newer frame replaces it first (`ingest`,
+            // `dropCodec`). The model never holds an invalidated encoder (`dropCodec` goes with every invalidation), so a
+            // refusal here is always the cap.
+            if encoder.nextSeq == n { newestPending = true }
         }
     }
 
@@ -659,6 +663,8 @@ public final class ShareModel {
     /// Lets the encoder and the decoder go, with their counts and figures: the next frame to encode makes a fresh
     /// encoder (`encode`), which starts with a keyframe.
     private func dropCodec() {
+        // A frame still waiting for a slot never reaches an encoder now.
+        if newestPending { telemetry.recordDrop(at: CACurrentMediaTime()) }
         encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
         encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); newestPending = false
     }
@@ -691,6 +697,8 @@ public final class ShareModel {
         qualityRestToken &+= 1
         encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
         codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0; decodeFailures = 0
+        // A frame that waited for the loop's encoder is on screen raw now: not a dropped frame.
+        newestPending = false
         // Back to raw at once: a still source sends no new frame to replace the comparison on screen. The view keeps
         // the raw frame for redraws, the same one `latestRaw` holds, so turning the loop on again can encode it.
         if let raw = latestRaw { sink.endComparison(showing: raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs) }

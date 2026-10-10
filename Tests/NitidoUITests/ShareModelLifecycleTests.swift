@@ -1105,6 +1105,35 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// A frame the encoder's two-in-flight cap turns away is not lost yet: it goes in as soon as a slot frees, so it does
+    /// not count as dropped. Only one a newer frame replaces before then never reaches the encoder, and counts once. Four
+    /// frames back to back: the encoder takes two, the third waits and the fourth replaces it, then goes in.
+    @MainActor
+    func testOnlyAFrameReplacedWhileTheEncoderIsBusyCountsAsDropped() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "r")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 1920, pixelHeight: 1080, scale: 2))
+        await drain()
+        model.loopback = true
+        var frames: [CapturedFrame] = []
+        for i in 0..<4 { frames.append(try solidFrame(index: i, width: 1920, height: 1080)) }
+        for frame in frames { source.emit(frame: frame) }
+        let newest = try XCTUnwrap(frames.last)
+        var waits = 0
+        while view.pacer.held?.captureHostTimeNs != newest.captureHostTimeNs, waits < 30 {
+            try await Task.sleep(for: .milliseconds(50)); waits += 1
+        }
+        XCTAssertEqual(view.pacer.held?.captureHostTimeNs, newest.captureHostTimeNs, "the newest frame went in once a slot freed")
+        XCTAssertEqual(model.droppedFramesTotal, 1, "only the third frame, which the fourth replaced before a slot freed")
+        await model.stop()
+    }
+
     /// The frames the encoder holds at its cap can end through `onError` instead of an output (VideoToolbox failed or
     /// dropped them, `VideoEncoder.encode`). That frees their slots as well: the newest frame, turned away at the cap,
     /// goes in then, rather than waiting for a capture frame that a still source never sends.
