@@ -209,6 +209,18 @@ final class LinkFailureTests: XCTestCase {
         XCTAssertNil(next, "incoming must end once the listener is dead")
     }
 
+    /// A connection the listener takes while the share stops it (a rotation) lands in a stream that has ended: nobody
+    /// would ever hold or cancel it, and Network.framework would keep it alive. It is closed at once instead.
+    func testAConnectionTakenAsTheAdvertiserStopsIsClosed() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        _ = try await advertiser.start()
+        advertiser.stop()
+        let late = Link.connect(to: refused, code: "1234", sharerName: "Sharer", hello: hello(.view), connectTimeout: 60, waitingTimeout: 60)
+        advertiser.deliver(late)
+        let end = await outcome(of: late, within: 3)
+        XCTAssertEqual(end, .ended(last: .cancelled), "closed, not left connecting")
+    }
+
     func testStopEndsStatesAndIncoming() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()

@@ -58,9 +58,16 @@ public final class Advertiser: @unchecked Sendable {
         }
     }
 
-    /// Puts a connection the listener took on `incoming`. Internal so a test can put one there as the listener does, just
-    /// before the share stops this listener (`ShareModel.rotateCode`).
-    func deliver(_ link: Link) { out.yield(link) }
+    /// Puts a connection the listener took on `incoming`. One taken while the listener stops (a rotation, on another
+    /// thread) finds the stream ended: nobody would hold or cancel it, and Network.framework keeps a connection alive
+    /// until it is cancelled, so it is closed at once. Internal so a test can put one there as the listener does, just
+    /// before or after the share stops this listener (`ShareModel.rotateCode`).
+    func deliver(_ link: Link) {
+        if case .terminated = out.yield(link) {
+            log.info("a connection came in as the listener stopped; closing it")
+            link.close()
+        }
+    }
 
     /// Starts listening and returns the bound port once ready. Throws if the listener fails, or is stopped,
     /// before it is ready; later changes arrive on `states`.
