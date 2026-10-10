@@ -8,7 +8,16 @@ public struct ViewView: View {
     static let latencyLabel = "glass to glass (est.)"
 
     @Bindable var model: ViewModel
+    /// The code field takes typing as soon as it is on screen, and again after a wrong code, without a click.
+    @FocusState private var codeFocused: Bool
     public init(model: ViewModel) { self.model = model }
+
+    /// The sharer chip's dot: green while connected, the inactive colour while reconnecting, as the sharer's own panel
+    /// shows its viewer (`PairingPanel`).
+    static func sharerDot(_ state: ViewModel.State) -> Color {
+        if case .reconnecting = state { return Theme.Colors.muted }
+        return Theme.Colors.success
+    }
 
     public var body: some View {
         Group {
@@ -69,6 +78,9 @@ public struct ViewView: View {
                     if typed != v { model.code = typed }
                 }
                 .onSubmit { model.connect() }
+                .focused($codeFocused)
+                .onAppear { codeFocused = true }
+                .onChange(of: model.wrongCodeCount) { codeFocused = true }
                 .shake(trigger: model.wrongCodeCount)
             // One line, always there so nothing below moves: what the code is doing, or that it was wrong. Gold, as
             // every warning in Nítido is.
@@ -113,7 +125,7 @@ public struct ViewView: View {
                 GlassCard {
                     HStack(spacing: 6) {
                         ZStack {
-                            Circle().fill(Theme.Colors.success).frame(width: 6, height: 6)
+                            Circle().fill(Self.sharerDot(model.state)).frame(width: 6, height: 6)
                             ConnectRing(trigger: model.connectionCount, shownFor: $model.ringShownFor).frame(width: 14, height: 14)
                         }
                         Text(model.sharerName).font(.system(size: 11)).foregroundStyle(Theme.Colors.text)
@@ -140,7 +152,7 @@ public struct ViewView: View {
     }
 
     /// A decoder failure offers Reconnect, to the same Mac with the same code (spec 12); any other, Try again, which goes
-    /// back to the code for that Mac (or the list).
+    /// back to the code for that Mac (or the list). That is the way forward, gold, as on the Share screen; Back is quiet.
     private func failure(_ text: String) -> some View {
         let reconnects = model.failureOffersReconnect
         let action = reconnects ? model.reconnect : model.retry
@@ -148,7 +160,7 @@ public struct ViewView: View {
             Text(text).font(.system(size: 13)).foregroundStyle(Theme.Colors.text).multilineTextAlignment(.center)
             HStack(spacing: 12) {
                 QuietButton("Back") { model.disconnect() }
-                QuietButton(reconnects ? "Reconnect" : "Try again", action: action)
+                GoldButton(reconnects ? "Reconnect" : "Try again", action: action)
             }
             // ⏎ does the same, as the system button it replaces did.
             .background(DefaultAction(action: action))
