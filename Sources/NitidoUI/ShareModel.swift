@@ -616,9 +616,13 @@ public final class ShareModel {
             encodeFailures += 1
             if encodeFailures >= 10 { failCodec("encoder", message: "Video encoding keeps failing."); return }
             // The failed frame freed its slot, as an output does (`handleEncoded`): the newest frame, if the cap turned it
-            // away, goes in now; a still source would send no other. Not once the encoder is gone (the loop turned off,
-            // a share retired): a late failure from it makes no new one.
-            if encoder != nil { encodePendingNewest() }
+            // away, goes in now; a still source would send no other. A keyframe request it carried stands for the next
+            // frame, and over a still source none comes: `sendKeyframe` encodes the newest frame again, as for a frame
+            // VideoToolbox dropped (`droppedByEncoder`). Not once the encoder is gone (the loop turned off, a share
+            // retired): a late failure from it makes no new one.
+            guard let encoder else { return }
+            encodePendingNewest()
+            if encoder.isKeyframeRequested { sendKeyframe() }
         case .property(let key, let status):
             codecNotice = "The video \(part) rejected its \(CodecError.settingName(key)) setting (error \(status)); the picture goes on without it."
         case .sessionCreate, .decode, .formatDescription, .prepare:
