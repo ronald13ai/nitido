@@ -1,6 +1,7 @@
 import XCTest
 import Network
 import QuartzCore
+import Security
 import NitidoTestSupport
 @testable import NitidoLink
 @testable import NitidoCore
@@ -84,6 +85,19 @@ final class LinkTests: XCTestCase {
         viewer.muteForTesting()
         try await Task.sleep(for: .milliseconds(1_200))
         XCTAssertGreaterThan(sharer.oldestUnansweredPingMs() ?? 0, 600, "the first ping the viewer left unanswered has waited")
+        sharer.close(); viewer.close()
+    }
+
+    /// The README's forward secrecy rests on Network.framework negotiating ECDHE_PSK, the only suite offered: a recorded
+    /// session stays unreadable even once the code is known. An OS update that negotiated something else fails here.
+    func testTheNegotiatedCiphersuiteIsECDHEPSK() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let (sharer, viewer) = try await readyPair(advertiser, port: port)
+        let expected = tls_ciphersuite_t(rawValue: UInt16(TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256))
+        XCTAssertEqual(viewer.ciphersuite, expected)
+        XCTAssertEqual(sharer.ciphersuite, expected)
         sharer.close(); viewer.close()
     }
 

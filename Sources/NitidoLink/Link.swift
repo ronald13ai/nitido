@@ -49,6 +49,8 @@ public final class Link: @unchecked Sendable {
     /// True once the TLS handshake has completed, even after the link ended: it proved the code, whether or not the
     /// hellos then matched (`incompatible`).
     public var wasReady: Bool { lock.withLock { _wasReady } }
+    /// The ciphersuite TLS negotiated, once the handshake is done.
+    public var ciphersuite: tls_ciphersuite_t? { lock.withLock { _ciphersuite } }
     /// True when the TLS handshake failed because the two sides derived different keys: with the pre-shared key, the
     /// viewer's code is not the one the sharer listens with ("bad MAC"). Set before `states` reports the failure.
     public var keyMismatch: Bool { lock.withLock { _keyMismatch } }
@@ -118,6 +120,7 @@ public final class Link: @unchecked Sendable {
     private var _wasReady = false
     private var _keyMismatch = false
     private var _incompatible = false
+    private var _ciphersuite: tls_ciphersuite_t?
     private var _byeReason: UInt8?
     private var _unreachable = false
     private var _refused = false
@@ -188,7 +191,12 @@ public final class Link: @unchecked Sendable {
                 // A deadline or close() may already have ended this link while `.ready` was queued. TLS is up: the code
                 // is proved. The link is ready once the other side's hello speaks this side's version (`handle`).
                 guard state == .connecting else { return }
-                lock.withLock { _wasReady = true }
+                let suite = negotiatedSuite()
+                lock.withLock { _wasReady = true; _ciphersuite = suite }
+                // The README's forward secrecy rests on ECDHE_PSK being the suite negotiated (`LinkTLS`): said once per
+                // link, so a two-Mac log shows it.
+                let shown = suite.map { $0 == LinkTLS.ciphersuite ? "TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256" : String(format: "suite 0x%04X", $0.rawValue) } ?? "an unknown suite"
+                log.info("\(self.role.logName, privacy: .public) link: TLS 1.2 with \(shown, privacy: .public)")
                 transmit(.hello(hello)); receiveLoop()
             case .failed(let e):
                 log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
@@ -358,6 +366,12 @@ public final class Link: @unchecked Sendable {
         log.error("\(self.role.logName, privacy: .public) link: \(reason, privacy: .public)")
         lock.withLock { _unreachable = true; _refused = refused }
         finish(.failed(reason)); connection.cancel()
+    }
+
+    /// On `queue`, once TLS is up: the ciphersuite it negotiated.
+    private func negotiatedSuite() -> tls_ciphersuite_t? {
+        guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else { return nil }
+        return sec_protocol_metadata_get_negotiated_tls_ciphersuite(tls.securityProtocolMetadata)
     }
 
     /// "1 second", "8 seconds", "0.5 seconds": a time as a failure's sentence says it.
