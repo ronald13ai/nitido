@@ -1,88 +1,157 @@
+<!-- Before publishing: work through "Before publishing" in docs/testing.md, then run scripts/check-readme.sh until it passes. -->
+
 # Nítido
 
-Share a screen or a window to another Mac on the local network with crisp text, measured latency and ink on top. A native macOS prototype in Swift: ScreenCaptureKit, VideoToolbox, Network.framework and Metal, no dependencies.
+A native macOS app that shares a window or a screen to another Mac on the local network, with crisp text, measured latency and ink on top. Swift 6.2, ScreenCaptureKit, VideoToolbox, Network.framework and Metal; no third-party code.
 
 ![Viewer with ink from both sides](docs/screenshots/03-viewer.png)
 
+I built it in a week in October 2026, as a prototype of the core loop of a pair-programming tool: capture, encode, send, decode and draw a screen, and measure each step honestly.
+
 ## What it does
 
-- Pick a window or display with the system picker; see it in a window at native Retina scale, 1:1, also after the shared window is resized or the display changes mode.
-- Flip the codec loop: HEVC encode and decode on the same Mac with a quality slider and a before/after divider, so you can see what each bitrate keeps and how many milliseconds the codec costs. The limit is honoured (the strip shows the real rate), small text that stands still stays sharp even at 2 Mbps (seen on 2026-10-09; text while it scrolls is still to be checked), and a low bitrate shows on photographic or fast-moving content.
-- Pair a second Mac with a 4-digit code (TLS with a pre-shared key derived from it) and stream at 60 fps.
-- Draw on the picture from either side; strokes fade after four seconds; ⌘Z undoes on both.
-- Read the numbers: capture fps on the sharer and received fps on the viewer, display fps, capture-to-display or glass-to-glass latency, RTT, bitrate, drops.
-- Pull the cable: both sides say Reconnecting, the viewer reconnects with backoff and recovers with a keyframe; the bitrate adapts to backlog and RTT.
+- Shares a window or a display picked with the system picker, shown at native Retina scale, 1:1, also after the window is resized or the display changes mode.
+- Runs a codec loop on one Mac: HEVC encode and decode with a quality slider (2 to 60 Mbps) and a divider you drag between the raw capture and the decoded picture, with the codec's cost in milliseconds.
+- Pairs a second Mac with a 4-digit code (TLS 1.2 with a pre-shared key derived from it) and streams to it at up to 60 fps.
+- Lets both sides draw on the picture: your strokes in gold, the other side's in cream, a fade four seconds after the last point, and ⌘Z and ⌘⌫ on both sides. Each side sees the other's pointer as a gold dot with its name.
+- Shows the numbers in a strip under the picture: capture or received fps, display fps, capture to display (one Mac) or glass to glass (two Macs), codec time, RTT, bitrate, drops, size and codec.
+- Survives a lost network: both sides say Reconnecting, the viewer retries with backoff and recovers with a keyframe, and the bitrate follows the send backlog and the RTT.
 
 ![The codec loop at the quality slider's bitrates, 20 seconds](docs/screenshots/loop.gif)
 
-![Welcome](docs/screenshots/01-welcome.png)
+## Try it in a minute
 
-![The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it](docs/screenshots/02-share-loopback.png)
+Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon only.
 
-![The telemetry strip](docs/screenshots/04-strip.png)
+**From the zip.** Download `Nitido-0.1-macOS15.zip` from the [releases page](https://github.com/ronald13ai/nitido/releases), unzip it and open `Nítido.app`. It is signed for development, not notarized, so macOS blocks it the first time: open System Settings, Privacy & Security, and click Open Anyway. (Since macOS 15, Control-click and Open no longer gets past this.) In Terminal, `xattr -dr com.apple.quarantine Nítido.app` does the same.
 
-## Measured on this Mac (MacBook Pro, Apple M5, macOS 26.5, build (fill in))
-
-| Scenario | Result |
-|---|---|
-| Capture to display, raw, window 1346×878 @2x | 21 ms |
-| Capture to display, raw, full display 3024×1964 | (fill in from the strip) ms |
-| Codec loop at 2 Mbps, HEVC, window 1346×878 @2x | codec 10 ms, capture to display 34 ms |
-| Codec loop at 20 Mbps, HEVC | codec (fill in) ms, total (fill in) ms |
-| Two Macs on Wi-Fi, glass to glass (estimated) | (fill in) ms, RTT (fill in) ms |
-
-## How it works
-
-One Swift package: five library targets and a thin app target that only wires them together (plus a test-support target under Tests/).
-
-- `NitidoCore` is pure Swift and fully unit-tested: the wire protocol (big-endian, a `u32 length · u8 type` header, 11 message types, payloads capped at 16 MiB, unknown types skipped by length), rolling one-second telemetry with p50/p95, a deterministic bitrate controller, the sender's backlog dropping rule and its limit of one forced keyframe per half second, the minimum-RTT clock-offset filter, ink geometry (Catmull-Rom smoothing, speed-to-width, fade, undo) and the HKDF pairing key.
-- `NitidoCapture` wraps `SCContentSharingPicker` and `SCStream`: native pixel size, up to 60 fps, BGRA. Nítido's own windows are left out of the picker's choices, and a shared display is captured without the Nítido application, so its windows and sheets never appear in it. When the content changes size (a window resized, a display's mode changed), the stream is reconfigured for the new size once it holds for 150 ms. Start, update and stop run one at a time, so a quick re-pick never races a stream being torn down.
-- `NitidoCodec` wraps VideoToolbox in realtime mode with no frame reordering: HEVC Main, or H.264 High when there is no hardware HEVC encoder, a keyframe every 120 frames or on request. The stream is tagged with the capture's colours (BT.709 primaries and matrix, the sRGB transfer function), and the decoder hands out its own 4:2:0 pictures, which Core Image turns into RGB on the GPU as it draws them. So the viewer shows the colours the sharer captured: flat colours match within 2 code values, and thin coloured strokes lose a little more to the 4:2:0 subsampling.
-- `NitidoLink` wraps Network.framework: a Bonjour `_nitido._tcp` listener and browser, and one TLS connection per peer that carries both directions. A ping every 500 ms gives the RTT and an NTP-style clock offset, taken from the fastest pong of the last 10 s. Each link tracks its send backlog, the bytes handed to the connection whose send has not completed yet, with the keyframe on its way counted apart; a message given to a link that is not up is dropped, not queued. A link is ready only once both sides have said hello in the same protocol version, and another version ends the session with a message that names both. The viewer dials up to two of the IPv4 addresses the sharer publishes in its TXT record, then the Bonjour service, within 8 s. Through the Bonjour service alone, between two Macs, the viewer was never told about a wrong code; the NitidoLink part of section 4 in the design spec has the details. After a drop the viewer reconnects with backoff (0.5, 1, 2 and 4 s, then every 5 s), each time to where discovery says the sharer is then.
-- `NitidoUI` holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` keeps only the newest frame and as few drawables in flight as the display needs, because each drawable queued ahead of a frame delays it by a refresh ([`FramePacer.swift`](Sources/NitidoUI/FramePacer.swift) has the rule for how many). `InkOverlay` draws strokes as variable-width ribbons above the video, and `TelemetryStrip` reads a snapshot four times a second. The held frame is drawn again after a resize or when the window comes back on screen, and that redraw never counts as a displayed frame, so the fps and latency figures stay honest.
-
-Every stage drops work instead of queueing it.
-
-- Capture keeps only the newest frame.
-- The encoder holds at most two frames; the newest one it turned away goes in when one finishes, unless a newer one arrived (only then does it count as dropped).
-- A frame VideoToolbox drops counts as dropped; only ten encoder failures in a row (an error or an empty frame) stop the codec.
-- The sharer skips non-key frames once the backlog, not counting the keyframe on its way, stays over 150 ms worth for 100 ms, or at once over 1 s worth. It sends a keyframe when the backlog drains.
-- At most one forced keyframe per half second per viewer; a new viewer's first keyframe goes at once.
-- The viewer skips to the next keyframe once the oldest waiting frame is 50 ms old or eight are waiting, and only the newest decoded frame waits to be drawn.
-
-One wait is left, on the viewer: frames that arrive while its main thread is busy wait in the link's stream, and when they are handed over in a burst the decoder takes eight and skips the rest to the next keyframe.
-
-Every 250 ms the bitrate controller reads the last second's median RTT (or how long a pong still on its way has waited, if that is longer) and the backlog. It cuts 25% when the backlog passes two frames' worth or the RTT climbs 40 ms above its 10-second minimum, adds 10% at most every 2 s while both stay low, and stays between 2 and 60 Mbps. The design spec and the implementation plan are in `docs/superpowers/`.
-
-## Run it
-
-Requires macOS 15 or later and Xcode 26 (Swift 6.2). From a clone:
+**From source.** You need Xcode 26 (Swift 6.2) and an Apple Development signing identity: in Xcode, Settings, Accounts, Manage Certificates makes one with a free Apple ID.
 
 ```bash
+git clone https://github.com/ronald13ai/nitido && cd nitido
+swift test                            # 351 tests
 swift scripts/make-icon.swift build   # optional: the app icon
 scripts/bundle.sh                     # release build: build/Nítido.app, signed, and its zip
 open build/Nítido.app
 ```
 
-`scripts/bundle.sh` signs with the first Apple Development identity in your keychain (Xcode, Settings, Accounts, Manage Certificates makes one with a free Apple ID). macOS grants Screen Recording to a signed bundle, so share from the bundle; `swift run nitido` is fine for a quick look at the windows. The fonts are in the repository; `scripts/fetch-fonts.sh` downloads them again. macOS asks for Screen Recording the first time you share. To try the network path on one Mac, launch the app twice (`open -n build/Nítido.app`).
+macOS keeps a Screen Recording grant only for a signed bundle, so share from the bundle; `swift run nitido` is fine for a look at the windows.
 
-From the zipped app (`Nitido-0.1-macOS15.zip`, on the [releases page](https://github.com/ronald13ai/nitido/releases)): unzip it and open `Nítido.app` once. The build is signed for development, not notarized, so macOS refuses it the first time: go to System Settings, Privacy & Security, and click Open Anyway (since macOS 15, right-click, Open no longer gets past this).
+**On one Mac.** Click Share and pick a window. macOS asks for Screen Recording the first time; allow it, and choose Quit & Reopen if it offers that. Turn on the Codec loop switch (or press ⌘L) and drag the slider and the divider. For the network path, start a second copy with `open -n build/Nítido.app` (or `open -n Nítido.app` from the zip), click View in it (⌘⇧V), pick this Mac and type the code the first copy shows. The two copies talk over the same TLS link two Macs use.
 
-## Use it
+**On two Macs.** Put both on the same network. Share on one, View on the other, pick the sharer by name and type its code. If macOS asks to let Nítido find devices on your local network, allow it on both Macs.
 
-1. On Mac A, click Share and pick a window or a display.
-2. On Mac B, click View and pick Mac A from the list.
-3. Type the 4-digit code Mac A shows.
+![Welcome](docs/screenshots/01-welcome.png)
+
+## Measured
+
+Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple M5, 120 Hz, macOS 26.5.2. Viewer: MacBook Air 13-inch, Apple M5, 60 Hz, macOS 26.5.1. Network: Wi-Fi 6 at 5 GHz.
+
+| Scenario | Result | Build |
+|---|---|---|
+| Raw capture to display, window 1346×878 pt @2x (2692×1756 px) | 21 ms at 58 fps | 168b191 |
+| Raw capture to display, full display 3024×1964 px | (fill in) ms | |
+| Codec loop, HEVC at 2 Mbps, same window, text scrolling | codec 10 ms, capture to display 34 ms, real rate 1.5 Mbps, still text sharp | 168b191 |
+| Codec loop, HEVC at 20 Mbps, same window | codec (fill in) ms, capture to display (fill in) ms | |
+| Two Macs, glass to glass (estimated) | 30 to 46 ms | 168b191, cae00eb |
+| Two Macs, RTT | 9 to 10 ms | 168b191, cae00eb |
+
+- Capture to display is exact on one Mac: the capture time and the presentation time come from the same host clock.
+- Glass to glass across two Macs is an estimate: it uses an NTP-style clock offset from the fastest pong of the last 10 s, and the strip labels it "(est.)".
+- The spec aimed for capture to display under 20 ms on one Mac; I measured 21 ms raw and 34 ms through the codec loop.
+- At 2 Mbps the encoder kept to the limit (1.5 Mbps real), and still text stayed sharp. Whether it stays sharp while it scrolls is still to be checked.
+- The two-Mac figures were taken before that evening's fixes (the backlog rule, the keyframe limit, the pacer's cadence check) and are to be re-measured. 46 ms is the morning run, when the Air still showed 33 of 58 fps; 30 to 40 ms is the evening run after the first pacer fix.
+
+![The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it](docs/screenshots/02-share-loopback.png)
+
+![The telemetry strip](docs/screenshots/04-strip.png)
+
+## How it works
+
+One Swift package: five library targets, a thin app target, and a test-support target under `Tests/`.
+
+**`NitidoCore`** has no Apple UI frameworks (Foundation and CryptoKit only), and all of it is unit-tested. It holds the wire format (big-endian, a 5-byte `u32 length · u8 type` header, 11 message types, payloads capped at 16 MiB, unknown types skipped by length), rolling one-second telemetry with p50 and p95, the bitrate controller, the sender's backlog rule (`BacklogPolicy`), the half-second keyframe limit (`KeyframeLimiter`), the minimum-RTT clock-offset filter, ink geometry (Catmull-Rom smoothing, speed to width, fade, undo) and the HKDF pairing key.
+
+**`NitidoCapture`** wraps `SCContentSharingPicker` and `SCStream`: native pixel size, up to 60 fps, BGRA, cursor shown. Nítido's own windows are left out of the picker, and a shared display is captured without the Nítido app, so its windows and sheets never show in the picture. When the content changes size, the stream restarts at the new size once it has held for 150 ms. Start, update and stop run one at a time, so a quick re-pick never races a stream being torn down.
+
+**`NitidoCodec`** wraps VideoToolbox in realtime mode with no frame reordering: HEVC Main, or H.264 High when there is no hardware HEVC encoder, with a keyframe every 120 frames or on request. The stream is tagged BT.709 with the sRGB transfer function, and the decoder hands its 4:2:0 pictures to Core Image, which converts them on the GPU as it draws.
+
+**`NitidoLink`** wraps Network.framework: a Bonjour `_nitido._tcp` listener and browser, and one TLS connection per peer for both directions. A ping every 500 ms gives the RTT and the clock offset; a link with no pong for 3 s fails. The sharer publishes its port and IPv4 addresses in its TXT record, and the viewer dials up to two of them, then the Bonjour service, within 8 s. After a drop the viewer reconnects with backoff (0.5, 1, 2 and 4 s, then every 5 s), each time to where discovery says the sharer is now. Both sides say hello with their protocol version first, and a mismatch ends the session with a message naming both versions.
+
+**`NitidoUI`** holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` keeps only the newest frame and as few drawables in flight as the display needs, because each drawable queued ahead of a frame delays it by a refresh ([`FramePacer.swift`](Sources/NitidoUI/FramePacer.swift) explains how many). `InkOverlay` draws strokes as variable-width ribbons over the video, and `TelemetryStrip` reads a snapshot four times a second. Drawing the held frame again after a resize never counts as a displayed frame, so the fps and latency figures stay honest.
+
+**`nitido`** is the app: one window, the menus, and a quit that tells the other Mac `bye` before the process ends (2 s at most). It has no logic of its own.
+
+Every stage drops work instead of queueing it:
+
+- Capture keeps only the newest frame.
+- The encoder takes two frames at a time; of the frames it turns away, only the newest goes in next.
+- A frame VideoToolbox drops counts as a drop; only ten real encode errors in a row stop the codec.
+- The sharer skips deltas once its send backlog stays over 150 ms worth for 100 ms, or passes 1 s worth.
+- The sharer forces at most one keyframe per half second per viewer; a new viewer's first goes at once.
+- A message for a link that is not up is dropped, not queued.
+- The viewer's decoder skips to the next keyframe once the oldest waiting frame is 50 ms old or eight wait.
+- Only the newest decoded frame waits for the main thread.
+
+One wait is left: frames that reach the viewer while its main thread is busy wait in the link's message stream. When they come in a burst, the decoder takes eight and skips the rest to the next keyframe.
+
+Every 250 ms the bitrate controller reads the RTT (the last second's median, or how long an unanswered ping has waited, if that is longer) and the send backlog. It cuts 25% when the backlog passes two frames' worth, the RTT climbs 40 ms above its 10-second minimum, or the sender started skipping, then holds for 2 s (a new skip cuts even then). It adds 10% at most every 2 s while the backlog stays under one frame and the RTT within 15 ms of its minimum. It keeps between 2 and 60 Mbps and starts at 20 Mbps for 1080p, scaled by pixel count (45.6 Mbps for the 2692×1756 px window above). The design spec and the implementation plan are in `docs/superpowers/`.
+
+## What I found by testing on two Macs
+
+On 2026-10-09 I ran Nítido on two Macs for the first time: the MacBook Pro sharing to the MacBook Air over Wi-Fi. These are the bugs that session found, and what I changed.
+
+1. **A wrong code looked like a dead network.** The viewer waited out its 15 s deadline instead of saying "Wrong code", and the sharer counted one attempt as three or four failed handshakes, so one typo changed its code.\
+   Fix: the viewer dials the addresses the sharer publishes, so the TLS failure comes back at once, and the sharer counts failures from one address less than 1 s apart as one attempt. That evening the viewer said "Wrong code" at once.
+2. **The 60 Hz viewer showed 33 of 58 fps.** With one drawable in flight a frame costs two refreshes, so a 60 Hz panel showed every other frame; the ProMotion sharer starved the same way, because its screen said 120 Hz while presenting at 60.\
+   Fix: two drawables in flight on a panel slower than twice the capture rate, a check of the real presentation cadence every second, and only the newest decoded frame waiting for the main thread. That evening the Air logged no more "fell behind" lines and showed glass to glass 30 to 40 ms.
+3. **Colours were slightly off on the viewer.** The encoder set no colour tags, so the decoder read the capture's sRGB values as BT.709 and came out up to 12 code values off.\
+   Fix: the stream is tagged BT.709 primaries and matrix with the sRGB transfer function. A test now holds flat colours within 2 code values; the Digital Color Meter check between two Macs is still to do.
+4. **The backlog rule turned into a keyframe slideshow.** While a long window scrolled, the sharer showed 58 fps and the viewer 10 to 48: one Wi-Fi burst tripped a skip, and the keyframe that ended it tripped the next, every 50 to 100 ms.\
+   Fix: `BacklogPolicy` judges the backlog in time (150 ms worth for 100 ms, or 1 s worth at once) without the keyframe on its way, and `KeyframeLimiter` forces at most one keyframe per half second per viewer.
+5. **VideoToolbox's drops failed the share.** Under that keyframe storm the realtime encoder dropped ten frames in a row, and the app counted each as a failure: "Video encoding keeps failing."\
+   Fix: a dropped frame counts in the strip and is logged at most once a second; only ten real encode errors in a row stop the codec.
+6. **The app crashed on a second share.** After one share stopped and another started, SwiftUI kept the ink canvas for the new share, but the canvas still held the old share's controller `unowned`, and its 30 Hz timer called into it after it was freed.\
+   Fix: the canvas holds its controller weakly, follows the one it is handed, and ticks only while it is in a window. Tests reproduce the switch.
+
+Fixes 4, 5 and 6, and the ProMotion half of 2, came after that session. Each has tests; a second two-Mac run (the Two Macs and Failure drills sections of [docs/testing.md](docs/testing.md)) checks them on the hardware.
 
 ## Security
 
-Pairing uses TLS 1.2 with a pre-shared key derived with HKDF-SHA256 from the 4-digit code and the sharer's name, over the ECDHE_PSK ciphersuite `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256`, the only one offered (a test checks it is the one negotiated). Because of the ephemeral key exchange, someone who only records the network traffic cannot decrypt the session, not even later, after learning the code. A wrong code fails the handshake, and after three wrong codes the sharer shows a new one. The sharer counts attempts, not handshakes, because one attempt can fail the handshake more than once: a failure on the keys less than a second after the last one from the same address counts as the same wrong code, up to four in a row. So the code changes after the ninth failed handshake the sharer sees from one address at the latest, and a port scan or a connection cut short counts for nothing. At most eight connections prove the code at once, three from one address.
+Pairing uses TLS 1.2 with a pre-shared key derived with HKDF-SHA256 from the 4-digit code and the sharer's name. The only ciphersuite offered is `TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256`, and a test checks it is the one negotiated.
 
-What the pairing does not protect against: each blind attempt still has a 1 in 10,000 chance, and a host on the network can fail handshakes on purpose to keep the code changing, so that nobody can pair. The real limit is the size of the code. An active attacker on the same network can pose as the sharer, test all 10,000 codes against the viewer's half of the handshake in milliseconds and relay the stream; the rotation does not stop that, because that attack never fails a handshake. The 4-digit code is meant for a local network you trust (home, office), not for public Wi-Fi. The next step is a PAKE such as SPAKE2, where each active attempt tests a single guess, or a 128-bit secret shared by QR code; the details are in section 13 of the design spec.
+- Someone who only records the traffic cannot decrypt it, not even after learning the code later, because of the ephemeral key exchange.
+- A wrong code fails the handshake, and three wrong codes change the code. The sharer counts attempts, not handshakes: failures from one address less than a second apart are one attempt, up to four. So the code changes by the ninth failed handshake from one address at the latest, and a port scan or a connection cut short counts for nothing.
+- At most eight connections prove the code at once, three from one address.
 
-## What's next
+What it does not protect against:
 
-WebRTC with STUN/TURN for the open internet, AV1 where hardware allows, a region-diff pass so the unchanged parts of a frame cost no bits, and audio.
+- Each blind guess has a 1 in 10,000 chance, and a host on the network can fail handshakes on purpose to keep the code changing, so that nobody can pair.
+- An active attacker on the same network can pose as the sharer, test all 10,000 codes against the viewer's half of the handshake in milliseconds and relay the stream. The rotation does not help, because that attack never fails a handshake.
+
+So the 4-digit code is for a network you trust (home, office), not public Wi-Fi. The next step is a PAKE such as SPAKE2, where each active attempt tests one guess, or a 128-bit secret shared by QR code; section 13 of the design spec has the details.
+
+## Testing
+
+`swift test` runs 351 XCTest tests, with no failures at the current commit (about two and a half minutes on an M5 once built).
+
+- `NitidoCore` (56): wire round-trips and decoding fed byte by byte, telemetry percentiles, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
+- `NitidoCodec` (19): encode and decode loops on real VideoToolbox sessions, keyframe requests, the decoder's skip rule, colour tags and failure reporting.
+- `NitidoLink` (49): real TLS connections on this Mac (frames both ways, a wrong code, the negotiated ciphersuite, reconnects), the TXT record and the order of routes.
+- `NitidoCapture` (16): restarts after a resize or a display mode change, the serial start and stop, and the capture clock.
+- `NitidoUI` (211): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink, window sizes and menus.
+
+The picker and the Screen Recording grant, what reaches a real screen, and two real Macs are checked by hand: [docs/testing.md](docs/testing.md) is the checklist, one action and one expected result per item.
+
+## Limits and what's next
+
+- Local network only: discovery is Bonjour and there is no NAT traversal. Next: WebRTC with STUN/TURN for the open internet.
+- One viewer at a time: a second viewer that proves the code takes the seat, and the first is told so.
+- The 4-digit code is safe only on a trusted network (see Security). Next: SPAKE2 or a secret shared by QR code.
+- The build is signed for development, not notarized.
+- No audio, no remote control, no recording.
+- Next for the picture: a region-diff pass so the unchanged parts of a frame cost no bits, and AV1 where the hardware encodes it.
+- Still to check by hand: text at 2 Mbps while it scrolls, colours between two Macs with Digital Color Meter, and the evening fixes on two Macs.
 
 ## License
 
