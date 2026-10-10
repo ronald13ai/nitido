@@ -97,7 +97,7 @@ Byte order big-endian. Every message: `u32 length` (payload bytes, excluding the
 | 10 | clear | empty |
 | 11 | bye | u8 reason |
 
-`hello` is the first message in both directions, sent the moment TLS is up; a link is ready only once the other side's `hello` speaks this side's version, so a Mac on another version never takes the viewer's seat, and mismatched versions end with `bye(1)` and a final message naming both (the viewer does not reconnect). The sharer sends `hello` again when the capture's size or scale changes. `bye` reasons: 0 the session ended (Esc, Back, Stop, quit), 1 protocol mismatch, 2 the sharer stopped capturing and listening (a failure, or Stop Sharing in the menu bar). Unknown types are skipped by length, so the protocol can grow.
+`hello` is the first message in both directions, sent the moment TLS is up; a link is ready only once the other side's `hello` speaks this side's version, so a Mac on another version never takes the viewer's seat, and mismatched versions end with `bye(1)` and a final message naming both (the viewer does not reconnect). The sharer sends `hello` again when the capture's size or scale changes. `bye` reasons: 0 the session ended (Esc, Back, Stop, quit), 1 protocol mismatch, 2 the sharer stopped capturing and listening (a failure, or Stop Sharing in the menu bar), 3 another viewer proved the code and took this one's seat (the viewer says "Another Mac is now viewing <Mac>."). Unknown types are skipped by length, so the protocol can grow.
 
 ## 7. Codec settings
 

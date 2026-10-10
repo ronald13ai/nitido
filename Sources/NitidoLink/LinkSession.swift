@@ -204,6 +204,9 @@ public final class LinkSession: @unchecked Sendable {
                     } else if link.byeReason == ByeReason.sharingStopped {
                         log.info("\(self.sharerName, privacy: .public) stopped sharing")
                         end(.closed("\(sharerName) stopped sharing."))
+                    } else if link.byeReason == ByeReason.replaced {
+                        log.info("another Mac took the seat at \(self.sharerName, privacy: .public)")
+                        end(.closed("Another Mac is now viewing \(sharerName)."))
                     } else {
                         end(.closed("The sharer ended the session."))
                     }

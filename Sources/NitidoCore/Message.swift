@@ -12,6 +12,9 @@ public enum ByeReason {
     public static let protocolMismatch: UInt8 = 1
     /// The sharer stopped capturing (a failure, or Stop Sharing in the menu bar) and no longer listens for viewers.
     public static let sharingStopped: UInt8 = 2
+    /// Another viewer proved the code and took this one's seat; the sharer is still sharing. A viewer that does not know
+    /// it reads it as `ended`.
+    public static let replaced: UInt8 = 3
 }
 public enum Codec: UInt8, Sendable, Equatable { case hevc = 1, h264 = 2 }
 public enum StrokePhase: UInt8, Sendable, Equatable { case begin = 1, append = 2, end = 3 }

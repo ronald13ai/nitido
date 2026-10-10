@@ -974,11 +974,11 @@ public final class ShareModel {
     private func linkStateChanged(_ s: NitidoLink.Link.State, for l: NitidoLink.Link) {
         switch s {
         case .ready:
-            // The handshake proved the code: this viewer takes over from the current one, which is told the sharer
-            // ended its session. Its messages are heard from now on (they wait in the link's stream until then).
+            // The handshake proved the code and the hellos match: this viewer takes over from the current one, which is
+            // told another Mac took its seat. Its messages are heard from now on (they wait in the link's stream until then).
             guard let pairing = unpaired.removeValue(forKey: ObjectIdentifier(l)) else { return }
             if link != nil { ink.endRemoteStrokes() }   // the viewer it replaces sends no more points
-            link?.close()
+            link?.close(reason: ByeReason.replaced)
             linkTasks.forEach { $0.cancel() }
             link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
             viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNotice = nil

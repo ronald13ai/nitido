@@ -660,8 +660,9 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
-    /// One viewer at a time: a second viewer that proves the code takes over, the first is told the session ended, and
-    /// the sharer hears the new one.
+    /// One viewer at a time: a second viewer that proves the code takes over, the first is told another Mac took its
+    /// seat (the sharer is still sharing, so "the sharer ended the session" would be wrong), and the sharer hears the
+    /// new one.
     @MainActor
     func testASecondViewerThatProvesTheCodeTakesOver() async throws {
         let (share, _) = try await listeningShare()
@@ -679,8 +680,8 @@ final class ViewerLinkTests: XCTestCase {
         second.connect()
         try await waitUntil("the second viewer is connected") { second.state == .connected }
         XCTAssertEqual(share.connectionCount, 2, "a viewer taking over is a new connection: the ring draws again")
-        try await waitUntil("the first viewer hears that its session ended") {
-            first.state == .failed("The sharer ended the session.", sharer)
+        try await waitUntil("the first viewer hears that another Mac is viewing") {
+            first.state == .failed("Another Mac is now viewing \(share.name).", sharer)
         }
         XCTAssertTrue(share.isSending)
         XCTAssertEqual(share.unpairedCount, 0)
