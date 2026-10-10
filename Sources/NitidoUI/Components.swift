@@ -10,9 +10,15 @@ public struct Glass<S: InsettableShape>: ViewModifier {
     public init(in shape: S) { self.shape = shape }
     public func body(content: Content) -> some View {
         if #available(macOS 26, *) {
-            content
-                .background(Theme.Colors.glassBacking, in: shape)
-                .glassEffect(.regular, in: shape)
+            // The backing is its own layer above the glass, not the content's background under `glassEffect`: a small
+            // piece of glass (the sharer chip) over a light picture adapts to it with a light layer of its own, which
+            // otherwise lands over the backing (#47474a over a white document instead of #1c1c21).
+            content.background {
+                ZStack {
+                    Color.clear.glassEffect(.regular, in: shape)
+                    shape.fill(Theme.Colors.glassBacking)
+                }
+            }
         } else {
             content
                 .background(Theme.Colors.surface.opacity(0.80), in: shape)

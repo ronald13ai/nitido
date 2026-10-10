@@ -399,10 +399,13 @@ private final class Stage {
     /// Where the window's left edge goes so the window is off the pointer: while a system picker is up (one another app
     /// left open, say), it tints the window the pointer is over blue, and keeps that tint until the pointer moves, so
     /// the window must never pass under it.
+    /// A window grows to the right as its content does (AppKit keeps its origin), so the check covers the widest screen
+    /// in the gallery, 760 pt, not only the width it has now.
     private static func clearOfPointer(_ frame: CGRect) -> CGFloat {
         let pointer = NSEvent.mouseLocation
-        guard frame.insetBy(dx: -24, dy: -24).contains(pointer) else { return frame.minX }
-        return pointer.x - 48 - frame.width >= 0 ? pointer.x - 48 - frame.width : pointer.x + 48
+        let reach = max(frame.width, 760)
+        guard (frame.minX - 24...frame.minX + reach + 24).contains(pointer.x) else { return frame.minX }
+        return pointer.x - 48 - reach >= 0 ? pointer.x - 48 - reach : pointer.x + 48
     }
 
     private func avoidPointer() { window.setFrameOrigin(CGPoint(x: Self.clearOfPointer(window.frame), y: window.frame.minY)) }
