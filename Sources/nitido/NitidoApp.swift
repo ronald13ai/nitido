@@ -32,6 +32,11 @@ struct NitidoApp: App {
         Window("Nítido", id: "main") {
             RootView(app: app)
                 .background(Theme.Colors.background)
+                // One dark family edge to edge: no grey title bar, no separator, no second "Nítido" above the
+                // wordmark. The traffic lights float on the background.
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+                .toolbar(removing: .title)
+                .containerBackground(Theme.Colors.background, for: .window)
                 .onAppear { NSApplication.shared.activate(ignoringOtherApps: true) }
         }
         .windowResizability(.contentSize)
