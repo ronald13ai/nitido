@@ -54,6 +54,11 @@ public final class ShareModel {
 
     public var loopback = false { didSet { if loopback != oldValue { loopbackDidChange() } } }
     public var qualityMbps: Double = 20 { didSet { qualityDidChange() } }
+    /// The quality slider's range, in Mbps: the bitrate controller's own bounds (spec 8), 2 to 60.
+    nonisolated static let qualityRange: ClosedRange<Double> = {
+        let bounds = BitrateController(initial: 0)
+        return Double(bounds.minimum) / 1_000_000...Double(bounds.maximum) / 1_000_000
+    }()
     /// Where the comparison splits (0...1). Every decoded frame carries it (`handleDecoded`); a move also reaches the
     /// frame the view keeps, which is drawn again only when the source is still (`FramePacer.moveDivider`).
     public var dividerPosition: Double = 0.5 { didSet { if dividerPosition != oldValue { sink.moveDivider(to: dividerPosition) } } }

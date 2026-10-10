@@ -470,6 +470,12 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// The quality slider covers the bitrate controller's range, 2 to 60 Mbps (spec 8), so the loop never runs at a rate
+    /// below anything the README and the spec describe.
+    func testTheQualitySliderCoversTheControllersRange() {
+        XCTAssertEqual(ShareModel.qualityRange, 2...60)
+    }
+
     /// Stop while a restart waits for the old session's stop: the new picker never appears.
     @MainActor
     func testStopWhileARestartWaitsDoesNotPresent() async {

@@ -159,7 +159,7 @@ struct LoopbackPanel: View {
                     .toggleStyle(.switch).tint(Theme.Colors.gold)
                 if model.loopback {
                     Text("QUALITY · \(Int(model.qualityMbps)) MBPS").font(Theme.Fonts.smallCaps(9)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.5)
-                    Slider(value: $model.qualityMbps, in: 1...60, step: 1).tint(Theme.Colors.gold).frame(width: 180)
+                    Slider(value: $model.qualityMbps, in: ShareModel.qualityRange, step: 1).tint(Theme.Colors.gold).frame(width: 180)
                     Text("Raw on the left of the line, decoded on the right. Drag the line.").font(.system(size: 10)).foregroundStyle(Theme.Colors.secondaryText)
                 }
             }
