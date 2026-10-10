@@ -27,6 +27,9 @@ extension CaptureSource {
 
 extension CaptureSession: CaptureSource {}
 
+/// What the Share window shows. Only what a view reads is observed; the per-frame bookkeeping (the encoder and its
+/// counts, the telemetry, the bitrate controller, the links) is `@ObservationIgnored`, so 60 writes a second never go
+/// through the observation registrar.
 @MainActor @Observable
 public final class ShareModel {
     public enum State: Equatable { case idle, picking, capturing, failed(String) }
@@ -57,14 +60,14 @@ public final class ShareModel {
     public private(set) var codecMs: Double?
     public private(set) var codecLabel = "raw"
     /// Internal, not private, so a test can stand in for VideoToolbox's callbacks on the encoder the share made.
-    private(set) var encoder: VideoEncoder?
+    @ObservationIgnored private(set) var encoder: VideoEncoder?
     /// Internal, not private, so a test can hold the loop's decoder queue, as a stall would.
-    private(set) var decoder: VideoDecoder?
-    private var decoderConfig: VideoConfig?
+    @ObservationIgnored private(set) var decoder: VideoDecoder?
+    @ObservationIgnored private var decoderConfig: VideoConfig?
     /// The newest captured frame, raw: the left of the comparison while the loop is on. While it is off it is the frame
     /// the view holds (it was pushed raw), so it pins no buffer of its own; turning the loop on encodes it at once,
     /// since a still source sends no frame to start with (`encodeNewestAgain`). Cleared with the session.
-    private var latestRaw: CapturedFrame?
+    @ObservationIgnored private var latestRaw: CapturedFrame?
     /// When the newest frame came (`CACurrentMediaTime`): a still source sends none.
     @ObservationIgnored private var lastCaptureAt: CFTimeInterval = 0
     /// When the encoder last took a frame (`CACurrentMediaTime`): a frame it turned away carries no keyframe.
@@ -75,18 +78,18 @@ public final class ShareModel {
     @ObservationIgnored private var newestPending = false
     /// Bumped by every quality change, loop off and retire, so a pending `qualityRested` for an earlier one does nothing.
     @ObservationIgnored private var qualityRestToken: UInt64 = 0
-    private var encodeStarts: [UInt32: Double] = [:]
-    private var codecWindow = RollingWindow(seconds: 1)
+    @ObservationIgnored private var encodeStarts: [UInt32: Double] = [:]
+    @ObservationIgnored private var codecWindow = RollingWindow(seconds: 1)
     /// A codec setting VideoToolbox rejected (`CodecError.property` through `onError`), shown over the picture.
     public private(set) var codecNotice: String?
     /// Frames the encoder failed or emitted empty in a row; ten fail the share (`handleCodecError`). A frame
     /// VideoToolbox dropped is a dropped frame, and neither counts here nor starts the count again.
-    private var encodeFailures = 0
+    @ObservationIgnored private var encodeFailures = 0
     /// Every frame counted as dropped since the model was made. Internal for tests.
     var droppedFramesTotal: Int { telemetry.droppedTotal }
     /// Frames the loop's decoder could not read in a row; ten fail the share (`loopDecodeFailed`). Only a frame decoded
     /// resets it. Internal, not private, so a test can wait for a failure to land.
-    private(set) var decodeFailures = 0
+    @ObservationIgnored private(set) var decodeFailures = 0
     /// When the loop last asked the encoder for a keyframe because its decoder skipped frames (`handleEncoded`).
     @ObservationIgnored private var loopKeyframeAskedAt: CFTimeInterval?
     /// The share failed because its capture ended (`CaptureEvent.failed`: Stop Sharing in the menu bar, a stream that
@@ -109,7 +112,7 @@ public final class ShareModel {
     /// The connection the gold ring last played for, so the Share screen shown again draws it at rest (`ConnectRing`).
     @ObservationIgnored public var ringShownFor = 0
     /// The first pick's picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
-    public var onCancelled: (() -> Void)?
+    @ObservationIgnored public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
     public private(set) var networkNotice: String?
     /// A Mac on another protocol version proved the code and could not pair (spec 12), shown over the picture until a
@@ -119,23 +122,23 @@ public final class ShareModel {
     /// Mac on the network has that name. Nil while nothing is advertised.
     public private(set) var advertisedName: String?
     /// Internal, not private, so a test can drive the listener's states.
-    private(set) var advertiser: Advertiser?
+    @ObservationIgnored private(set) var advertiser: Advertiser?
     /// The port the listener bound, once it is ready (logged; tests connect to it directly).
     @ObservationIgnored private(set) var listeningPort: UInt16?
     /// The viewer: a connection that proved the code. Only it is sent to and heard from. Internal, not private, so a
     /// test can congest it.
-    private(set) var link: NitidoLink.Link?
-    private var linkTasks: [Task<Void, Never>] = []
+    @ObservationIgnored private(set) var link: NitidoLink.Link?
+    @ObservationIgnored private var linkTasks: [Task<Void, Never>] = []
     /// Connections the listener took that have not proved the code yet, each with the loop that follows its states
     /// (`attach`). Until one does, it may be anybody on the network, so it never touches the viewer.
-    private var unpaired: [ObjectIdentifier: (link: NitidoLink.Link, states: Task<Void, Never>)] = [:]
+    @ObservationIgnored private var unpaired: [ObjectIdentifier: (link: NitidoLink.Link, states: Task<Void, Never>)] = [:]
     /// How many connections are still proving the code (tests check that none is left behind).
     var unpairedCount: Int { unpaired.count }
     /// Adapts the viewer's bitrate every 250 ms (the snapshot loop), from the RTT, the send backlog and the skips the
     /// dropping rule started (`backlogPolicy`).
-    private var controller = BitrateController(initial: 20_000_000)
+    @ObservationIgnored private var controller = BitrateController(initial: 20_000_000)
     /// The encoder's rate, which also sizes the backlog dropping rule (`backlogPolicy`).
-    private var currentBitrate = 20_000_000
+    @ObservationIgnored private var currentBitrate = 20_000_000
     /// One frame's worth of bytes at the current rate: the unit the backlog drains to. Internal for tests.
     var frameBytes: Int { BacklogPolicy.frameBytes(bitsPerSecond: currentBitrate) }
     /// Spec section 8's dropping rule for the viewer's link: when deltas are skipped for the send backlog, and when the
@@ -159,7 +162,7 @@ public final class ShareModel {
     /// When a keyframe last went out to the viewer (`CACurrentMediaTime`): a forced one due after it is not needed.
     @ObservationIgnored private var keyframeSentAt: CFTimeInterval?
     /// Wrong codes over the whole share, counted per attempt; three rotate it (`rotateCode`).
-    private var handshakeFailures = HandshakeFailures()
+    @ObservationIgnored private var handshakeFailures = HandshakeFailures()
     /// Wrong codes since the code last changed. Internal for tests.
     var wrongCodeAttempts: Int { handshakeFailures.count }
     /// The clock wrong codes are counted by (`HandshakeFailures`). Internal so a test can move it on.
@@ -185,14 +188,14 @@ public final class ShareModel {
     private let screenRecordingGranted: @MainActor () -> Bool
     /// The session of the current attempt. Each attempt gets a fresh one: a session's streams end for good
     /// once a task iterating them is cancelled, so a retired session is never reused.
-    private var capture: (any CaptureSource)?
-    private var excludedWindowIDs: [CGWindowID] = []
-    private var telemetry = Telemetry(now: CACurrentMediaTime())
+    @ObservationIgnored private var capture: (any CaptureSource)?
+    @ObservationIgnored private var excludedWindowIDs: [CGWindowID] = []
+    @ObservationIgnored private var telemetry = Telemetry(now: CACurrentMediaTime())
     /// A negative or huge latency was logged once already for this model.
     @ObservationIgnored private var reportedClockMismatch = false
-    private var tasks: [Task<Void, Never>] = []
+    @ObservationIgnored private var tasks: [Task<Void, Never>] = []
     /// Bumped by every start and stop, so a start that waited for an earlier stop knows when it was superseded.
-    private var attempt: UInt64 = 0
+    @ObservationIgnored private var attempt: UInt64 = 0
     /// Stops of retired sessions, chained in order across every ShareModel. `SCContentSharingPicker.shared`
     /// is one per process, so a new session waits for all of them before it touches the picker; otherwise
     /// a late stop would deactivate the new session's picker or leave an old observer starting streams.
