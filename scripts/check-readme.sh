@@ -14,7 +14,8 @@ for image in $(grep -oE '!\[[^]]*\]\([^)]+\)' README.md | sed -E 's/^.*\]\(//; s
     problems=1
   fi
 done
-if grep -n "—" README.md; then
+emdash=$(printf '\342\200\224')   # U+2014, spelled as its UTF-8 bytes so this script holds none
+if grep -n "$emdash" README.md; then
   echo "check-readme: README.md has an em dash (the lines above)." >&2
   problems=1
 fi
