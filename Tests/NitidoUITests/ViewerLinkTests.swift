@@ -564,8 +564,8 @@ final class ViewerLinkTests: XCTestCase {
         viewer.connect()
         try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
 
-        sources.made[0].emit(.failed("The user stopped the stream"))
-        try await waitUntil("the share fails") { share.state == .failed("The user stopped the stream") }
+        sources.made[0].emit(.failed(CaptureFailure(reason: .stoppedFromMenuBar, detail: "The user stopped the stream")))
+        try await waitUntil("the share fails") { share.state == .failed("Sharing was stopped from the menu bar. Press Retry to share again.") }
         try await waitUntil("the viewer hears that the sharer stopped sharing") {
             viewer.state == .failed("\(share.name) stopped sharing.", sharer)
         }
@@ -1943,7 +1943,10 @@ final class ViewerLinkTests: XCTestCase {
         guard case .failed(let text, let peer) = viewer.state else {
             return XCTFail("expected .failed, got \(viewer.state)")
         }
-        XCTAssertTrue(text.hasPrefix("Could not connect to Gone. Could not reach the other Mac"), text)
+        // One sentence that names the Mac; Network.framework's own words ("The operation couldn't be completed.
+        // (Network.NWError error 61 - Connection refused)") stay in the log.
+        XCTAssertEqual(text, "Gone is no longer sharing.")
+        XCTAssertFalse(text.contains("NWError"), text)
         XCTAssertEqual(peer, gone)
         XCTAssertEqual(viewer.wrongCodeCount, 0, "a refused connection is not a wrong code")
         XCTAssertEqual(viewer.connectionCount, 0)
@@ -2140,7 +2143,9 @@ final class ViewerLinkTests: XCTestCase {
         advertiser.listenerStateChanged(.failed(.posix(.EADDRINUSE)))
         try await waitUntil("the share fails") { if case .failed = share.state { return true }; return false }
         guard case .failed(let message) = share.state else { return }
-        XCTAssertTrue(message.contains("local network"), message)
+        XCTAssertEqual(message, "Nítido stopped listening for viewers on the local network. Another app is using the network port Nítido listens on (error 48). Press Retry to listen again.")
+        XCTAssertFalse(message.contains("NWError"), message)
+        XCTAssertFalse(share.networkNotice?.contains("NWError") ?? false)
         // The stream, and the raw picture, go on until Retry, and the stream may report a new size meanwhile (a window
         // resized): the picture takes it, the failure stays, and nothing listens again. Only a capture that ended and
         // started again resumes a share without Retry.
@@ -2161,5 +2166,6 @@ final class ViewerLinkTests: XCTestCase {
         try await waitUntil("the list shows that Local Network is off") { viewer.discoveryNotice?.contains("Local Network") == true }
         viewer.browser.browserStateChanged(.failed(.dns(DNSServiceErrorType(kDNSServiceErr_ServiceNotRunning))))
         try await waitUntil("the list shows that discovery stopped") { viewer.discoveryNotice?.contains("stopped") == true }
+        XCTAssertEqual(viewer.discoveryNotice, "Nítido stopped looking for Macs. Bonjour, which finds Macs on the local network, is not working (error -65563). Press Esc, then View, to look again.")
     }
 }

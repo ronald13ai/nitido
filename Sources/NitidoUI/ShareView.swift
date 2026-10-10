@@ -96,7 +96,7 @@ public struct ShareView: View {
         guard model.failureNeedsPermission else {
             return placeholder(message, actions: [("Retry", model.retry)])
         }
-        return placeholder("\(message)\nTurn on Screen Recording for Nítido in System Settings, then press Retry.",
+        return placeholder("\(message) Turn on Screen Recording for Nítido in System Settings, then press Retry.",
                            actions: [("Open System Settings", openScreenRecordingSettings), ("Retry", model.retry)])
     }
 

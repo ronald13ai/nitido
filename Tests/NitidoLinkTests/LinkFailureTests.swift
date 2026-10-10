@@ -53,7 +53,7 @@ final class LinkFailureTests: XCTestCase {
         let link = Link.connect(to: refused, code: "1234", sharerName: "Sharer", hello: hello(.view), connectTimeout: 60, waitingTimeout: 0.5)
         let end = await outcome(of: link, within: 5)
         guard case .ended(last: .failed(let message)?) = end else { return XCTFail("expected .failed, got \(end)") }
-        XCTAssertTrue(message.hasPrefix("Could not reach the other Mac"), message)
+        XCTAssertEqual(message, "Sharer is no longer sharing.")
         XCTAssertGreaterThanOrEqual(clock.now - started, .milliseconds(450))
         if case .failed = link.state {} else { XCTFail("state is \(link.state)") }
     }
@@ -66,7 +66,7 @@ final class LinkFailureTests: XCTestCase {
                                 sharerName: "Sharer", hello: hello(.view), connectTimeout: 1, waitingTimeout: 60)
         let end = await outcome(of: link, within: 5)
         guard case .ended(last: .failed(let message)?) = end else { return XCTFail("expected .failed, got \(end)") }
-        XCTAssertTrue(message.hasPrefix("No answer from the other Mac"), message)
+        XCTAssertEqual(message, "Sharer did not answer within 1 second.")
         silent.stop()
     }
 
@@ -203,7 +203,7 @@ final class LinkFailureTests: XCTestCase {
         let states = await collect(advertiser.states, within: 3)?.filter { if case .advertised = $0 { return false }; return true }
         XCTAssertEqual(states?.first, .ready(port: port))
         guard case .failed(let message)? = states?.last else { return XCTFail("expected a final .failed, got \(String(describing: states))") }
-        XCTAssertTrue(message.contains("Address already in use"), message)
+        XCTAssertEqual(message, "Another app is using the network port Nítido listens on (error 48).")
         var incoming = advertiser.incoming.makeAsyncIterator()
         let next = await incoming.next()
         XCTAssertNil(next, "incoming must end once the listener is dead")

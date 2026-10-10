@@ -232,8 +232,9 @@ public final class LinkSession: @unchecked Sendable {
                 log.error("the sharer turned the code away (\(reason, privacy: .public))")
                 end(.codeRejected)
             } else {
+                // The link's reason is one sentence that names the sharer ("Ronald's MacBook Pro is no longer sharing.").
                 log.error("could not connect to \(self.sharerName, privacy: .public): \(reason, privacy: .public)")
-                end(.closed("Could not connect to \(sharerName). \(reason)"))
+                end(.closed(reason))
             }
             return
         }

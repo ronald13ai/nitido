@@ -73,8 +73,8 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertEqual(seen.count, 2, "one attempt, then the end: \(seen)")
         XCTAssertEqual(seen.first, .connecting(attempt: 1))
         XCTAssertFalse(seen.contains(.codeRejected), "a refused connection is not a wrong code")
-        guard case .closed(let reason?)? = seen.last else { return XCTFail("expected .closed with a reason, got \(seen)") }
-        XCTAssertTrue(reason.hasPrefix("Could not connect to Sharer. Could not reach the other Mac"), reason)
+        // One sentence that names the sharer; Network.framework's own words stay in the log.
+        XCTAssertEqual(seen.last, .closed("Sharer is no longer sharing."))
     }
 
     /// The sharer as discovery describes it: a Bonjour service that never resolves, and the loopback address on `port`.
@@ -312,8 +312,7 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertLessThan(clock.now - started, .seconds(3), "the reset ended the attempt at once")
         XCTAssertEqual(seen.count, 2, "one attempt, then the end: \(seen)")
         XCTAssertFalse(seen.contains(.codeRejected), "a reset is not a wrong code")
-        guard case .closed(let reason?)? = seen.last else { return XCTFail("expected .closed with a reason, got \(seen)") }
-        XCTAssertTrue(reason.hasPrefix("Could not connect to Sharer."), reason)
+        XCTAssertEqual(seen.last, .closed("Sharer closed the connection."))
         XCTAssertEqual(resetting.accepted, 1, "one connection on the address that reset it")
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(next.accepted, 0, "the next route was not tried")
@@ -387,7 +386,7 @@ final class LinkSessionTests: XCTestCase {
         let clock = ContinuousClock(), started = clock.now
         let seen = await states(of: session, within: 20)
         let took = clock.now - started
-        XCTAssertEqual(seen, [.connecting(attempt: 1), .closed("Could not connect to Sharer. No answer from the other Mac within 8 seconds.")])
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .closed("Sharer did not answer within 8 seconds.")])
         XCTAssertGreaterThanOrEqual(took, .milliseconds(7_900))
         XCTAssertLessThan(took, .seconds(10))
     }

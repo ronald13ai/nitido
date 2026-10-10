@@ -271,7 +271,7 @@ public final class ViewModel {
         switch s {
         case .ready: discoveryNotice = nil
         case .waiting(let reason): discoveryNotice = reason
-        case .failed(let reason): discoveryNotice = "Nítido stopped looking for Macs: \(reason) Press Esc, then View, to look again."
+        case .failed(let reason): discoveryNotice = "Nítido stopped looking for Macs. \(reason) Press Esc, then View, to look again."
         case .stopped: break
         }
     }

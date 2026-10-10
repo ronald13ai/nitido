@@ -19,7 +19,39 @@ public enum CaptureEvent: Sendable, Equatable {
     case started(pixelWidth: Int, pixelHeight: Int, scale: CGFloat)
     case cancelled
     case stopped
-    case failed(String)
+    case failed(CaptureFailure)
+}
+
+/// Why the capture failed, as the share says it (`reason`), and what ScreenCaptureKit said (`detail`), which goes to the
+/// log only: its wording ("The user declined TCCs for application, window, display capture") is not for the screen.
+public struct CaptureFailure: Sendable, Equatable, ExpressibleByStringLiteral {
+    public enum Reason: Sendable, Equatable {
+        /// Screen Recording is not granted (`SCStreamError.userDeclined`).
+        case notPermitted
+        /// Stop Sharing in the menu bar's screen-sharing menu (`SCStreamError.userStopped`).
+        case stoppedFromMenuBar
+        /// The stream, the picker or a change to the stream failed some other way.
+        case other
+    }
+
+    public let reason: Reason
+    public let detail: String
+
+    public init(reason: Reason, detail: String) { self.reason = reason; self.detail = detail }
+
+    /// A failure for no reason the share tells apart, with `value` as its detail (tests, mostly).
+    public init(stringLiteral value: String) { self.init(reason: .other, detail: value) }
+
+    /// From what ScreenCaptureKit threw or reported.
+    init(_ error: any Error) {
+        let code = (error as NSError).domain == SCStreamErrorDomain ? SCStreamError.Code(rawValue: (error as NSError).code) : nil
+        let reason: Reason = switch code {
+        case .userDeclined?: .notPermitted
+        case .userStopped?: .stoppedFromMenuBar
+        default: .other
+        }
+        self.init(reason: reason, detail: "\(error.localizedDescription) (\((error as NSError).domain) \((error as NSError).code))")
+    }
 }
 
 private let log = Logger(subsystem: "ai.ronar.nitido", category: "capture")
@@ -199,7 +231,7 @@ public final class CaptureSession: NSObject {
             eventOut.yield(.stopped)
         } catch {
             log.error("stopCapture: \(error.localizedDescription, privacy: .public)")
-            eventOut.yield(.failed(error.localizedDescription))
+            eventOut.yield(.failed(CaptureFailure(error)))
         }
     }
 
@@ -258,7 +290,7 @@ public final class CaptureSession: NSObject {
                 eventOut.yield(.started(pixelWidth: config.width, pixelHeight: config.height, scale: scale))
             } catch {
                 log.error("updateStream: \(error.localizedDescription, privacy: .public)")
-                eventOut.yield(.failed(error.localizedDescription))
+                eventOut.yield(.failed(CaptureFailure(error)))
             }
             return
         }
@@ -276,7 +308,7 @@ public final class CaptureSession: NSObject {
         } catch {
             if self.stream === stream { self.stream = nil; sizes.configure(nil); sharedDisplay = nil }
             log.error("startCapture: \(error.localizedDescription, privacy: .public)")
-            eventOut.yield(.failed(error.localizedDescription))
+            eventOut.yield(.failed(CaptureFailure(error)))
         }
     }
 
@@ -363,7 +395,7 @@ public final class CaptureSession: NSObject {
             try await stream.updateConfiguration(Self.configuration(width: size.width, height: size.height))
         } catch {
             log.error("updateConfiguration: \(error.localizedDescription, privacy: .public)")
-            eventOut.yield(.failed(error.localizedDescription))
+            eventOut.yield(.failed(CaptureFailure(error)))
             return
         }
         guard enqueuedGeneration == generation else { return }
@@ -434,23 +466,23 @@ extension CaptureSession: SCContentSharingPickerObserver {
         }
     }
     nonisolated public func contentSharingPickerStartDidFailWithError(_ error: any Error) {
-        let message = error.localizedDescription
-        log.error("pickerStart: \(message, privacy: .public)")
-        Task { @MainActor in self.eventOut.yield(.failed(message)) }
+        let failure = CaptureFailure(error)
+        log.error("pickerStart: \(failure.detail, privacy: .public)")
+        Task { @MainActor in self.eventOut.yield(.failed(failure)) }
     }
 }
 
 extension CaptureSession: SCStreamDelegate {
     nonisolated public func stream(_ stream: SCStream, didStopWithError error: any Error) {
-        let message = error.localizedDescription
-        log.error("streamDidStop: \(message, privacy: .public)")
+        let failure = CaptureFailure(error)
+        log.error("streamDidStop: \(failure.detail, privacy: .public)")
         // Only compared by identity on the main actor, never used there.
         nonisolated(unsafe) let stopped = stream
         Task { @MainActor in
             // A stream that was already stopped or replaced is only logged; the live one reaches the UI.
             guard self.stream === stopped else { return }
             self.stream = nil; self.sizes.configure(nil); self.sharedDisplay = nil; self.stopWatchingScreens()
-            self.eventOut.yield(.failed(message))
+            self.eventOut.yield(.failed(failure))
         }
     }
 }

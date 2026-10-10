@@ -374,10 +374,10 @@ final class ShareModelLifecycleTests: XCTestCase {
         await drain()
         source.emit(.failed("stopped"))
         await drain()
-        XCTAssertEqual(model.state, .failed("stopped"))
+        XCTAssertEqual(model.state, .failed("The screen capture stopped. Press Retry to share again."))
         source.emit(.cancelled)
         await drain()
-        XCTAssertEqual(model.state, .failed("stopped"), "the failure card stays, with Retry")
+        XCTAssertEqual(model.state, .failed("The screen capture stopped. Press Retry to share again."), "the failure card stays, with Retry")
         XCTAssertEqual(cancels, 0, "the app stays on the Share screen")
         source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
         await drain()
@@ -405,12 +405,12 @@ final class ShareModelLifecycleTests: XCTestCase {
     func testRetryAfterFailureStartsAFreshSession() async {
         let journal = Journal()
         let factory = Factory(journal: journal, prefix: "d")
-        let model = ShareModel(makeSource: factory.make)
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
         model.start(excludingWindowIDs: [7])
         await drain()
         factory.made[0].emit(.failed("The stream stopped."))
         await drain()
-        XCTAssertEqual(model.state, .failed("The stream stopped."))
+        XCTAssertEqual(model.state, .failed("The screen capture stopped. Press Retry to share again."))
 
         model.retry()
         await drain()
@@ -446,7 +446,7 @@ final class ShareModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.state, .capturing)
         factory.made[0].emit(.failed("The stream stopped."))
         await drain()
-        XCTAssertEqual(model.state, .failed("The stream stopped."))
+        XCTAssertEqual(model.state, .failed("The screen capture stopped. Press Retry to share again."))
         XCTAssertFalse(model.failureNeedsPermission)
         await model.stop()
     }
@@ -529,6 +529,37 @@ final class ShareModelLifecycleTests: XCTestCase {
         factory.made[0].emit(.failed("The user declined TCCs for application, window, display capture"))
         await drain()
         XCTAssertTrue(model.failureNeedsPermission)
+        XCTAssertEqual(model.state, .failed("Nítido is not allowed to record the screen."), "ScreenCaptureKit's words stay in the log")
+        await model.stop()
+    }
+
+    /// Spec 9 and 12: a denied Screen Recording (`SCStreamError.userDeclined`) is said in plain words with the fix, even
+    /// when the grant check still reads its old answer, and Stop Sharing in the menu bar (`userStopped`) says so. What
+    /// ScreenCaptureKit said ("The user declined TCCs for application, window, display capture") goes to the log only.
+    @MainActor
+    func testCaptureFailuresAreSaidInPlainWords() async {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "w")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let denial = "The user declined TCCs for application, window, display capture (com.apple.ScreenCaptureKit.SCStreamErrorDomain -3801)"
+        factory.made[0].emit(.failed(CaptureFailure(reason: .notPermitted, detail: denial)))
+        await drain()
+        XCTAssertTrue(model.failureNeedsPermission)
+        XCTAssertEqual(model.state, .failed("Nítido is not allowed to record the screen."))
+
+        model.retry()
+        await drain()
+        factory.made[1].emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        let stopped = "The user stopped the stream (com.apple.ScreenCaptureKit.SCStreamErrorDomain -3817)"
+        factory.made[1].emit(.failed(CaptureFailure(reason: .stoppedFromMenuBar, detail: stopped)))
+        await drain()
+        XCTAssertFalse(model.failureNeedsPermission)
+        XCTAssertEqual(model.state, .failed("Sharing was stopped from the menu bar. Press Retry to share again."))
+        guard case .failed(let shown) = model.state else { return XCTFail() }
+        XCTAssertFalse(shown.contains("SCStreamErrorDomain"), shown)
         await model.stop()
     }
 
@@ -1179,9 +1210,9 @@ final class ShareModelLifecycleTests: XCTestCase {
         let old = try XCTUnwrap(model.encoder)
         XCTAssertNotNil(model.advertiser, "the share listens")
 
-        source.emit(.failed("The user stopped the stream"))
+        source.emit(.failed(CaptureFailure(reason: .stoppedFromMenuBar, detail: "The user stopped the stream")))
         await drain()
-        XCTAssertEqual(model.state, .failed("The user stopped the stream"))
+        XCTAssertEqual(model.state, .failed("Sharing was stopped from the menu bar. Press Retry to share again."))
         XCTAssertNil(model.advertiser, "a failed share stops listening")
 
         source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))   // a new pick, from the same session's picker

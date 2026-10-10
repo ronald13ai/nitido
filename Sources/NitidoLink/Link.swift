@@ -78,6 +78,8 @@ public final class Link: @unchecked Sendable {
 
     private let connection: NWConnection
     private let hello: Hello
+    /// The other Mac's name, as a failure's sentence says it (`init`).
+    private let peerName: String
     /// Longest a link may stay `.connecting` in total, whatever Network.framework is doing (a handshake that
     /// never answers, a Bonjour name that never resolves).
     private let connectTimeout: Double
@@ -130,10 +132,13 @@ public final class Link: @unchecked Sendable {
     private let stateOut: AsyncStream<State>.Continuation
 
     /// `timeLeft` is how much of `connectTimeout` this link has (all of it unless a viewer's session already spent some on
-    /// another route); the message on running out names `connectTimeout`, the attempt's whole deadline.
+    /// another route); the message on running out names `connectTimeout`, the attempt's whole deadline. `peerName` is the
+    /// other Mac's name, which a failure's sentence starts with ("Ronald's MacBook Pro is no longer sharing."); on the
+    /// sharer, whose failures only go to the log, it is "The viewer".
     init(connection: NWConnection, role: Role, hello: Hello, connectTimeout: Double = Link.defaultConnectTimeout,
-         waitingTimeout: Double = 5, timeLeft: Double? = nil, unreachableAfter: Double? = nil) {
+         waitingTimeout: Double = 5, timeLeft: Double? = nil, unreachableAfter: Double? = nil, peerName: String? = nil) {
         self.connection = connection; self.role = role; self.hello = hello
+        self.peerName = peerName ?? (role == .share ? "The viewer" : "The other Mac")
         self.connectTimeout = connectTimeout; self.waitingTimeout = waitingTimeout
         connectDeadline = CACurrentMediaTime() + (timeLeft ?? connectTimeout)
         self.unreachableAfter = unreachableAfter
@@ -154,7 +159,7 @@ public final class Link: @unchecked Sendable {
         parameters.includePeerToPeer = peerToPeer
         let link = Link(connection: NWConnection(to: endpoint, using: parameters), role: .view, hello: hello,
                         connectTimeout: connectTimeout, waitingTimeout: waitingTimeout, timeLeft: timeLeft,
-                        unreachableAfter: unreachableAfter)
+                        unreachableAfter: unreachableAfter, peerName: sharerName)
         link.start()
         return link
     }
@@ -176,7 +181,7 @@ public final class Link: @unchecked Sendable {
                 noteKeyMismatch(e)
                 noteUnreachable(e)
                 // Network.framework expects a failed connection to be cancelled; until then it holds on to it.
-                finish(.failed(e.localizedDescription)); connection.cancel()
+                finish(.failed(e.plainSentence(about: peerName))); connection.cancel()
             case .cancelled: finish(.cancelled)
             case .waiting(let e):
                 // A failed TLS handshake (wrong code) parks a client connection in .waiting, where
@@ -184,19 +189,20 @@ public final class Link: @unchecked Sendable {
                 if case .tls = e {
                     log.error("handshake failed: \(e.localizedDescription, privacy: .public)")
                     noteKeyMismatch(e)
-                    finish(.failed(e.localizedDescription)); connection.cancel()
+                    finish(.failed(e.plainSentence(about: peerName))); connection.cancel()
                 } else if unreachableAfter != nil, case .posix = e {
                     if Self.hasNoPath(e) {
                         // An address the sharer published that does not take the connection (refused, no route): the
                         // session has another route, so this one ends now rather than after `waitingTimeout`.
-                        giveUpUnreachable("Could not reach \(connection.endpoint): \(e.plainDescription)", refused: e == .posix(.ECONNREFUSED))
+                        log.error("waiting: \(e.localizedDescription, privacy: .public)")
+                        giveUpUnreachable("\(connection.endpoint) does not reach \(peerName)\(e.statusNote).", refused: e == .posix(.ECONNREFUSED))
                     } else {
                         // The address took the connection and cut it (a reset, an abort): the sharer was reached and
                         // may have failed a handshake on the keys already, so another route would make a second one
                         // there, another wrong code for one typed. The attempt ends with the reason, now, rather than
                         // after Network.framework tried this address again.
                         log.error("waiting: \(e.localizedDescription, privacy: .public)")
-                        giveUpConnecting("Could not reach the other Mac: \(e.plainDescription)")
+                        giveUpConnecting(e.plainSentence(about: peerName))
                     }
                 } else {
                     // Refused, unreachable or Local Network denied: Network.framework retries on its own, which
@@ -205,24 +211,24 @@ public final class Link: @unchecked Sendable {
                     log.error("waiting: \(e.localizedDescription, privacy: .public)")
                     guard state == .connecting, !waitingDeadlineArmed else { return }
                     waitingDeadlineArmed = true
-                    let reason = e.plainDescription
+                    let reason = e.plainSentence(about: peerName)
                     let wait = max(0, min(waitingTimeout, connectDeadline - CACurrentMediaTime() - 0.05))
                     queue.asyncAfter(deadline: .now() + wait) { [weak self] in
-                        self?.giveUpConnecting("Could not reach the other Mac: \(reason)")
+                        self?.giveUpConnecting(reason)
                     }
                 }
             default: break
             }
         }
         connection.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + max(0, connectDeadline - CACurrentMediaTime())) { [weak self, connectTimeout] in
-            self?.giveUpConnecting("No answer from the other Mac within \(connectTimeout.formatted()) seconds.")
+        queue.asyncAfter(deadline: .now() + max(0, connectDeadline - CACurrentMediaTime())) { [weak self, connectTimeout, peerName] in
+            self?.giveUpConnecting("\(peerName) did not answer within \(Self.seconds(connectTimeout)).")
         }
         if let unreachableAfter {
             // No answer at all from a published address: a stale one, or a host that drops the packets.
             queue.asyncAfter(deadline: .now() + unreachableAfter) { [weak self] in
                 guard let self else { return }
-                giveUpUnreachable("No answer from \(connection.endpoint) within \(unreachableAfter.formatted()) seconds.")
+                giveUpUnreachable("No answer from \(connection.endpoint) within \(Self.seconds(unreachableAfter)).")
             }
         }
     }
@@ -347,6 +353,9 @@ public final class Link: @unchecked Sendable {
         finish(.failed(reason)); connection.cancel()
     }
 
+    /// "1 second", "8 seconds", "0.5 seconds": a time as a failure's sentence says it.
+    static func seconds(_ t: Double) -> String { "\(t.formatted()) second\(t == 1 ? "" : "s")" }
+
     /// Test only: whether the connection may use AWDL.
     var includesPeerToPeerForTesting: Bool { connection.parameters.includePeerToPeer }
 
@@ -364,7 +373,7 @@ public final class Link: @unchecked Sendable {
                 do { for m in try decoder.feed(data) { handle(m) } }
                 catch {
                     log.error("protocol error from peer: \(String(describing: error), privacy: .public)")
-                    finish(.failed("protocol: \(error)")); connection.cancel(); return
+                    finish(.failed("\(peerName) sent something Nítido cannot read.")); connection.cancel(); return
                 }
             }
             // `bye` ends a link as `.cancelled` (`handle`, possibly in this same delivery), and so does this side's own
@@ -376,12 +385,12 @@ public final class Link: @unchecked Sendable {
             if let error {
                 guard up else { finish(.cancelled); return }
                 log.error("receive failed: \(error.localizedDescription, privacy: .public)")
-                finish(.failed(error.localizedDescription)); connection.cancel(); return
+                finish(.failed(error.plainSentence(about: peerName))); connection.cancel(); return
             }
             if complete {
                 guard up else { finish(.cancelled); return }
                 log.error("\(self.role.logName, privacy: .public) link: the other side closed the connection without bye")
-                finish(.failed("The other side closed the connection without saying goodbye.")); connection.cancel(); return
+                finish(.failed("\(peerName) closed the connection without saying goodbye.")); connection.cancel(); return
             }
             receiveLoop()
         }
@@ -453,7 +462,7 @@ public final class Link: @unchecked Sendable {
             guard let self else { return }
             if CACurrentMediaTime() - lastPongAt > 3 {
                 log.error("\(self.role.logName, privacy: .public) link heard no pong for 3 seconds; failing it")
-                finish(.failed("No response from the other side for 3 seconds")); connection.cancel(); return
+                finish(.failed("\(peerName) has not answered for 3 seconds.")); connection.cancel(); return
             }
             let tNs = UInt64(CACurrentMediaTime() * 1e9)
             let id = lock.withLock { () -> UInt32 in

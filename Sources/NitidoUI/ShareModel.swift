@@ -774,12 +774,25 @@ public final class ShareModel {
             }
         case .stopped:
             state = .idle
-        case .failed(let message):
+        case .failed(let failure):
+            // What ScreenCaptureKit said goes to the log; the card says what happened in plain words (spec 9 and 12).
+            log.error("the capture failed: \(failure.detail, privacy: .public)")
             // Before the first frame, a missing Screen Recording grant is the likely cause.
-            failureNeedsPermission = state != .capturing && !screenRecordingGranted()
-            state = .failed(message)
+            failureNeedsPermission = failure.reason == .notPermitted || state != .capturing && !screenRecordingGranted()
+            state = .failed(Self.plainMessage(for: failure, needsPermission: failureNeedsPermission))
             captureFailed = true
             endViewers()
+        }
+    }
+
+    /// The failure card's sentence for a capture that failed. With `needsPermission` the card adds the fix and offers
+    /// System Settings (`ShareView`).
+    static func plainMessage(for failure: CaptureFailure, needsPermission: Bool) -> String {
+        if needsPermission { return "Nítido is not allowed to record the screen." }
+        switch failure.reason {
+        case .notPermitted: return "Nítido is not allowed to record the screen."
+        case .stoppedFromMenuBar: return "Sharing was stopped from the menu bar. Press Retry to share again."
+        case .other: return "The screen capture stopped. Press Retry to share again."
         }
     }
 
@@ -826,7 +839,7 @@ public final class ShareModel {
             })
         } catch {
             log.error("could not create the network listener: \(String(describing: error), privacy: .public)")
-            state = .failed("Could not start the network listener: \(error.localizedDescription)")
+            state = .failed("Nítido could not listen for viewers on the local network (error \((error as NSError).code)). Press Retry to try again.")
             endViewers()
         }
     }
@@ -838,10 +851,10 @@ public final class ShareModel {
         switch s {
         case .ready: networkNotice = nil
         case .advertised(let registered): advertisedName = registered
-        case .waiting(let reason): networkNotice = "Viewers cannot reach this Mac: \(reason)"
+        case .waiting(let reason): networkNotice = "Viewers cannot reach this Mac. \(reason)"
         case .failed(let reason):
             networkNotice = nil
-            state = .failed("Could not listen on the local network: \(reason)")
+            state = .failed("Nítido stopped listening for viewers on the local network. \(reason) Press Retry to listen again.")
             endViewers()
         case .stopped: break
         }
