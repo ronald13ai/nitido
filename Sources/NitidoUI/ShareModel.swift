@@ -586,12 +586,13 @@ public final class ShareModel {
     /// After a drop, once the backlog is under one frame's worth: asks for the keyframe that lets the viewer decode
     /// again (`BacklogPolicy.keyframeDue`), within the viewer's half-second limit (`forceKeyframe`). `sendKeyframe`
     /// covers a still source too (it encodes the newest frame again), so the viewer never keeps a damaged or stale
-    /// picture until the content moves. Asks again only if no keyframe went out within a second. With no encoder there
-    /// is nothing to ask: the next frame makes one, and a fresh encoder starts with a keyframe. The log line says
-    /// whether the keyframe goes now or when the limit lets it, as a tester reads it (docs/testing.md item 19): one held
-    /// for up to half a second, logged as sent, looked like the skips the item checks for.
+    /// picture until the content moves. Asks again only if no keyframe went out within a second. With no encoder (the
+    /// codec loop turned off during the skip took it) `sendKeyframe` makes one from the newest frame, and a fresh
+    /// encoder starts with a keyframe: a still source sends no next frame that would. The log line says whether the
+    /// keyframe goes now or when the limit lets it, as a tester reads it (docs/testing.md item 19): one held for up to
+    /// half a second, logged as sent, looked like the skips the item checks for.
     private func keyframeAfterDrain(backlog: Int, now: CFTimeInterval) {
-        guard encoder != nil, backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }
+        guard backlogPolicy.keyframeDue(backlogBytes: backlog, bitsPerSecond: currentBitrate, now: now) else { return }
         let skipped = backlogPolicy.skipped
         let lasted = backlogPolicy.trippedAt.map { (now - $0) * 1000 } ?? 0
         let due: Double?

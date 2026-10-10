@@ -928,6 +928,34 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.state, .enteringCode(sharer))
     }
 
+    /// A skip outlives the encoder when the codec loop is turned off during it (the encoder goes with the loop): the
+    /// keyframe that ends the skip is still asked for once the backlog drains, and a fresh encoder makes it from the
+    /// newest frame, so the viewer of a still source does not keep the picture from before the skip.
+    @MainActor
+    func testTheDrainSendsAKeyframeAfterTheLoopTurnedOffDuringASkip() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        share.loopback = true
+        try await waitUntil("the loop's encoder sends its keyframe") { received.keyframeTimes.count == 2 }
+        let link = try XCTUnwrap(share.link)
+        let delta = try await realDelta()
+
+        let congestion = 70 * share.frameBytes
+        link.addBacklogForTesting(congestion)
+        for _ in 0..<3 { share.handleEncoded(delta) }   // over a second's worth: skipped from the first
+        let sent = received.frames.count
+        share.loopback = false
+        XCTAssertNil(share.encoder, "the encoder goes with the loop")
+        link.addBacklogForTesting(-congestion)
+        try await waitUntil("a keyframe follows the drain", timeout: 3) { received.frames.count > sent }
+        XCTAssertTrue(received.frames[sent].isKey, "the first frame after the skip is a keyframe")
+        viewer.close()
+        await share.stop()
+    }
+
     /// Spec section 8: once frames are dropped for the send backlog, no delta goes out (it would refer to frames the
     /// viewer never got) until a keyframe has, and that keyframe follows as soon as the backlog drains under one frame,
     /// even from a source that went still and sends no frame that could check the drain. A backlog over a second's
