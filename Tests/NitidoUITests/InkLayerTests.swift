@@ -271,8 +271,9 @@ final class InkCanvasLifetimeTests: XCTestCase {
         defer { window.contentView = nil }
         var controller: InkController? = InkController(role: .share)
         let canvas = InkCanvasView(controller: try XCTUnwrap(controller))
+        _ = try XCTUnwrap(controller).beginLocal(point)
         window.contentView?.addSubview(canvas)
-        let tick = try XCTUnwrap(canvas.tickTimer, "a canvas in a window ticks")
+        let tick = try XCTUnwrap(canvas.tickTimer, "a canvas in a window with a stroke ticks")
         weak let gone = controller
         controller = nil
         XCTAssertNil(gone, "the controller went with its share")
@@ -288,6 +289,7 @@ final class InkCanvasLifetimeTests: XCTestCase {
         defer { window.contentView = nil }
         let controller = InkController(role: .share)
         let canvas = InkCanvasView(controller: controller)
+        _ = controller.beginLocal(point)
         XCTAssertNil(canvas.tickTimer, "out of a window there is nothing to fade")
         window.contentView?.addSubview(canvas)
         let first = try XCTUnwrap(canvas.tickTimer)
@@ -335,9 +337,34 @@ final class InkCanvasLifetimeTests: XCTestCase {
         weak let gone = first
         first = nil
         XCTAssertNil(gone)
+        _ = second.beginLocal(point)
         let before = second.ticks
-        try XCTUnwrap(canvas.tickTimer).fire()
+        try XCTUnwrap(canvas.tickTimer, "the new controller's stroke starts the tick").fire()
         XCTAssertEqual(second.ticks, before + 1)
+    }
+
+    /// Spec 11, "nothing animates on every frame except the picture and the sparkline": the 30 Hz tick runs only while
+    /// there are strokes to fade, from the first stroke until the last one is gone.
+    @MainActor
+    func testTheCanvasTicksOnlyWhileItHasStrokes() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let controller = InkController(role: .share)
+        let canvas = InkCanvasView(controller: controller)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        XCTAssertNil(canvas.tickTimer, "in a window, with no ink, nothing ticks")
+        let id = controller.beginLocal(point)
+        let tick = try XCTUnwrap(canvas.tickTimer, "the first stroke starts the tick")
+        controller.endLocal(id)
+        tick.fire()
+        XCTAssertNotNil(canvas.tickTimer, "a stroke still to fade keeps it")
+        controller.undoLocal()
+        tick.fire()
+        XCTAssertNil(canvas.tickTimer, "the last stroke gone, the tick stops")
+        XCTAssertFalse(tick.isValid)
+        _ = controller.beginLocal(point)
+        XCTAssertNotNil(canvas.tickTimer, "the next stroke starts it again")
     }
 
     /// The canvas holds its controller weakly, so the old share and its controller can be gone before SwiftUI hands
@@ -404,6 +431,10 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertEqual(layers.count, 2)
         XCTAssertEqual(layers.first?.fillColor, NSColor(srgbRed: 0xc9 / 255, green: 0xa8 / 255, blue: 0x6a / 255, alpha: 1).cgColor, "gold")
         XCTAssertEqual(layers.last?.fillColor, NSColor(srgbRed: 0xf3 / 255, green: 0xe3 / 255, blue: 0xba / 255, alpha: 1).cgColor, "cream")
+        // A soft dark halo, so the cream and the gold read on a white document.
+        XCTAssertEqual(layers.last?.shadowOpacity, 0.35)
+        XCTAssertEqual(layers.last?.shadowRadius, 1.5)
+        XCTAssertNotNil(layers.last?.shadowPath, "the halo follows the ribbon's path")
         canvas.fade(id: own, duration: 0.6)
         XCTAssertEqual(layers.first?.animation(forKey: "opacity")?.duration, 0.6)
     }

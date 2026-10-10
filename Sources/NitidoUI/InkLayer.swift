@@ -42,8 +42,11 @@ public final class InkController {
     }
     public func undoRemote(id: UInt32) { document.remove(id: id); canvas?.remove(id: id, duration: 0.15) }
     public func clearRemote() { document.clear(); canvas?.removeAll() }
-    /// The peer's link dropped: its strokes still being drawn will get no `.end`, so they end now and fade in four seconds.
-    public func endRemoteStrokes() { document.endRemoteStrokes(now: CACurrentMediaTime()) }
+    /// The peer's link dropped: its strokes still being drawn will get no `.end`, so they end now and fade in four seconds,
+    /// and its cursor, which will not move again, goes.
+    public func endRemoteStrokes() { document.endRemoteStrokes(now: CACurrentMediaTime()); hideRemoteCursor() }
+    /// The peer's cursor goes (its link dropped or closed).
+    public func hideRemoteCursor() { canvas?.hideRemoteCursor() }
     public func remoteCursor(_ c: Cursor, name: String) { canvas?.showRemoteCursor(c, name: name) }
 
     // Commands
@@ -56,11 +59,13 @@ public final class InkController {
 
     /// How many times the canvas ticked this controller. Internal for tests.
     private(set) var ticks = 0
-    /// Called 30 times a second by the canvas: starts fades and drops finished strokes.
+    /// Called 30 times a second by the canvas while it has strokes: starts fades and drops finished strokes.
     func tick() {
         ticks += 1
         let now = CACurrentMediaTime()
-        for s in document.strokes where s.endedAt != nil && document.opacity(of: s, now: now) < 1 { canvas?.fade(id: s.id, duration: document.fadeDuration) }
+        for s in document.strokes where s.endedAt != nil && document.opacity(of: s, now: now) < 1 {
+            canvas?.fade(id: s.id, duration: document.fadeDuration, passive: true)
+        }
         document.prune(now: now)
     }
 }
@@ -78,10 +83,15 @@ public final class InkCanvasView: NSView {
     private var strokeStart: Double = 0
     private var lastPoint: StrokePoint?
     /// The 30 Hz tick that starts fades and drops finished strokes (`InkController.tick`): scheduled while the canvas
-    /// is in a window, invalidated when it leaves it or goes. Internal so a test can fire it.
+    /// is in a window and has strokes to fade, invalidated once the last one is gone, or when the canvas leaves its
+    /// window or goes. Spec 11: nothing but the picture and the sparkline works on every frame, and a session without
+    /// ink is most of them. Internal so a test can fire it.
     private(set) var tickTimer: Timer?
     private let cursorDot = CALayer()
+    /// The peer's name beside its cursor, on a pill of the surface, so it reads on a white document as on a dark one.
+    private let cursorPill = CALayer()
     private let cursorLabel = CATextLayer()
+    private static let cursorFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
     init(controller: InkController) {
         super.init(frame: .zero)
@@ -89,9 +99,14 @@ public final class InkCanvasView: NSView {
         layer?.masksToBounds = true
         cursorDot.backgroundColor = Theme.CanvasColors.gold.cgColor
         cursorDot.cornerRadius = 5; cursorDot.bounds = CGRect(x: 0, y: 0, width: 10, height: 10); cursorDot.opacity = 0
-        cursorLabel.fontSize = 10; cursorLabel.foregroundColor = Theme.CanvasColors.cream.cgColor
-        cursorLabel.contentsScale = 2; cursorLabel.opacity = 0; cursorLabel.alignmentMode = .left
-        layer?.addSublayer(cursorDot); layer?.addSublayer(cursorLabel)
+        cursorDot.shadowColor = NSColor.black.cgColor; cursorDot.shadowOpacity = 0.35; cursorDot.shadowRadius = 1.5; cursorDot.shadowOffset = .zero
+        cursorPill.backgroundColor = Theme.CanvasColors.surface.withAlphaComponent(0.88).cgColor
+        cursorPill.cornerRadius = 6; cursorPill.opacity = 0
+        cursorLabel.font = Self.cursorFont; cursorLabel.fontSize = 11; cursorLabel.foregroundColor = Theme.CanvasColors.cream.cgColor
+        cursorLabel.alignmentMode = .left; cursorLabel.truncationMode = .end
+        cursorPill.addSublayer(cursorLabel)
+        layer?.addSublayer(cursorDot); layer?.addSublayer(cursorPill)
+        applyBackingScale()
         attach(to: controller)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -110,11 +125,29 @@ public final class InkCanvasView: NSView {
         }
         self.controller = controller
         controller.canvas = self
+        if window != nil, hasStrokes { startTicking() }
     }
+
+    /// The controller has strokes the tick must fade or drop.
+    private var hasStrokes: Bool { controller.map { !$0.document.strokes.isEmpty } ?? false }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { stopTicking() } else { startTicking() }
+        applyBackingScale()
+        if window == nil || !hasStrokes { stopTicking() } else { startTicking() }
+    }
+
+    public override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        applyBackingScale()
+    }
+
+    /// The window's scale for every layer that draws text or a path, so they stay sharp on any display.
+    private func applyBackingScale() {
+        let scale = window?.backingScaleFactor ?? 2
+        cursorLabel.contentsScale = scale
+        cursorPill.contentsScale = scale
+        layers.values.forEach { $0.contentsScale = scale }
     }
 
     /// Schedules the tick, unless it is scheduled already. Internal so a test can start it without a window.
@@ -128,8 +161,12 @@ public final class InkCanvasView: NSView {
 
     private func stopTicking() { tickTimer?.invalidate(); tickTimer = nil }
 
-    /// One tick, for the controller if it is still there.
-    private func tick() { controller?.tick() }
+    /// One tick, for the controller if it is still there; the last stroke gone (or the controller), the tick stops
+    /// until the next stroke (`update`).
+    private func tick() {
+        controller?.tick()
+        if !hasStrokes { stopTicking() }
+    }
 
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
@@ -183,13 +220,20 @@ public final class InkCanvasView: NSView {
     // Rendering
     func update(_ stroke: Stroke) {
         let shape = layers[stroke.id] ?? makeLayer(for: stroke)
-        shape.path = ribbon(for: stroke)
+        let path = ribbon(for: stroke)
+        shape.path = path
+        // The halo follows the ribbon; given its path, Core Animation does not work it out from the pixels each frame.
+        shape.shadowPath = path
+        if window != nil { startTicking() }
     }
 
+    /// A ribbon in gold (this side) or cream (the peer), with a soft dark halo so the cream, about 1.2:1 on a white
+    /// document, and the gold, about 2.2:1, still read on the most common picture.
     private func makeLayer(for stroke: Stroke) -> CAShapeLayer {
         let l = CAShapeLayer()
         let color = stroke.isRemote ? Theme.CanvasColors.cream : Theme.CanvasColors.gold
         l.fillColor = color.cgColor; l.strokeColor = color.cgColor; l.lineWidth = 1; l.lineJoin = .round; l.lineCap = .round
+        l.shadowColor = NSColor.black.cgColor; l.shadowOpacity = 0.35; l.shadowRadius = 1.5; l.shadowOffset = .zero
         l.contentsScale = window?.backingScaleFactor ?? 2
         layer?.insertSublayer(l, below: cursorDot)
         layers[stroke.id] = l
@@ -234,11 +278,13 @@ public final class InkCanvasView: NSView {
 
     /// Fades the stroke's layer out and then takes it off. The end of the fade goes by the layer, not the id alone: a
     /// fade can end after `attach` handed the canvas a new controller, whose ids start over, so by then the id can name
-    /// the new share's stroke.
-    func fade(id: UInt32, duration: Double) {
+    /// the new share's stroke. `passive`: the fade four seconds after the last point, which eases in and out so the
+    /// stroke fades away instead of popping off; otherwise (undo, clear) the entrance curve, quick and decided.
+    func fade(id: UInt32, duration: Double, passive: Bool = false) {
         guard !fading.contains(id), let l = layers[id] else { return }
         fading.insert(id)
-        animateOpacity(l, to: 0, duration: duration) { [weak self] in
+        let curve = passive ? CAMediaTimingFunction(name: .easeInEaseOut) : CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+        animateOpacity(l, to: 0, duration: duration, curve: curve) { [weak self] in
             guard let self, layers[id] === l else { return }
             l.removeFromSuperlayer(); layers[id] = nil; fading.remove(id)
         }
@@ -248,26 +294,34 @@ public final class InkCanvasView: NSView {
 
     /// An opacity fade over `duration`, Reduce Motion or not: spec 11 takes away scale and the ring, and keeps fades as
     /// they are.
-    private func animateOpacity(_ l: CALayer, to value: Float, duration: Double, completion: @escaping () -> Void) {
+    private func animateOpacity(_ l: CALayer, to value: Float, duration: Double, curve: CAMediaTimingFunction,
+                                completion: @escaping () -> Void) {
         CATransaction.begin()
         CATransaction.setCompletionBlock(completion)
         let a = CABasicAnimation(keyPath: "opacity")
         a.fromValue = l.presentation()?.opacity ?? l.opacity; a.toValue = value
         a.duration = duration
-        a.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+        a.timingFunction = curve
         l.opacity = value
         l.add(a, forKey: "opacity")
         CATransaction.commit()
     }
 
+    func hideRemoteCursor() { cursorDot.opacity = 0; cursorPill.opacity = 0 }
+
+    /// The peer's cursor: the gold dot, and 12 pt to its right the peer's name on a pill (6 by 3 pt of padding).
     func showRemoteCursor(_ c: Cursor, name: String) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         cursorDot.position = CGPoint(x: CGFloat(c.x) * bounds.width, y: CGFloat(c.y) * bounds.height)
-        cursorLabel.string = name
-        cursorLabel.frame = CGRect(x: cursorDot.position.x + 9, y: cursorDot.position.y - 7, width: 160, height: 14)
+        if cursorLabel.string as? String != name { cursorLabel.string = name }
+        let text = (name as NSString).size(withAttributes: [.font: Self.cursorFont])
+        let width = min(ceil(text.width), 200), height = ceil(text.height)
+        cursorPill.frame = CGRect(x: cursorDot.position.x + 12, y: cursorDot.position.y - (height + 6) / 2,
+                                  width: width + 12, height: height + 6)
+        cursorLabel.frame = CGRect(x: 6, y: 3, width: width, height: height)
         CATransaction.commit()
         let target: Float = c.visible ? 1 : 0
-        if cursorDot.opacity != target { cursorDot.opacity = target; cursorLabel.opacity = target }
+        if cursorDot.opacity != target { cursorDot.opacity = target; cursorPill.opacity = target }
     }
 }
 

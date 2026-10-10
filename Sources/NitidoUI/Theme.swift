@@ -31,16 +31,30 @@ public enum Theme {
         public static let text = Color(hex: Hex.text)
         public static let gold = Color(hex: Hex.gold)
         public static let goldHighlight = Color(hex: Hex.goldHighlight)
+        /// The wordmark's warm white, so the cream mark and the gold credit carry the maison's warmth together.
+        public static let cream = Color(hex: Hex.cream)
         public static let success = Color(hex: Hex.success)
         public static let goldGradient = LinearGradient(
             colors: [gold, goldHighlight], startPoint: .topLeading, endPoint: .bottomTrailing)
+        /// The quiet button's fill and border: text at 5 % and 12 %, so the pair reads on the surface and on glass alike,
+        /// where the hairline token disappears.
+        public static let quietFill = text.opacity(0.05)
+        public static let quietBorder = text.opacity(0.12)
+        /// Laid inside the Liquid Glass over the picture (`GlassCard`), so a panel stays dark over a white document
+        /// whether the window is key or not. Bare, macOS 26 draws the glass of a window that is not key (the sharer's
+        /// usual case: the person works in the window they share) as an opaque grey, #5e5e5f over white, where the gold
+        /// code is 2.9:1. A glass tint does not darken it (`.tint` at 62 % of the background measured #6f6f6f, lighter);
+        /// this backing does: #1c1c21 over white, gold 7.5:1 and secondary text 5.3:1.
+        public static let glassBacking = background.opacity(0.80)
     }
 
     /// The ink canvas's colours (spec 11): this side's strokes and the peer's cursor in gold, the peer's strokes and its
-    /// cursor's name in cream.
+    /// cursor's name in cream, the name on a pill of the surface.
     enum CanvasColors {
         static let gold = NSColor(hex: Hex.gold)
         static let cream = NSColor(hex: Hex.cream)
+        /// The pill under the peer's name.
+        static let surface = NSColor(hex: Hex.surface)
     }
 
     public enum Fonts {
@@ -53,13 +67,24 @@ public enum Theme {
         public static func figures(_ size: CGFloat) -> Font {
             .system(size: size, weight: .medium, design: .monospaced)
         }
+        /// The pairing code, wherever it is shown or typed: SF Pro light with tabular digits, large enough to read
+        /// across a desk. Not SF Mono, whose slashed zero reads technical rather than maison.
+        public static func code(_ size: CGFloat = 34) -> Font {
+            .system(size: size, weight: .light).monospacedDigit()
+        }
     }
 
     public enum Motion {
         /// Strong ease-out for entrances.
         public static let enter = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.22)
         public static let press = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
+        /// Hover answers as fast as a press, on the same curve.
+        public static let hover = press
+        /// Exits are faster than entrances: a plain ease-out over 120 ms.
+        public static let exit = Animation.easeOut(duration: 0.12)
         public static let connect = Animation.spring(duration: 0.5, bounce: 0.2)
+        /// After the connect ring has drawn, it eases down to a hairline: the settle.
+        public static let settle = Animation.easeInOut(duration: 0.6)
         public static let stagger: Double = 0.04
     }
 
