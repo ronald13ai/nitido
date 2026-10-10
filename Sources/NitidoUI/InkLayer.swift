@@ -87,9 +87,9 @@ public final class InkCanvasView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
-        cursorDot.backgroundColor = NSColor(srgbRed: 201 / 255, green: 168 / 255, blue: 106 / 255, alpha: 1).cgColor
+        cursorDot.backgroundColor = Theme.CanvasColors.gold.cgColor
         cursorDot.cornerRadius = 5; cursorDot.bounds = CGRect(x: 0, y: 0, width: 10, height: 10); cursorDot.opacity = 0
-        cursorLabel.fontSize = 10; cursorLabel.foregroundColor = NSColor(srgbRed: 243 / 255, green: 227 / 255, blue: 186 / 255, alpha: 1).cgColor
+        cursorLabel.fontSize = 10; cursorLabel.foregroundColor = Theme.CanvasColors.cream.cgColor
         cursorLabel.contentsScale = 2; cursorLabel.opacity = 0; cursorLabel.alignmentMode = .left
         layer?.addSublayer(cursorDot); layer?.addSublayer(cursorLabel)
         attach(to: controller)
@@ -188,7 +188,7 @@ public final class InkCanvasView: NSView {
 
     private func makeLayer(for stroke: Stroke) -> CAShapeLayer {
         let l = CAShapeLayer()
-        let color = stroke.isRemote ? NSColor(srgbRed: 243 / 255, green: 227 / 255, blue: 186 / 255, alpha: 1) : NSColor(srgbRed: 201 / 255, green: 168 / 255, blue: 106 / 255, alpha: 1)
+        let color = stroke.isRemote ? Theme.CanvasColors.cream : Theme.CanvasColors.gold
         l.fillColor = color.cgColor; l.strokeColor = color.cgColor; l.lineWidth = 1; l.lineJoin = .round; l.lineCap = .round
         l.contentsScale = window?.backingScaleFactor ?? 2
         layer?.insertSublayer(l, below: cursorDot)
@@ -246,13 +246,14 @@ public final class InkCanvasView: NSView {
     func remove(id: UInt32, duration: Double) { fade(id: id, duration: duration) }
     func removeAll() { layers.keys.forEach { remove(id: $0, duration: 0.15) } }
 
+    /// An opacity fade over `duration`, Reduce Motion or not: spec 11 takes away scale and the ring, and keeps fades as
+    /// they are.
     private func animateOpacity(_ l: CALayer, to value: Float, duration: Double, completion: @escaping () -> Void) {
-        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         CATransaction.begin()
         CATransaction.setCompletionBlock(completion)
         let a = CABasicAnimation(keyPath: "opacity")
         a.fromValue = l.presentation()?.opacity ?? l.opacity; a.toValue = value
-        a.duration = reduce ? duration * 0.5 : duration
+        a.duration = duration
         a.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
         l.opacity = value
         l.add(a, forKey: "opacity")

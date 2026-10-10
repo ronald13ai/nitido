@@ -4,23 +4,43 @@ import CoreText
 import os
 
 public enum Theme {
+    /// The palette (spec 11) as sRGB values, defined once: `Colors` for SwiftUI, `CanvasColors` for the layers AppKit
+    /// draws (the ink canvas). Spec 11's soft red has no token: the one destructive confirmation is the system's dialog.
+    enum Hex {
+        static let background: UInt32 = 0x08090c
+        static let surface: UInt32 = 0x0e1015
+        static let hairline: UInt32 = 0x2b2e38
+        static let muted: UInt32 = 0x3a3e4a
+        static let secondaryText: UInt32 = 0x8a8f9c
+        static let text: UInt32 = 0xf2f3f5
+        static let gold: UInt32 = 0xc9a86a
+        static let goldHighlight: UInt32 = 0xd8ba7e
+        static let cream: UInt32 = 0xf3e3ba
+        static let success: UInt32 = 0x62c37e
+    }
+
     public enum Colors {
-        public static let background = Color(hex: 0x08090c)
-        public static let surface = Color(hex: 0x0e1015)
-        public static let hairline = Color(hex: 0x2b2e38)
+        public static let background = Color(hex: Hex.background)
+        public static let surface = Color(hex: Hex.surface)
+        public static let hairline = Color(hex: Hex.hairline)
         /// Hairlines and inactive states only: about 1.9:1 on the background, too faint for text.
-        public static let muted = Color(hex: 0x3a3e4a)
+        public static let muted = Color(hex: Hex.muted)
         /// Secondary text (subtitles, small-caps captions, the strip's labels and units): 6.2:1 on the background,
         /// 5.9:1 on the surface.
-        public static let secondaryText = Color(hex: 0x8a8f9c)
-        public static let text = Color(hex: 0xf2f3f5)
-        public static let gold = Color(hex: 0xc9a86a)
-        public static let goldHighlight = Color(hex: 0xd8ba7e)
-        public static let cream = Color(hex: 0xf3e3ba)
-        public static let success = Color(hex: 0x62c37e)
-        public static let softRed = Color(hex: 0xe08f8f)
+        public static let secondaryText = Color(hex: Hex.secondaryText)
+        public static let text = Color(hex: Hex.text)
+        public static let gold = Color(hex: Hex.gold)
+        public static let goldHighlight = Color(hex: Hex.goldHighlight)
+        public static let success = Color(hex: Hex.success)
         public static let goldGradient = LinearGradient(
             colors: [gold, goldHighlight], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    /// The ink canvas's colours (spec 11): this side's strokes and the peer's cursor in gold, the peer's strokes and its
+    /// cursor's name in cream.
+    enum CanvasColors {
+        static let gold = NSColor(hex: Hex.gold)
+        static let cream = NSColor(hex: Hex.cream)
     }
 
     public enum Fonts {
@@ -38,7 +58,6 @@ public enum Theme {
     public enum Motion {
         /// Strong ease-out for entrances.
         public static let enter = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.22)
-        public static let exit = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.14)
         public static let press = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
         public static let connect = Animation.spring(duration: 0.5, bounce: 0.2)
         public static let stagger: Double = 0.04
@@ -55,6 +74,13 @@ extension Color {
                   green: Double((hex >> 8) & 0xff) / 255,
                   blue: Double(hex & 0xff) / 255,
                   opacity: 1)
+    }
+}
+
+extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(srgbRed: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255,
+                  blue: CGFloat(hex & 0xff) / 255, alpha: 1)
     }
 }
 

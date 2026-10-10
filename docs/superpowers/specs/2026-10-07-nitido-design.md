@@ -137,7 +137,7 @@ A single row under the picture (when the picture is narrower than that row, the 
 
 Apple-grade restraint with the RONAR maison signature. Everything is quiet except the gold.
 
-Colors (from maison.ronar.ai): background `#08090c`, surface `#0e1015`, hairline `#2b2e38`, muted `#3a3e4a`, text `#f2f3f5`, gold `#c9a86a`, gold highlight `#d8ba7e`, cream `#f3e3ba`, success `#62c37e`, soft red `#e08f8f` reserved for destructive confirmation only. Secondary text `#8a8f9c` (subtitles, small-caps captions, the strip's labels and units) keeps 4.5:1 or better on the background and the surface; muted (about 1.9:1) is for hairlines and inactive states only.
+Colors (from maison.ronar.ai): background `#08090c`, surface `#0e1015`, hairline `#2b2e38`, muted `#3a3e4a`, text `#f2f3f5`, gold `#c9a86a`, gold highlight `#d8ba7e`, cream `#f3e3ba`, success `#62c37e`, soft red `#e08f8f` reserved for destructive confirmation only (the one destructive confirmation, Esc's "Stop sharing?" or "Disconnect?", is the system's dialog, so the app defines no token for it). Secondary text `#8a8f9c` (subtitles, small-caps captions, the strip's labels and units) keeps 4.5:1 or better on the background and the surface; muted (about 1.9:1) is for hairlines and inactive states only.
 
 Type: SF Pro for all interface text (native feel on macOS), SF Mono for figures, Cormorant Garamond Italic only for the wordmark, Marcellus for small-caps labels (pairing code caption, section labels). Both fonts bundled under the SIL Open Font License.
 

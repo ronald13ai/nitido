@@ -386,4 +386,25 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertTrue(ribbons(on: canvas).first === stroke)
         XCTAssertEqual(stroke.opacity, 1)
     }
+
+    /// The canvas draws with the theme's palette (spec 11), defined once for SwiftUI and the layers: this side's strokes
+    /// in gold, the peer's in cream. A fade lasts what it is asked for: Reduce Motion takes away scale and the ring, never
+    /// the fades.
+    @MainActor
+    func testTheCanvasDrawsInTheThemesGoldAndCreamAndFadesForTheWholeDuration() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let ink = InkController(role: .share)
+        let canvas = InkCanvasView(controller: ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        let own = ink.beginLocal(point)
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 4, points: [point]))
+        let layers = ribbons(on: canvas)
+        XCTAssertEqual(layers.count, 2)
+        XCTAssertEqual(layers.first?.fillColor, NSColor(srgbRed: 0xc9 / 255, green: 0xa8 / 255, blue: 0x6a / 255, alpha: 1).cgColor, "gold")
+        XCTAssertEqual(layers.last?.fillColor, NSColor(srgbRed: 0xf3 / 255, green: 0xe3 / 255, blue: 0xba / 255, alpha: 1).cgColor, "cream")
+        canvas.fade(id: own, duration: 0.6)
+        XCTAssertEqual(layers.first?.animation(forKey: "opacity")?.duration, 0.6)
+    }
 }

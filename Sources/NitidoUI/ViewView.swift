@@ -71,7 +71,7 @@ public struct ViewView: View {
                 .onSubmit { model.connect() }
                 .shake(trigger: model.wrongCodeCount)
             // One line, always there so nothing below moves: what the code is doing, or that it was wrong. Gold, as
-            // every warning in Nítido is; soft red is for the destructive confirmation only.
+            // every warning in Nítido is.
             Text(connecting ? "Connecting to \(peer.name)…" : model.wrongCodeCount > 0 ? "Wrong code" : " ")
                 .font(.system(size: 12)).foregroundStyle(connecting ? Theme.Colors.text : Theme.Colors.gold)
             HStack(spacing: 12) {
