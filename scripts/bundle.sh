@@ -24,8 +24,22 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/nitido "$APP/Contents/MacOS/nitido"
 cp -R .build/release/nitido_NitidoUI.bundle "$APP/Contents/Resources/"
+# The icon (scripts/make-icon.swift): Icon Composer's AppIcon.icon, compiled into the asset catalog, is the one macOS
+# shows (macOS 26 lays the N on its own glass; actool flattens it for macOS 15); AppIcon.icns stays as the fallback.
+ICON_NAME=""
+if [ -d build/AppIcon.icon ]; then
+  # Absolute paths: given relative ones, actool reports the file missing and still exits 0, so the catalog is checked too.
+  if ! xcrun actool "$PWD/build/AppIcon.icon" --compile "$PWD/$APP/Contents/Resources" --platform macosx \
+      --minimum-deployment-target 15.0 --app-icon AppIcon --output-partial-info-plist "$PWD/build/icon-partial.plist" \
+      > build/actool.log 2>&1 || [ ! -f "$APP/Contents/Resources/Assets.car" ]; then
+    cat build/actool.log >&2
+    echo "bundle.sh: actool could not compile build/AppIcon.icon (the full output is in build/actool.log)." >&2
+    exit 1
+  fi
+  ICON_NAME="  <key>CFBundleIconName</key><string>AppIcon</string>"
+fi
 [ -f build/AppIcon.icns ] && cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -37,6 +51,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+${ICON_NAME}
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key><string>Nítido finds and talks to other Macs running Nítido on your local network.</string>
