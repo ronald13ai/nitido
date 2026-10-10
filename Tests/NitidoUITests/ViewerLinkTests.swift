@@ -1488,6 +1488,32 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// The encoder's frames and failures reach the share through one mailbox, in the order VideoToolbox handed them over
+    /// (`ShareModel.encoderOutput`): deltas go to the viewer in encode order, since one out of order would corrupt its
+    /// picture until the next keyframe. Here they come from another thread, back to back, as VideoToolbox's queue
+    /// calls them.
+    @MainActor
+    func testTheEncodersFramesReachTheViewerInTheOrderTheyWereEncoded() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        let encoder = try XCTUnwrap(share.encoder)
+        let emit = try XCTUnwrap(encoder.onFrame)
+        let key = try await realKeyframe()
+        let start = received.frames.count
+        let deltas = (0..<40).map { k in
+            EncodedFrame(seq: 1_000 + UInt32(k), captureHostTimeNs: 1, isKey: false, data: Data([0, 0, 0, 1, UInt8(k)]),
+                         parameterSets: [], codec: key.codec, width: key.width, height: key.height)
+        }
+        DispatchQueue.global(qos: .userInteractive).async { for f in deltas { emit(f) } }
+        try await waitUntil("every delta reaches the viewer") { received.frames.count >= start + deltas.count }
+        XCTAssertEqual(received.frames.dropFirst(start).map(\.seq), deltas.map(\.seq), "in encode order")
+        viewer.close()
+        await share.stop()
+    }
+
     /// A frame VideoToolbox drops that carried a keyframe request leaves the request standing (`VideoEncoder`). Over a
     /// still source no next frame comes to carry it, so the share encodes the newest frame again: the keyframe still
     /// reaches the viewer, rather than a viewer that took over or drained waiting for the content to move.

@@ -172,6 +172,14 @@ public final class ShareModel {
               pixelWidth: UInt16(min(pixelSize.width, 65535)), pixelHeight: UInt16(min(pixelSize.height, 65535)), scale: Float(scale))
     }
 
+    /// What an encoder hands over: a frame, or a frame it failed, dropped or emitted empty, or a setting it rejected.
+    private enum EncoderOutput: Sendable { case frame(EncodedFrame), error(CodecError) }
+    /// The current session's mailbox for every encoder it makes (`makeEncoder`), read in order by one task on the main
+    /// actor (`beginSession`): VideoToolbox's callbacks come in the order the frames were encoded, and the deltas reach
+    /// the viewer in that order, with each failure or drop between the frames it came between. A task per callback would
+    /// keep that order only as long as the main executor runs same-priority tasks first in, first out.
+    @ObservationIgnored private var encoderOutput: AsyncStream<EncoderOutput>.Continuation?
+
     private let makeSource: @MainActor () -> any CaptureSource
     /// `CGPreflightScreenCaptureAccess` in the app; tests pass a fixed answer.
     private let screenRecordingGranted: @MainActor () -> Bool
@@ -281,9 +289,21 @@ public final class ShareModel {
     private func beginSession() {
         let session = makeSource()
         capture = session
+        // At most two frames are in flight at the encoder, so the mailbox never holds more than a few.
+        let (outputs, output) = AsyncStream<EncoderOutput>.makeStream(bufferingPolicy: .unbounded)
+        encoderOutput?.finish(); encoderOutput = output
         // The loops hold the model weakly: a session's streams never finish on their own, so a strong
         // reference here would keep every model alive for as long as the process runs.
         tasks = [
+            Task { [weak self] in
+                for await event in outputs {
+                    guard let self else { return }
+                    switch event {
+                    case .frame(let f): handleEncoded(f)
+                    case .error(let error): handleCodecError(error)
+                    }
+                }
+            },
             Task { [weak self] in
                 for await event in session.events {
                     guard let self else { return }
@@ -341,6 +361,7 @@ public final class ShareModel {
     private func retireSession() {
         tasks.forEach { $0.cancel() }
         tasks = []
+        encoderOutput?.finish(); encoderOutput = nil
         // The viewer is told `bye` now; a stop returns only once it is out (`stop` waits for `retiring`), so a quit
         // does not cut it off.
         let byeSent = link.map { viewer in Task { await viewer.closeAndWait() } }
@@ -429,12 +450,13 @@ public final class ShareModel {
         do throws(CodecError) {
             let bitsPerSecond = loopback ? Int(qualityMbps * 1_000_000) : BitrateController.initialBitrate(width: width, height: height)
             let e = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: bitsPerSecond)
-            e.onFrame = { [weak self] f in Task { @MainActor in self?.handleEncoded(f) } }
-            // Set before the first encode. It runs on a VideoToolbox queue, or on this thread inside `encode` and
-            // `setBitrate`, and a setting rejected inside `init` arrives the moment it is set: so it hops to the main actor.
-            // The encoder feeds the viewer too, so a frame it fails or drops freezes the viewer's picture as well, and
-            // only this tells the sharer.
-            e.onError = { [weak self] err in Task { @MainActor in self?.handleCodecError(err) } }
+            // Both through the session's mailbox, in the order they come (`encoderOutput`). `onError` is set before the
+            // first encode. It runs on a VideoToolbox queue, or on this thread inside `encode` and `setBitrate`, and a
+            // setting rejected inside `init` arrives the moment it is set. The encoder feeds the viewer too, so a frame
+            // it fails or drops freezes the viewer's picture as well, and only this tells the sharer.
+            let output = encoderOutput
+            e.onFrame = { f in output?.yield(.frame(f)) }
+            e.onError = { err in output?.yield(.error(err)) }
             encoder = e
             currentBitrate = bitsPerSecond; controller = BitrateController(initial: currentBitrate)
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
