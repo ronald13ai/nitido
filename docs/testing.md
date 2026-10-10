@@ -26,7 +26,7 @@ The log lines quoted below are info or error lines. Read them with `log stream -
 8. Share a TextEdit window with 12 pt text, turn on the Codec loop switch and set the slider to 40 Mbps.\
    Wherever you drag the divider, the text on its right looks the same as on its left at 1:1.
 9. Set the slider to 2 Mbps, scroll the text, then stop.\
-   While it scrolls, the strip's bitrate stays close to 2 Mbps and never over 3 (the encoder's hard limit is 1.5 times the slider); once it stops, the text on the right is as sharp as on the left (sharpness while it scrolls is still open: note what you see).
+   While it scrolls, the strip's dropped figure stays near 0 and its bitrate close to 2 Mbps, higher for a second after each keyframe (one every 2 s) but never over 8 (the encoder's hard limit is twice the slider over 2 s); once it stops, the text on the right is as sharp as on the left (sharpness while it scrolls is still open: note what you see).
 10. Still at 2 Mbps, scroll a web page with photos instead.\
     The photos on the right lose detail while the left stays clean.
 11. Share a display larger than the screen that shows it: the whole display holding Nítido on one Mac, or a large display to a smaller viewer.\

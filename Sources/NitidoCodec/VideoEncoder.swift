@@ -166,8 +166,8 @@ public final class VideoEncoder: @unchecked Sendable {
         tune(s, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2)
         tune(s, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_sRGB)
         tune(s, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
-        tune(s, kVTCompressionPropertyKey_MaxKeyFrameInterval, 120 as CFNumber)
-        tune(s, kVTCompressionPropertyKey_ExpectedFrameRate, 60 as CFNumber)
+        tune(s, kVTCompressionPropertyKey_MaxKeyFrameInterval, Self.keyframeInterval as CFNumber)
+        tune(s, kVTCompressionPropertyKey_ExpectedFrameRate, Self.frameRate as CFNumber)
         tune(s, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanFalse)
         setBitrate(bitsPerSecond)
         let status = VTCompressionSessionPrepareToEncodeFrames(s)
@@ -200,8 +200,23 @@ public final class VideoEncoder: @unchecked Sendable {
     public func setBitrate(_ bitsPerSecond: Int) {
         guard let session = lock.withLock({ self.session }) else { return }
         tune(session, kVTCompressionPropertyKey_AverageBitRate, bitsPerSecond as CFNumber)
-        let limits = [bitsPerSecond * 3 / 2 / 8, 1] as CFArray   // bytes per one-second window
-        tune(session, kVTCompressionPropertyKey_DataRateLimits, limits)
+        let limit = Self.dataRateLimit(bitsPerSecond: bitsPerSecond)
+        tune(session, kVTCompressionPropertyKey_DataRateLimits, [limit.bytes, limit.seconds] as CFArray)
+    }
+
+    /// A periodic keyframe every 120 frames, 2 s at the 60 fps the encoder expects.
+    static let keyframeInterval = 120
+    static let frameRate = 60
+
+    /// The hard cap on bytes (`DataRateLimits`, spec 7): twice the average over one keyframe interval, 2 s, a window
+    /// that always holds one periodic keyframe and the deltas that pay for it. At 1.5 times the average per second, a
+    /// page of dense text scrolling at 2400 × 1560 and 3 to 8 Mbps made VideoToolbox drop 5 frames in a row (14 at
+    /// 3 Mbps) about ten frames after each periodic keyframe, 83 ms frozen every 2 s (the soak test of 2026-10-10); left
+    /// unset, the encoder overshoots the rate the controller asks for by up to 46 % at 2 Mbps, which a link cut to that
+    /// rate cannot carry.
+    static func dataRateLimit(bitsPerSecond: Int) -> (bytes: Int, seconds: Int) {
+        let seconds = keyframeInterval / frameRate
+        return (bitsPerSecond * 2 * seconds / 8, seconds)
     }
 
     /// The next frame `encode` takes is forced to be a keyframe. The request stands until a frame carrying it is
