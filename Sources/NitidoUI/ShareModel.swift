@@ -144,6 +144,10 @@ public final class ShareModel {
     /// A viewer just took over (`linkStateChanged`): it has none of the frames the deltas still in the encoder refer to,
     /// so none goes out to it before the keyframe the takeover asked for (`handleEncoded`).
     @ObservationIgnored private var viewerNeedsKeyframe = false
+    /// The encoder's next sequence number when the viewer took over: a delta from it or later was encoded after the
+    /// takeover, so one held back until the keyframe (the half-second limit can hold that keyframe for a viewer that
+    /// comes back) is a frame the viewer never sees, a dropped frame. Nil once the keyframe is out, or with no encoder.
+    @ObservationIgnored private var heldFromSeq: UInt32?
     /// The keyframes forced for the viewer, its own asks and the sharer's (a takeover, the drain after a skip): at most
     /// one per half second (`KeyframeLimiter`, `forceKeyframe`). A new viewer starts it afresh, so its first keyframe
     /// goes at once; a viewer that comes back (the same address) keeps it.
@@ -341,7 +345,7 @@ public final class ShareModel {
         // does not cut it off.
         let byeSent = link.map { viewer in Task { await viewer.closeAndWait() } }
         link = nil; advertiser?.stop(); advertiser = nil; linkTasks.forEach { $0.cancel() }; linkTasks = []; isSending = false; viewerName = nil
-        viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
+        viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false; heldFromSeq = nil
         forgetForcedKeyframes()
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         listeningPort = nil; networkNotice = nil; advertisedName = nil; viewerNotice = nil
@@ -461,12 +465,14 @@ public final class ShareModel {
             let backlog = link.backlogBytesExcludingKeyframes
             let at = backlogClock()
             if !f.isKey, viewerNeedsKeyframe {
-                // A delta encoded before the viewer took over: it never had the frames it refers to. Not a dropped frame,
-                // since this viewer was never going to see it; its keyframe is on the way (`sendKeyframe`).
+                // The viewer has none of the frames this delta refers to, and its keyframe is on the way (`sendKeyframe`).
+                // One encoded before it took over was never going to reach it: not a dropped frame. One encoded after,
+                // while the half-second limit holds the keyframe for a viewer that came back, is a frame it never sees.
+                if let from = heldFromSeq, f.seq >= from { telemetry.recordDrop(at: now) }
             } else if f.isKey {
                 // A keyframe always goes out: it ends a skip (and starts the rule's hold-off) or a takeover's wait.
                 backlogPolicy.keyframeSent(now: at)
-                viewerNeedsKeyframe = false
+                viewerNeedsKeyframe = false; heldFromSeq = nil
                 keyframeSentAt = now
                 send(f, on: link, at: now)
             } else {
@@ -883,6 +889,7 @@ public final class ShareModel {
         linkTasks.forEach { $0.cancel() }; linkTasks = []
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
+        heldFromSeq = nil
         forgetForcedKeyframes()
         advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil; advertisedName = nil; viewerNotice = nil
     }
@@ -931,7 +938,7 @@ public final class ShareModel {
             }
             // A skip, a hold-off or a time over the threshold was the last viewer's link's.
             backlogPolicy = BacklogPolicy()
-            viewerNeedsKeyframe = true
+            viewerNeedsKeyframe = true; heldFromSeq = encoder?.nextSeq
             // A new viewer's first keyframe goes at once; one that comes back shares the limit of its link before.
             let host = l.remoteHost
             if host == nil || host != forcedKeyframesViewer { forgetForcedKeyframes(); forcedKeyframesViewer = host }

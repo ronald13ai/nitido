@@ -1400,6 +1400,37 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A viewer back from the same address within half a second of its last forced keyframe waits for the limit
+    /// (`KeyframeLimiter`), and the deltas encoded meanwhile are held back from it: frames it never sees, so they count
+    /// as dropped, as on the drain path. A delta that was already in the encoder when it took over is not counted: that
+    /// viewer was never going to see it.
+    @MainActor
+    func testDeltasHeldForAReturningViewerDuringTheHalfSecondCountAsDropped() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (first, _, firstReader) = try await rawViewer(of: share)
+        defer { firstReader.cancel() }
+        let key = try await realKeyframe()
+        let encoder = try XCTUnwrap(share.encoder)
+        let inFlight = encoder.nextSeq                    // encoded before the takeover
+
+        let count = share.connectionCount
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let again = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
+        try await waitUntil("the sharer takes the returning viewer over") { share.connectionCount > count }
+        let before = share.droppedFramesTotal
+        func delta(_ seq: UInt32) -> EncodedFrame {
+            EncodedFrame(seq: seq, captureHostTimeNs: 1, isKey: false, data: Data([0, 0, 0, 1, 2]), parameterSets: [],
+                         codec: key.codec, width: key.width, height: key.height)
+        }
+        share.handleEncoded(delta(inFlight &- 1))         // in the encoder at the takeover
+        for k in 0..<3 { share.handleEncoded(delta(encoder.nextSeq &+ UInt32(k))) }   // encoded after it, while the limit holds
+        XCTAssertEqual(share.droppedFramesTotal - before, 3, "the three deltas encoded after the takeover are dropped frames")
+        first.close(); again.close()
+        await share.stop()
+    }
+
     /// A frame VideoToolbox drops that carried a keyframe request leaves the request standing (`VideoEncoder`). Over a
     /// still source no next frame comes to carry it, so the share encodes the newest frame again: the keyframe still
     /// reaches the viewer, rather than a viewer that took over or drained waiting for the content to move.
