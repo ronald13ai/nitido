@@ -29,7 +29,7 @@ Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon
 
 ```bash
 git clone https://github.com/ronald13ai/nitido && cd nitido
-swift test                            # 351 tests
+swift test                            # 354 tests (and 6 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
 swift scripts/make-icon.swift build   # optional: the app icon
 scripts/bundle.sh                     # release build: build/Nítido.app, signed, and its zip
 open build/Nítido.app

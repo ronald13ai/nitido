@@ -79,22 +79,22 @@ Both Macs on this build and the same Wi-Fi: the sharer a MacBook Pro with ProMot
 Items 29 and 30 need two Macs: two copies on one Mac may keep their link when the Wi-Fi goes off. Items 31 to 34 also work with two copies on one Mac.
 
 29. Turn the viewer's Wi-Fi off for 10 s, then on again.\
-    While it is off the viewer shows "Reconnecting… attempt n" over the dimmed picture and the sharer's panel shows the viewer as Reconnecting…; once it is back, the picture recovers with a keyframe and no restart.
+    While it is off the viewer shows "Reconnecting…" over the dimmed picture and the sharer's panel shows the viewer as Reconnecting…, its gold ring gone; once it is back, the picture recovers with a keyframe, the ring draws again, and nothing restarts.
 30. Draw on the viewer and turn its Wi-Fi off before letting go.\
     On the sharer the stroke stops growing and fades about seven seconds after the Wi-Fi goes off (three to notice the drop, four before the fade), instead of staying until ⌘⌫.
 31. With a viewer connected, quit the sharer with ⌘Q; then relaunch it, share, pair again and close the sharer's window.\
     Each time the viewer says "The sharer ended the session."
 32. With a viewer connected, kill the sharer with `kill -9`.\
-    The viewer shows "Reconnecting… attempt n", with growing gaps between attempts.
+    The viewer shows "Reconnecting…", and its log ("link failed (...); retry n in ...s") shows growing gaps between attempts.
 33. Relaunch the sharer and share again.\
     Within a few seconds the viewer says "The code on <Mac> has changed. Enter the new code to connect again.", and the sharer's new code does not change by itself.
 34. With a viewer connected, choose Stop Sharing in the menu bar's screen-sharing menu, then press Retry on the sharer.\
-    The Share window says "Sharing was stopped from the menu bar." and hides the code and the Codec loop switch, the viewer says "<Mac> stopped sharing.", and after Retry the viewer pairs again with the same code.
+    The Share window says "Sharing was stopped from the menu bar." over the dimmed last picture and hides the code, the Codec loop switch and the strip, the viewer says "<Mac> stopped sharing." over its own last frame, and after Retry the viewer pairs again with the same code.
 
 ## Motion
 
 35. Turn on Reduce Motion (System Settings, Accessibility, Display), then pair a viewer, typing a wrong code first, and draw.\
-    No scale, connect ring or shake appears; fades still happen, at full length, and nothing looks broken.
+    No scale, connect ring, turning arc or shake appears; fades still happen, at full length, and nothing looks broken.
 36. Press ⌘H on the Share and View screens.\
     The strip hides and shows at once, with no animation.
 
