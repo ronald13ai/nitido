@@ -1514,6 +1514,40 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// The connections still proving the code are capped: eight in all and three from one address. Each one is a TLS
+    /// handshake the sharer runs against the current code, so without a cap a host could test many guesses at once
+    /// before the sharer counted the ninth failure, and hold the listener with connections that never speak. One over
+    /// the cap is let go at once and counts for nothing; a viewer from another address still pairs.
+    @MainActor
+    func testConnectionsStillProvingTheCodeAreCappedPerAddress() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let probes = (0..<4).map { _ in NWConnection(to: peer(for: share).endpoint, using: .tcp) }
+        defer { probes.forEach { $0.cancel() } }
+        probes.forEach { $0.start(queue: .main) }
+        try await waitUntil("three probes wait to prove the code") { share.unpairedCount == 3 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(share.unpairedCount, 3, "the fourth from the same address is let go at once")
+        XCTAssertEqual(share.wrongCodeAttempts, 0)
+        let (viewer, _, reader) = try await rawViewer(of: share, host: "::1")
+        defer { reader.cancel() }
+        XCTAssertTrue(share.isSending, "a viewer from another address pairs")
+        viewer.close()
+        await share.stop()
+    }
+
+    /// The cap itself: three from one address, eight in all.
+    func testTheCapOnConnectionsProvingTheCode() {
+        XCTAssertTrue(ShareModel.admitsUnpaired(from: "10.0.0.2", among: ["10.0.0.2", "10.0.0.2"]))
+        XCTAssertFalse(ShareModel.admitsUnpaired(from: "10.0.0.2", among: ["10.0.0.2", "10.0.0.2", "10.0.0.2"]))
+        XCTAssertTrue(ShareModel.admitsUnpaired(from: "10.0.0.3", among: ["10.0.0.2", "10.0.0.2", "10.0.0.2"]))
+        let seven = (1...7).map { "10.0.0.\($0)" }
+        XCTAssertTrue(ShareModel.admitsUnpaired(from: "10.0.0.9", among: seven))
+        XCTAssertFalse(ShareModel.admitsUnpaired(from: "10.0.0.9", among: seven + ["10.0.0.8"]))
+        XCTAssertFalse(ShareModel.admitsUnpaired(from: nil, among: [nil, nil, nil]), "no address counts as one")
+    }
+
     /// A frame VideoToolbox drops that carried a keyframe request leaves the request standing (`VideoEncoder`). Over a
     /// still source no next frame comes to carry it, so the share encodes the newest frame again: the keyframe still
     /// reaches the viewer, rather than a viewer that took over or drained waiting for the content to move.

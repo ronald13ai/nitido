@@ -937,6 +937,14 @@ public final class ShareModel {
     /// TLS-PSK handshake has run, so it could be anybody on the network: a port scan, or a viewer with a mistyped
     /// code. It waits here, apart from the viewer, and takes over only once it is ready (`linkStateChanged`).
     private func attach(_ incoming: NitidoLink.Link) {
+        // Each connection is a handshake run against the current code: capped, so a host cannot test many guesses at
+        // once before the ninth failure is counted, nor hold the listener with connections that never speak.
+        let host = incoming.remoteHost
+        guard Self.admitsUnpaired(from: host, among: unpaired.values.map(\.link.remoteHost)) else {
+            log.info("letting go of a connection from \(host ?? "an unknown address", privacy: .public) at once: \(self.unpaired.count, privacy: .public) connections are already proving the code")
+            incoming.close()
+            return
+        }
         // Weak on every state, as every ShareModel loop is (Task 8 fix round 1). Plain tasks rather than a task group:
         // Swift 6 rejects a weak capture of the model in a group's `@MainActor` child task.
         let states = Task { [weak self] in
@@ -946,6 +954,15 @@ public final class ShareModel {
             }
         }
         unpaired[ObjectIdentifier(incoming)] = (incoming, states)
+    }
+
+    /// At most this many connections prove the code at once, and at most `maxUnpairedPerAddress` from one address.
+    nonisolated static let maxUnpaired = 8
+    nonisolated static let maxUnpairedPerAddress = 3
+
+    /// Whether a connection from `host` may start proving the code while connections from `hosts` still do.
+    nonisolated static func admitsUnpaired(from host: String?, among hosts: [String?]) -> Bool {
+        hosts.count < maxUnpaired && hosts.filter { $0 == host }.count < maxUnpairedPerAddress
     }
 
     private func linkStateChanged(_ s: NitidoLink.Link.State, for l: NitidoLink.Link) {
