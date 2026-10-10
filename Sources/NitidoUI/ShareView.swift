@@ -29,11 +29,13 @@ public struct ShareView: View {
                 if model.loopback { DividerHandle(position: $model.dividerPosition).frame(width: pointSize.width, height: pointSize.height) }
                 if model.state == .picking { placeholder("Choose a window or a display in the picker.", note: screenRecordingNote) }
                 if case .failed(let message) = model.state { failure(message) }
-                if model.state == .capturing, model.renderFailure != nil || model.codecNotice != nil || model.networkNotice != nil {
+                if model.state == .capturing,
+                   model.renderFailure != nil || model.codecNotice != nil || model.networkNotice != nil || model.viewerNotice != nil {
                     VStack(alignment: .leading, spacing: 6) {
                         if let reason = model.renderFailure { notice("The picture cannot be drawn: \(reason)") }
                         if let text = model.codecNotice { notice(text) }
                         if let text = model.networkNotice { notice(text) }
+                        if let text = model.viewerNotice { notice(text) }
                     }
                     .padding(14)
                     .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)

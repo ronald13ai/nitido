@@ -286,6 +286,10 @@ public final class ViewModel {
             log.info("the sharer turned the code away")
             wrongCodeCount += 1
             state = .enteringCode(peer)
+        case .incompatible(let version):
+            // Spec 12: both versions named, and the one fix.
+            let theirs = version.map { " (protocol \($0); this Mac speaks \(protocolVersion))" } ?? ""
+            state = .failed("\(peer.keyName) runs a different version of Nítido\(theirs). Update both Macs.", peer)
         case .closed(let reason): state = .failed(reason ?? "Disconnected.", peer)
         }
     }

@@ -10,7 +10,8 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "session")
 /// open. A failure before the first ready state ends the session: as `.codeRejected` when the handshake failed because
 /// the sharer holds another key (the code typed is wrong), as `.closed` with the reason otherwise (refused,
 /// unreachable, Local Network denied, no answer), so a right code is never called wrong. A reconnect the sharer turns
-/// away with another key ends it too: its code changed (a new one every launch, or after three wrong codes).
+/// away with another key ends it too: its code changed (a new one every launch, or after three wrong codes). A sharer
+/// on another protocol version ends it as `.incompatible`, on the first attempt or a reconnect (spec 12).
 ///
 /// Every attempt goes through the peer's routes in order (`Peer.routes(on:)`): two addresses the sharer published, those
 /// on one of this Mac's networks before the others, then the Bonjour service, all within `Link.defaultConnectTimeout`
@@ -25,6 +26,9 @@ public final class LinkSession: @unchecked Sendable {
         /// The first handshake failed because the two sides derived different keys: the sharer listens with another
         /// code than the one typed. Final, like `.closed`: `states` ends after it.
         case codeRejected
+        /// The other side speaks another protocol version: `peerVersion`, or nil when it said so with `bye` before its
+        /// hello came. No retry can pass. Final, like `.closed`.
+        case incompatible(peerVersion: UInt16?)
         case closed(String?)
     }
 
@@ -162,7 +166,12 @@ public final class LinkSession: @unchecked Sendable {
                     lock.withLock { everReady = true; attempt = 0 }
                     stateOut.yield(.ready)
                 case .failed(let reason):
-                    if link.unreachable, index + 1 < routes.count, let next = nextRoute(routes, after: index, deadline: deadline) {
+                    if link.incompatible {
+                        // The other side speaks another protocol version: no retry, and no other route, can pass.
+                        let theirs = link.peerHello.map { "\($0.protocolVersion)" } ?? "unknown"
+                        log.error("\(self.sharerName, privacy: .public) speaks protocol \(theirs, privacy: .public); ending the session")
+                        end(.incompatible(peerVersion: link.peerHello?.protocolVersion))
+                    } else if link.unreachable, index + 1 < routes.count, let next = nextRoute(routes, after: index, deadline: deadline) {
                         log.info("\(String(describing: routes[index]), privacy: .public) did not reach \(self.sharerName, privacy: .public) (\(reason, privacy: .public)); trying the next route")
                         follow(next, routes, route: index + 1, deadline: deadline)
                     } else {
@@ -173,7 +182,10 @@ public final class LinkSession: @unchecked Sendable {
                     // Sharing in the menu bar) while its app stays open: say so, since no retry could pair.
                     let stillOpen = lock.withLock { open }
                     guard stillOpen else { break }
-                    if link.byeReason == ByeReason.sharingStopped {
+                    if link.byeReason == ByeReason.protocolMismatch {
+                        log.error("\(self.sharerName, privacy: .public) said it speaks another protocol version; ending the session")
+                        end(.incompatible(peerVersion: link.peerHello?.protocolVersion))
+                    } else if link.byeReason == ByeReason.sharingStopped {
                         log.info("\(self.sharerName, privacy: .public) stopped sharing")
                         end(.closed("\(sharerName) stopped sharing."))
                     } else {
@@ -231,7 +243,7 @@ public final class LinkSession: @unchecked Sendable {
     /// Seconds to wait before attempt `n` after a drop (1 is the first): 0.5, 1, 2 and 4 s, then every 5 s.
     static func retryDelay(attempt n: Int) -> Double { min(5, 0.5 * pow(2, Double(max(0, n - 1)))) }
 
-    /// Ends the session on its final state (`.codeRejected` or `.closed`).
+    /// Ends the session on its final state (`.codeRejected`, `.incompatible` or `.closed`).
     private func end(_ final: State) {
         lock.lock(); open = false; lock.unlock()
         stateOut.yield(final); stateOut.finish(); messageOut.finish()

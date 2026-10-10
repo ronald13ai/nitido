@@ -118,6 +118,33 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertEqual(tried, 1, "the sharer sees one failed handshake")
     }
 
+    /// Spec 12: a protocol mismatch is final and names both versions. The two sides exchange hellos once TLS is up, and
+    /// a link is ready only when they match, so a sharer on another version is never shown as connected, and the
+    /// session ends as `.incompatible` with the sharer's version instead of reconnecting every 5 s forever.
+    func testASharerOnAnotherProtocolVersionEndsTheSessionAsIncompatible() async throws {
+        let newer = Hello(protocolVersion: protocolVersion + 1, role: .share, name: "Sharer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: newer)
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234",
+                                  sharerName: "Sharer", hello: hello(.view))
+        let seen = await states(of: session, within: 15)
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .incompatible(peerVersion: protocolVersion + 1)])
+    }
+
+    /// The same from the other side: a viewer on a newer version than the sharer ends as `.incompatible` with the
+    /// sharer's version, and neither side reconnects.
+    func testAViewerOnAnotherProtocolVersionEndsTheSessionAsIncompatible() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let newer = Hello(protocolVersion: protocolVersion + 1, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), code: "1234",
+                                  sharerName: "Sharer", hello: newer)
+        let seen = await states(of: session, within: 15)
+        XCTAssertEqual(seen, [.connecting(attempt: 1), .incompatible(peerVersion: protocolVersion)])
+    }
+
     /// A Bonjour service that never resolves: a session that tried it would wait for its deadline, so one that ends at
     /// once went another way.
     private func absentService() -> NWEndpoint {
@@ -141,7 +168,8 @@ final class LinkSessionTests: XCTestCase {
     func testAWrongCodeThroughThePublishedAddressIsRejectedAtOnce() async throws {
         let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
         let port = try await advertiser.start()
-        let attempts = Task { () -> Int in var n = 0; for await _ in advertiser.incoming { n += 1 }; return n }
+        // Held, as the share holds them (`ShareModel.unpaired`): the sharer's end sends the hello a link is ready on.
+        let attempts = Task { () -> Int in var held: [Link] = []; for await l in advertiser.incoming { held.append(l) }; return held.count }
         let sharer = Peer(id: "published", name: "Sharer", keyName: "Sharer", endpoint: absentService(),
                           addresses: [IPv4Address("127.0.0.1")!], port: port)
         let clock = ContinuousClock(), started = clock.now

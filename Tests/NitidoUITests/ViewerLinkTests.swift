@@ -695,6 +695,63 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Spec 12: a viewer on another protocol version that types the right code never takes the seat. Its link is ready
+    /// only once the hellos match, which they never do, so the paired viewer goes on as it was (before, it was told the
+    /// sharer ended its session), and the sharer says over the picture which version the other Mac speaks.
+    @MainActor
+    func testAViewerOnAnotherProtocolVersionDoesNotTakeOverThePairedOne() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let (first, _, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        XCTAssertEqual(share.connectionCount, 1)
+
+        let newer = Hello(protocolVersion: protocolVersion + 1, role: .view, name: "Newer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let incompatible = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: newer)
+        var ended: NitidoLink.Link.State?
+        for await s in incompatible.states { if case .failed = s { ended = s }; if s == .cancelled { ended = s } }
+        XCTAssertNotNil(ended)
+        XCTAssertFalse(incompatible.state == .ready)
+        try await waitUntil("the sharer says a Mac on another version tried to view") { share.viewerNotice != nil }
+        XCTAssertEqual(share.viewerNotice,
+                       "Newer runs a different version of Nítido (protocol \(protocolVersion + 1); this Mac speaks \(protocolVersion)). Update both Macs.")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(share.connectionCount, 1, "the paired viewer keeps the seat")
+        XCTAssertEqual(first.state, .ready, "the paired viewer is not told the session ended")
+        XCTAssertNil(first.byeReason)
+        XCTAssertTrue(share.isSending)
+        XCTAssertEqual(share.unpairedCount, 0)
+        XCTAssertEqual(share.wrongCodeAttempts, 0, "a protocol mismatch is not a wrong code")
+        first.close()
+        await share.stop()
+    }
+
+    /// The viewer's side: a sharer on another protocol version fails the connection on a screen that names both versions,
+    /// and never shows Reconnecting.
+    @MainActor
+    func testASharerOnAnotherProtocolVersionIsNamedOnTheFailureScreen() async throws {
+        let newer = Hello(protocolVersion: protocolVersion + 1, role: .share, name: "Sharer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let advertiser = try Advertiser(name: "Sharer", code: "1234", hello: newer)
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "newer", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+        let viewer = ViewModel()
+        viewer.select(sharer)
+        viewer.code = "1234"
+        viewer.connect()
+        var states: [ViewModel.State] = []
+        try await waitUntil("the viewer fails") {
+            if states.last != viewer.state { states.append(viewer.state) }
+            if case .failed = viewer.state { return true }
+            return false
+        }
+        XCTAssertEqual(viewer.state, .failed("Sharer runs a different version of Nítido (protocol \(protocolVersion + 1); this Mac speaks \(protocolVersion)). Update both Macs.", sharer))
+        XCTAssertFalse(states.contains { if case .reconnecting = $0 { return true }; return false }, "\(states)")
+        XCTAssertFalse(states.contains(.connected), "\(states)")
+        viewer.disconnect()
+    }
+
     /// A decoder that keeps throwing is not a silent freeze on the viewer: each throw counts as a dropped frame, every
     /// third lets the decoder go for a fresh one (made from the setup the keyframe it asked for carries), nine in a row
     /// leave the link up, the tenth ends the link and says so. A frame decoded in between starts the count again.

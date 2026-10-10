@@ -11,8 +11,13 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "link")
 ///
 /// Threading: everything that changes the link runs on `queue` (Network.framework callbacks, the ping timer,
 /// the connect deadlines, `close()` and `abort()`). The values callers read from other threads (`state`, `peerHello`,
-/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`, `unreachable`), the ping bookkeeping and
-/// `closing`, which `close()` sets before it returns, live behind `lock`.
+/// `lastRTTMs`, `clockOffsetNs`, `backlogBytes`, `wasReady`, `keyMismatch`, `incompatible`, `unreachable`), the ping
+/// bookkeeping and `closing`, which `close()` sets before it returns, live behind `lock`.
+///
+/// `.ready` means the two sides can talk: the TLS handshake proved the code, and the other side's `hello` speaks this
+/// side's protocol version. Both sides send their `hello` the moment TLS is up, so this costs one trip across the network.
+/// A `hello` with another version fails the link (`incompatible`) after `bye(protocolMismatch)`, and it never becomes
+/// ready, so a sharer never hands its viewer's seat to a Mac it cannot talk to (spec 12).
 public final class Link: @unchecked Sendable {
     public enum State: Sendable, Equatable { case connecting, ready, failed(String), cancelled }
 
@@ -34,11 +39,15 @@ public final class Link: @unchecked Sendable {
     /// keyframes queued behind it (a viewer asking for one after another) and the frames behind those count, so a
     /// stream of keyframes is a backlog like any other. Read under one lock, so it is never below zero.
     public var backlogBytesExcludingKeyframes: Int { lock.withLock { backlog - (keyframesInFlight.first ?? 0) } }
-    /// True once the link has been ready, even after it ended: it proved the code.
+    /// True once the TLS handshake has completed, even after the link ended: it proved the code, whether or not the
+    /// hellos then matched (`incompatible`).
     public var wasReady: Bool { lock.withLock { _wasReady } }
     /// True when the TLS handshake failed because the two sides derived different keys: with the pre-shared key, the
     /// viewer's code is not the one the sharer listens with ("bad MAC"). Set before `states` reports the failure.
     public var keyMismatch: Bool { lock.withLock { _keyMismatch } }
+    /// True when the other side speaks another protocol version: its `hello` said so (`peerHello` has its version), or
+    /// its `bye` did (`ByeReason.protocolMismatch`). Set before `states` reports the end.
+    public var incompatible: Bool { lock.withLock { _incompatible } }
     /// The reason the other side gave in its `bye` (`ByeReason`), once one came. Set before `states` reports `.cancelled`.
     public var byeReason: UInt8? { lock.withLock { _byeReason } }
     /// True when a link made with `unreachableAfter` failed because its address does not reach the sharer: refused, no
@@ -93,6 +102,7 @@ public final class Link: @unchecked Sendable {
     private var keyframesInFlight: [Int] = []
     private var _wasReady = false
     private var _keyMismatch = false
+    private var _incompatible = false
     private var _byeReason: UInt8?
     private var _unreachable = false
     private var nextPing: UInt32 = 0
@@ -151,10 +161,11 @@ public final class Link: @unchecked Sendable {
             log.debug("\(self.role.logName, privacy: .public) connection with \(String(describing: self.connection.endpoint), privacy: .public): \(String(describing: s), privacy: .public)")
             switch s {
             case .ready:
-                // A deadline or close() may already have ended this link while `.ready` was queued.
+                // A deadline or close() may already have ended this link while `.ready` was queued. TLS is up: the code
+                // is proved. The link is ready once the other side's hello speaks this side's version (`handle`).
                 guard state == .connecting else { return }
-                lock.withLock { _wasReady = true }; lastPongAt = CACurrentMediaTime()
-                setState(.ready); send(.hello(hello)); receiveLoop(); startPings()
+                lock.withLock { _wasReady = true }
+                transmit(.hello(hello)); receiveLoop()
             case .failed(let e):
                 log.error("\(self.role.logName, privacy: .public) connection failed: \(e.localizedDescription, privacy: .public)")
                 noteKeyMismatch(e)
@@ -217,6 +228,12 @@ public final class Link: @unchecked Sendable {
     /// `backlogBytesExcludingKeyframes` leaves the oldest keyframe out of it for that time.
     public func send(_ m: Message) {
         guard isUp else { log.debug("not sent (type \(m.typeCode)): the link is not up"); return }
+        transmit(m)
+    }
+
+    /// Hands `m` to the connection, counted in the backlog until its send completes. `send` once the link is up; the
+    /// `hello` directly, once TLS is up and before the link is ready.
+    private func transmit(_ m: Message) {
         let data = Wire.encode(m)
         let keyframe = if case .videoFrame(let f) = m { f.isKey } else { false }
         lock.withLock { backlog += data.count; if keyframe { keyframesInFlight.append(data.count) } }
@@ -225,7 +242,7 @@ public final class Link: @unchecked Sendable {
             lock.withLock { backlog -= data.count; if keyframe { keyframeSent(data.count) } }
             guard let error else { return }
             // Cut short by the link ending (a bye, `close()`, a failure logged already): no failure of its own.
-            if isUp { log.error("send: \(error.localizedDescription, privacy: .public)") }
+            if isConnected { log.error("send: \(error.localizedDescription, privacy: .public)") }
             else { log.debug("a send ended with the link: \(error.localizedDescription, privacy: .public)") }
         })
     }
@@ -347,9 +364,9 @@ public final class Link: @unchecked Sendable {
             // `bye` ends a link as `.cancelled` (`handle`, possibly in this same delivery), and so does this side's own
             // `close()`; both cancel the connection. What follows either (the end of the stream, a cancelled receive) is
             // that, not a fault, and logs nothing. A stream that ends, or a receive that fails, while the link is still
-            // up is the other side gone (a process that died, a connection cut on the way): a failure, which a viewer's
-            // `LinkSession` answers by reconnecting.
-            let up = isUp
+            // up (ready, or waiting for the other side's hello) is the other side gone (a process that died, a connection
+            // cut on the way): a failure, which a viewer's `LinkSession` answers by reconnecting.
+            let up = isConnected
             if let error {
                 guard up else { finish(.cancelled); return }
                 log.error("receive failed: \(error.localizedDescription, privacy: .public)")
@@ -369,9 +386,22 @@ public final class Link: @unchecked Sendable {
         switch m {
         case .hello(let h):
             lock.withLock { _peerHello = h }
-            if h.protocolVersion != protocolVersion {
-                log.error("protocol version mismatch: peer speaks \(h.protocolVersion), this side \(protocolVersion)")
-                send(.bye(reason: ByeReason.protocolMismatch)); finish(.failed("protocol version \(h.protocolVersion), expected \(protocolVersion)")); connection.cancel(); return
+            // The version this side speaks is the one its own hello carries (`protocolVersion` in the app).
+            guard h.protocolVersion == hello.protocolVersion else {
+                log.error("\(self.role.logName, privacy: .public) link: protocol version mismatch: the other side speaks \(h.protocolVersion, privacy: .public), this side \(self.hello.protocolVersion, privacy: .public)")
+                lock.withLock { _incompatible = true }
+                // `bye(1)` first; the connection is cancelled once it is sent, or after a second, as `close` does.
+                let connection = connection
+                connection.send(content: Wire.encode(.bye(reason: ByeReason.protocolMismatch)),
+                                completion: .contentProcessed { _ in connection.cancel() })
+                queue.asyncAfter(deadline: .now() + 1) { connection.cancel() }
+                finish(.failed("The other Mac speaks protocol \(h.protocolVersion); this one speaks \(hello.protocolVersion)."))
+                return
+            }
+            if state == .connecting {
+                // The first hello, in this side's version: the two sides can talk.
+                lastPongAt = now
+                setState(.ready); startPings()
             }
             messageOut.yield(m)
         case .ping(let id, let t):
@@ -391,7 +421,7 @@ public final class Link: @unchecked Sendable {
                 _clockOffsetNs = offsets.offsetNs(now: now)
             }
         case .bye(let reason):
-            lock.withLock { _byeReason = reason }
+            lock.withLock { _byeReason = reason; if reason == ByeReason.protocolMismatch { _incompatible = true } }
             finish(.cancelled); connection.cancel()
         default:
             messageOut.yield(m)
@@ -433,6 +463,9 @@ public final class Link: @unchecked Sendable {
 
     /// Ready, and not being closed by this side.
     private var isUp: Bool { lock.withLock { _state == .ready && !closing } }
+
+    /// TLS is up (the link is ready, or waits for the other side's hello), and this side is not closing it.
+    private var isConnected: Bool { lock.withLock { (_state == .ready || _state == .connecting && _wasReady) && !closing } }
 
     private func setState(_ s: State) { lock.withLock { _state = s }; stateOut.yield(s) }
 

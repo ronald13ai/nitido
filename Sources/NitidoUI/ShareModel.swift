@@ -112,6 +112,9 @@ public final class ShareModel {
     public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.
     public private(set) var networkNotice: String?
+    /// A Mac on another protocol version proved the code and could not pair (spec 12), shown over the picture until a
+    /// viewer pairs or the share stops.
+    public private(set) var viewerNotice: String?
     /// The name Bonjour registered the share under, which viewers see in their list: `name`, or "Name (2)" when another
     /// Mac on the network has that name. Nil while nothing is advertised.
     public private(set) var advertisedName: String?
@@ -341,7 +344,7 @@ public final class ShareModel {
         viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
         forgetForcedKeyframes()
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
-        listeningPort = nil; networkNotice = nil; advertisedName = nil
+        listeningPort = nil; networkNotice = nil; advertisedName = nil; viewerNotice = nil
         loopback = false
         // A new session never inherits an encoder, whether or not the loop was on: the next frame makes a fresh one.
         dropCodec()
@@ -855,7 +858,7 @@ public final class ShareModel {
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
         isSending = false; viewerName = nil; viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNeedsKeyframe = false
         forgetForcedKeyframes()
-        advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil; advertisedName = nil
+        advertiser?.stop(); advertiser = nil; listeningPort = nil; networkNotice = nil; advertisedName = nil; viewerNotice = nil
     }
 
     /// One viewer at a time, and only one that proved the code. The listener hands a connection over before its
@@ -882,7 +885,7 @@ public final class ShareModel {
             link?.close()
             linkTasks.forEach { $0.cancel() }
             link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
-            viewerReconnecting = false; reconnectGraceToken &+= 1
+            viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNotice = nil
             linkTasks = [
                 pairing.states,
                 Task { [weak self] in
@@ -909,6 +912,9 @@ public final class ShareModel {
             forceKeyframe()
         case .failed(let m):
             if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
+                // It proved the code and speaks another protocol version: said over the picture (spec 12), and the
+                // viewer, if any, goes on as it was. Not a wrong code.
+                if l.incompatible { noteIncompatible(l); return }
                 // A wrong code, or not a viewer at all: the viewer, if any, goes on as it was. A link that was the
                 // viewer's had proved the code, so only these can count as wrong codes, and only those that failed on
                 // the keys, once per attempt (`HandshakeFailures`).
@@ -934,11 +940,23 @@ public final class ShareModel {
                 viewerReconnecting = false; viewerName = nil
             }
         case .cancelled:
-            if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil { return }
+            if unpaired.removeValue(forKey: ObjectIdentifier(l)) != nil {
+                if l.incompatible { noteIncompatible(l) }
+                return
+            }
             guard l === link else { return }
             isSending = false; viewerName = nil; link = nil; viewerReconnecting = false; reconnectGraceToken &+= 1
         case .connecting: break
         }
+    }
+
+    /// A Mac that proved the code but speaks another protocol version (`Link.incompatible`): the share says so over the
+    /// picture, naming both versions, and the Mac never took the seat (a link is ready only once the hellos match).
+    private func noteIncompatible(_ l: NitidoLink.Link) {
+        let who = l.peerHello?.name ?? "A Mac"
+        let theirs = l.peerHello.map { " (protocol \($0.protocolVersion); this Mac speaks \(protocolVersion))" } ?? ""
+        log.info("\(who, privacy: .public) proved the code but speaks another protocol version\(theirs, privacy: .public)")
+        viewerNotice = "\(who) runs a different version of Nítido\(theirs). Update both Macs."
     }
 
     /// Three wrong codes over the share (a viewer pairing in between does not reset the count, spec 13) mean someone may
