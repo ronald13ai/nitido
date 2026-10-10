@@ -133,13 +133,13 @@ So the 4-digit code is for a network you trust (home, office), not public Wi-Fi.
 
 ## Testing
 
-`swift test` runs 351 XCTest tests, with no failures at the current commit (about two and a half minutes on an M5 once built).
+`swift test` runs 354 XCTest tests, with no failures at the current commit (just under three minutes on an M5 once built); 6 more, the render gallery and the soak tests, run only with NITIDO_RENDER=1 or NITIDO_SOAK=1.
 
 - `NitidoCore` (56): wire round-trips and decoding fed byte by byte, telemetry percentiles, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
-- `NitidoCodec` (19): encode and decode loops on real VideoToolbox sessions, keyframe requests, the decoder's skip rule, colour tags and failure reporting.
+- `NitidoCodec` (20): encode and decode loops on real VideoToolbox sessions, keyframe requests, the decoder's skip rule, colour tags, failure reporting and the rate cap on a dense scrolling page.
 - `NitidoLink` (49): real TLS connections on this Mac (frames both ways, a wrong code, the negotiated ciphersuite, reconnects), the TXT record and the order of routes.
 - `NitidoCapture` (16): restarts after a resize or a display mode change, the serial start and stop, and the capture clock.
-- `NitidoUI` (211): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink, window sizes and menus.
+- `NitidoUI` (213): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink, window sizes and menus.
 
 The picker and the Screen Recording grant, what reaches a real screen, and two real Macs are checked by hand: [docs/testing.md](docs/testing.md) is the checklist, one action and one expected result per item.
 
