@@ -10,7 +10,15 @@ if [[ -z "$ID" ]]; then
   echo "bundle.sh: no Apple Development signing identity in the keychain. In Xcode, Settings, Accounts, Manage Certificates, add one (a free Apple ID works), then run this again." >&2
   exit 1
 fi
-swift build -c release --product nitido 2>&1 | tail -1
+# The whole compiler output goes to build/build.log; on a failure it is shown in full, so the error itself is on screen
+# rather than only the count of errors on the last line.
+mkdir -p build
+if ! swift build -c release --product nitido > build/build.log 2>&1; then
+  cat build/build.log >&2
+  echo "bundle.sh: the release build failed (the full output is in build/build.log)." >&2
+  exit 1
+fi
+tail -1 build/build.log
 APP="build/Nítido.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -40,3 +48,8 @@ codesign --force --deep --sign "$ID" "$APP"
 codesign --verify --strict "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority" | head -2
 echo "built $APP"
+# The archive to attach to the GitHub release (the README's "From the zipped app"): ditto keeps the signature intact.
+ZIP="build/Nitido-0.1-macOS15.zip"
+rm -f "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+echo "built $ZIP"
