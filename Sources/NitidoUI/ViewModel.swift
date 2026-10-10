@@ -22,7 +22,9 @@ public final class ViewModel {
 
     public private(set) var state: State = .browsing
     /// The sharers discovery lists now. Internal to set, so a test can say what discovery says.
-    public internal(set) var peers: [Peer] = []
+    public internal(set) var peers: [Peer] = [] { didSet { listed.withLock { [peers] in $0 = peers } } }
+    /// `peers`, for a session's reconnects off the main actor (`LinkSession`'s `currentPeer`).
+    @ObservationIgnored private let listed = OSAllocatedUnfairLock<[Peer]>(initialState: [])
     public var code = ""
     public private(set) var snapshot: Snapshot = .empty
     public private(set) var pixelSize: CGSize = .zero
@@ -196,8 +198,11 @@ public final class ViewModel {
         let hello = Hello(protocolVersion: protocolVersion, role: .view, name: name, pixelWidth: 0, pixelHeight: 0,
                           scale: Float(NSScreen.main?.backingScaleFactor ?? 2))
         // Under the name the sharer keyed its listener with (Task 13; Bonjour may show it renamed, as "Name (2)"), through
-        // the address it published first on this Mac's networks (`Peer.routes(on:)`), as discovery says now.
-        let session = LinkSession(peer: Self.latest(peer, in: peers), code: code, hello: hello)
+        // the address it published first on this Mac's networks (`Peer.routes(on:)`), as discovery says at each attempt:
+        // a sharer that relaunched or rotated its code listens on a new port, and publishes it.
+        let listed = listed
+        let session = LinkSession(peer: Self.latest(peer, in: peers), code: code, hello: hello,
+                                  currentPeer: { Self.latest(peer, in: listed.withLock { $0 }) })
         link?.close()
         link = session
         currentPeer = peer

@@ -8,6 +8,8 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "advertiser")
 /// Listens with the pairing code's key and advertises `_nitido._tcp` on the local network. The service's TXT record
 /// carries the name the key was derived from, the protocol version, and once the listener is ready its port and this
 /// Mac's IPv4 addresses (`txtRecord`), so a viewer can connect to one address instead of the Bonjour service (`Peer`).
+/// The addresses are published again whenever they change (a new DHCP lease, another network), so a viewer never
+/// spends its time on an address this Mac no longer has.
 public final class Advertiser: @unchecked Sendable {
     /// What the listener is doing, so the sharer UI never shows a live share on a dead listener.
     /// `.failed` and `.stopped` are final: `states` and `incoming` both end right after them.
@@ -33,6 +35,10 @@ public final class Advertiser: @unchecked Sendable {
     private let hello: OSAllocatedUnfairLock<Hello>
     /// The name the key was derived from, which the TXT record publishes.
     private let name: String
+    /// Watches this Mac's networks once the listener is ready, so the TXT record follows its addresses (`republish`).
+    private let paths = NWPathMonitor()
+    /// The addresses the TXT record publishes now. Only touched on `queue`.
+    private var published: [IPv4Address] = []
 
     public init(name: String, code: String, hello: Hello, port: UInt16? = nil) throws {
         let params = LinkTLS.parameters(code: code, sharerName: name)
@@ -70,6 +76,7 @@ public final class Advertiser: @unchecked Sendable {
     public func update(hello: Hello) { self.hello.withLock { $0 = hello } }
 
     public func stop() {
+        paths.cancel()
         listener.cancel()
         out.finish()
         stateOut.yield(.stopped); stateOut.finish()
@@ -84,8 +91,13 @@ public final class Advertiser: @unchecked Sendable {
             let shown = addresses.map { "\($0)" }.joined(separator: ", ")
             log.info("advertising port \(port, privacy: .public) on \(shown.isEmpty ? "no IPv4 address" : shown, privacy: .public)")
             // Set again on a later `.ready` (after a wait), which updates the TXT record (`nw_listener_set_advertise_descriptor`).
+            published = addresses
             listener.service = NWListener.Service(name: name, type: Self.serviceType,
                                                   txtRecord: Self.txtRecord(name: name, port: port, addresses: addresses))
+            if paths.pathUpdateHandler == nil {
+                paths.pathUpdateHandler = { [weak self] _ in self?.republish(addresses: Self.localIPv4Addresses()) }
+                paths.start(queue: queue)
+            }
             stateOut.yield(.ready(port: port))
             takePendingStart()?.resume(returning: port)
         case .waiting(let e):
@@ -96,13 +108,34 @@ public final class Advertiser: @unchecked Sendable {
             log.error("listener failed: \(e.localizedDescription, privacy: .public)")
             stateOut.yield(.failed(e.plainDescription)); stateOut.finish()
             out.finish()
+            paths.cancel()
             listener.cancel()
             takePendingStart()?.resume(throwing: e)
         case .cancelled:
+            paths.cancel()
             out.finish()
             stateOut.yield(.stopped); stateOut.finish()
             takePendingStart()?.resume(throwing: CancellationError())
         default: break
+        }
+    }
+
+    /// On `queue`, when this Mac's networks change: publishes `addresses` in the TXT record if they are not the ones it
+    /// carries already, on the port the listener is ready on.
+    func republish(addresses: [IPv4Address]) {
+        guard addresses != published, case .ready = listener.state, let port = listener.port?.rawValue else { return }
+        published = addresses
+        let shown = addresses.map { "\($0)" }.joined(separator: ", ")
+        log.info("this Mac's addresses changed; advertising port \(port, privacy: .public) on \(shown.isEmpty ? "no IPv4 address" : shown, privacy: .public)")
+        listener.service = NWListener.Service(name: name, type: Self.serviceType,
+                                              txtRecord: Self.txtRecord(name: name, port: port, addresses: addresses))
+    }
+
+    /// Test only: `republish` on `queue`, as the path monitor calls it, and the TXT record published afterwards.
+    func republishForTesting(addresses: [IPv4Address]) -> NWTXTRecord? {
+        queue.sync {
+            republish(addresses: addresses)
+            return listener.service?.txtRecordObject
         }
     }
 

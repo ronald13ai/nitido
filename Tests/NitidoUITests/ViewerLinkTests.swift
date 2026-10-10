@@ -887,31 +887,36 @@ final class ViewerLinkTests: XCTestCase {
         viewer.disconnect()
     }
 
-    /// A sharer that died and came back with a new code (every launch makes one) turns the viewer's reconnect away in
-    /// the handshake: the viewer asks for the new code instead of saying Reconnecting forever, which would also cost
-    /// the sharer a failed handshake every few seconds and rotate its code under whoever is typing it.
+    /// A sharer that died and came back with a new code (every launch makes one) on another port, which discovery
+    /// reports, turns the viewer's reconnect away in the handshake: the viewer dials what discovery says now and asks for
+    /// the new code instead of saying Reconnecting forever, which would also cost the sharer a failed handshake every few
+    /// seconds and rotate its code under whoever is typing it.
     @MainActor
     func testAViewerWhoseSharerCameBackWithANewCodeAsksForIt() async throws {
         let sharerHello = Hello(protocolVersion: protocolVersion, role: .share, name: "Sharer", pixelWidth: 320, pixelHeight: 180, scale: 2)
-        let first = try Advertiser(name: "Sharer", code: "1234", hello: sharerHello, port: 47_215)
-        _ = try await first.start()
-        let sharer = Peer(id: "loopback", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: 47_215))
-        let viewer = ViewModel()
+        let first = try Advertiser(name: "Sharer", code: "1234", hello: sharerHello)
+        let firstPort = try await first.start()
+        // As discovery lists it: a Bonjour service that never resolves, and the loopback address on the listener's port.
+        let service = NWEndpoint.service(name: "Absent \(UInt32.random(in: 0..<1_000_000))", type: "_nitido._tcp", domain: "local.", interface: nil)
+        func listed(on port: UInt16) -> Peer {
+            Peer(id: "sharer", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: [IPv4Address("127.0.0.1")!], port: port)
+        }
+        let sharer = listed(on: firstPort)
+        let viewer = ViewModel(startingDiscovery: false)
+        viewer.peers = [sharer]
         viewer.select(sharer)
         viewer.code = "1234"
         viewer.connect()
         var incoming = first.incoming.makeAsyncIterator()
         guard let dropped = await incoming.next() else { return XCTFail("no connection") }
         try await waitUntil("the viewer is connected") { viewer.state == .connected }
-        dropped.abort(); first.stop()                    // the sharer dies without bye...
-        // ...and comes back on the same port with a new code, once the stopped listener has let the port go.
-        var relaunched: Advertiser?
-        for _ in 0..<40 where relaunched == nil {
-            let advertiser = try Advertiser(name: "Sharer", code: "5678", hello: sharerHello, port: 47_215)
-            do { _ = try await advertiser.start(); relaunched = advertiser } catch { advertiser.stop(); try await Task.sleep(for: .milliseconds(25)) }
-        }
-        guard let relaunched else { throw XCTSkip("port 47215 stayed in use") }
-        let attempts = Task { () -> Int in var n = 0; for await _ in relaunched.incoming { n += 1 }; return n }
+        // The sharer dies without bye and comes back with a new code on another port (a new one every launch), which
+        // discovery reports under the same service.
+        let relaunched = try Advertiser(name: "Sharer", code: "5678", hello: sharerHello)
+        let newPort = try await relaunched.start()
+        let attempts = Task { () -> Int in var held: [NitidoLink.Link] = []; for await l in relaunched.incoming { held.append(l) }; return held.count }
+        viewer.peers = [listed(on: newPort)]
+        dropped.abort(); first.stop()
         try await waitUntil("the viewer asks for the new code", timeout: 15) {
             viewer.state == .failed("The code on Sharer has changed. Enter the new code to connect again.", sharer)
         }

@@ -54,6 +54,10 @@ public final class Link: @unchecked Sendable {
     /// route, or no answer at all in that time (`noPathErrors`). A viewer's session then tries its next route
     /// (`LinkSession`); a connection the address took and then cut is not that. Set before `states` reports the failure.
     public var unreachable: Bool { lock.withLock { _unreachable } }
+    /// True when an `unreachable` link failed because its address refused the connection: the host is there and nothing
+    /// listens on that port. On a reconnect that means the sharer's listener has moved or is gone (`LinkSession`); a
+    /// timeout or no route says something else (an address that changed). Set before `states` reports the failure.
+    public var refused: Bool { lock.withLock { _refused } }
     /// The other side's address, without its port or an interface: on the sharer, where a connection came from, which is
     /// what failed handshakes are counted by. Nil when the endpoint is not an address.
     public var remoteHost: String? {
@@ -105,6 +109,7 @@ public final class Link: @unchecked Sendable {
     private var _incompatible = false
     private var _byeReason: UInt8?
     private var _unreachable = false
+    private var _refused = false
     private var nextPing: UInt32 = 0
     /// Ping id to the `tNs` it carried, so a pong only counts when it echoes that exact time.
     private var pingSentAt: [UInt32: UInt64] = [:]
@@ -184,7 +189,7 @@ public final class Link: @unchecked Sendable {
                     if Self.hasNoPath(e) {
                         // An address the sharer published that does not take the connection (refused, no route): the
                         // session has another route, so this one ends now rather than after `waitingTimeout`.
-                        giveUpUnreachable("Could not reach \(connection.endpoint): \(e.plainDescription)")
+                        giveUpUnreachable("Could not reach \(connection.endpoint): \(e.plainDescription)", refused: e == .posix(.ECONNREFUSED))
                     } else {
                         // The address took the connection and cut it (a reset, an abort): the sharer was reached and
                         // may have failed a handshake on the keys already, so another route would make a second one
@@ -330,14 +335,15 @@ public final class Link: @unchecked Sendable {
     /// On `queue`, before the failure is reported: remembers that a published address has no path to the sharer.
     private func noteUnreachable(_ e: NWError) {
         guard unreachableAfter != nil, Self.hasNoPath(e), state == .connecting else { return }
-        lock.withLock { _unreachable = true }
+        lock.withLock { _unreachable = true; _refused = e == .posix(.ECONNREFUSED) }
     }
 
-    /// On `queue`: fails a link to a published address that is still connecting as `unreachable`.
-    private func giveUpUnreachable(_ reason: String) {
+    /// On `queue`: fails a link to a published address that is still connecting as `unreachable` (and `refused`, when
+    /// the address refused the connection).
+    private func giveUpUnreachable(_ reason: String, refused: Bool = false) {
         guard state == .connecting else { return }
         log.error("\(self.role.logName, privacy: .public) link: \(reason, privacy: .public)")
-        lock.withLock { _unreachable = true }
+        lock.withLock { _unreachable = true; _refused = refused }
         finish(.failed(reason)); connection.cancel()
     }
 

@@ -1,22 +1,12 @@
 import XCTest
 import Network
+import os
 import NitidoTestSupport
 @testable import NitidoLink
 @testable import NitidoCore
 
 final class LinkSessionTests: XCTestCase {
     private func hello(_ role: Role) -> Hello { Hello(protocolVersion: protocolVersion, role: role, name: role == .share ? "Sharer" : "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2) }
-
-    /// A sharer listening on `port` again, as soon as the one stopped there has let the port go (its stop and its
-    /// dropped connection finish on their own queues).
-    private func relaunch(code: String, port: UInt16) async throws -> Advertiser {
-        for _ in 0..<40 {
-            let advertiser = try Advertiser(name: "Sharer", code: code, hello: hello(.share), port: port)
-            do { _ = try await advertiser.start(); return advertiser } catch { advertiser.stop() }
-            try await Task.sleep(for: .milliseconds(25))
-        }
-        throw XCTSkip("port \(port) stayed in use")
-    }
 
     func testSessionReconnectsAfterTheSharerDropsWithoutBye() async throws {
         let mark = LogMark()
@@ -87,13 +77,23 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertTrue(reason.hasPrefix("Could not connect to Sharer. Could not reach the other Mac"), reason)
     }
 
-    /// A sharer that dies and comes back with another code (a new one every launch) turns the reconnect away in the
-    /// handshake. The session ends and asks for the code instead of retrying forever: one failed handshake on the
-    /// sharer, not one every few seconds, three of which would rotate its code under whoever is typing it.
+    /// The sharer as discovery describes it: a Bonjour service that never resolves, and the loopback address on `port`.
+    private func discovered(port: UInt16, service: NWEndpoint) -> Peer {
+        Peer(id: "sharer", name: "Sharer", keyName: "Sharer", endpoint: service, addresses: [IPv4Address("127.0.0.1")!], port: port)
+    }
+
+    /// A sharer that dies and comes back with another code (a new one every launch) listens on another port: its listener
+    /// binds a new one on every launch and after every rotation. Discovery publishes it, every reconnect dials what
+    /// discovery says then (`currentPeer`), and the sharer turns the attempt away in the handshake. The session ends and
+    /// asks for the code instead of retrying forever: one failed handshake on the sharer, not one every few seconds,
+    /// three of which would rotate its code under whoever is typing it.
     func testSessionEndsWhenTheSharerComesBackWithAnotherCode() async throws {
-        let first = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share), port: 47_214)
-        _ = try await first.start()
-        let session = LinkSession(endpoint: .hostPort(host: "127.0.0.1", port: 47_214), code: "1234", sharerName: "Sharer", hello: hello(.view))
+        let first = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let firstPort = try await first.start()
+        let service = absentService()
+        let discovery = OSAllocatedUnfairLock(initialState: discovered(port: firstPort, service: service))
+        let session = LinkSession(peer: discovery.withLock { $0 }, code: "1234", hello: hello(.view), connectTimeout: 8,
+                                  waitingTimeout: 5, unreachableAfter: 4, currentPeer: { discovery.withLock { $0 } })
         let watcher = Task { () -> [LinkSession.State] in
             var seen: [LinkSession.State] = []
             for await s in session.states { seen.append(s) }
@@ -105,9 +105,14 @@ final class LinkSessionTests: XCTestCase {
         var incoming = first.incoming.makeAsyncIterator()
         guard let dropped = await incoming.next() else { return XCTFail("no connection") }
         for await s in dropped.states { if s == .ready { break } }
-        dropped.abort(); first.stop()                    // the sharer dies without bye...
-        let relaunched = try await relaunch(code: "5678", port: 47_214)   // ...and comes back with a new code
-        let attempts = Task { () -> Int in var n = 0; for await _ in relaunched.incoming { n += 1 }; return n }
+        // The sharer dies without bye and comes back with a new code on another port, which discovery reports.
+        let relaunched = try Advertiser(name: "Sharer", code: "5678", hello: hello(.share))
+        let newPort = try await relaunched.start()
+        XCTAssertNotEqual(newPort, firstPort)
+        let attempts = Task { () -> Int in var held: [Link] = []; for await l in relaunched.incoming { held.append(l) }; return held.count }
+        let moved = discovered(port: newPort, service: service)
+        discovery.withLock { $0 = moved }
+        dropped.abort(); first.stop()
         let seen = await watcher.value
         deadline.cancel()
         XCTAssertEqual(seen.last, .closed("The code on Sharer has changed. Enter the new code to connect again."))
@@ -116,6 +121,51 @@ final class LinkSessionTests: XCTestCase {
         relaunched.stop()
         let tried = await attempts.value
         XCTAssertEqual(tried, 1, "the sharer sees one failed handshake")
+    }
+
+    /// The same, before discovery has caught up: every published address refuses the reconnect, so the sharer's listener
+    /// has moved (a rotation or a relaunch, and both change the code) or is gone. The session does not dial the Bonjour
+    /// service, which between two Macs fails three or four handshakes per attempt on the sharer and so rotates the code
+    /// under whoever is typing it; it shows Reconnecting and fails no handshake there. Once discovery reports the new
+    /// port, the next attempt reaches the sharer and ends the session after one handshake.
+    func testAReconnectThatEveryPublishedAddressRefusesWaitsForDiscoveryRatherThanTheBonjourService() async throws {
+        let first = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+        let firstPort = try await first.start()
+        let service = absentService()
+        let discovery = OSAllocatedUnfairLock(initialState: discovered(port: firstPort, service: service))
+        let mark = LogMark()
+        let session = LinkSession(peer: discovery.withLock { $0 }, code: "1234", hello: hello(.view), connectTimeout: 8,
+                                  waitingTimeout: 5, unreachableAfter: 4, currentPeer: { discovery.withLock { $0 } })
+        let watcher = Task { () -> [LinkSession.State] in
+            var seen: [LinkSession.State] = []
+            for await s in session.states { seen.append(s) }
+            return seen
+        }
+        let deadline = Task { try await Task.sleep(for: .seconds(20)); session.close() }
+        session.start()
+        var incoming = first.incoming.makeAsyncIterator()
+        guard let dropped = await incoming.next() else { return XCTFail("no connection") }
+        for await s in dropped.states { if s == .ready { break } }
+        let relaunched = try Advertiser(name: "Sharer", code: "5678", hello: hello(.share))
+        let newPort = try await relaunched.start()
+        let attempts = Task { () -> Int in var held: [Link] = []; for await l in relaunched.incoming { held.append(l) }; return held.count }
+        dropped.abort(); first.stop()                    // discovery still says the old port
+
+        try await Task.sleep(for: .seconds(2.5))         // three reconnects at 0.5, 1 and 2 s
+        let tried = try mark.entries("session").map(\.composedMessage).filter { $0.hasPrefix("trying ") }
+        XCTAssertFalse(tried.isEmpty)
+        XCTAssertTrue(tried.allSatisfy { $0 == "trying 127.0.0.1:\(firstPort) (route 1 of 2)" }, "never the Bonjour service: \(tried)")
+        XCTAssertGreaterThanOrEqual(tried.count, 3, "the session goes on reconnecting: \(tried)")
+
+        let moved = discovered(port: newPort, service: service)
+        discovery.withLock { $0 = moved }
+        let seen = await watcher.value
+        deadline.cancel()
+        XCTAssertEqual(seen.last, .closed("The code on Sharer has changed. Enter the new code to connect again."))
+        try await Task.sleep(for: .milliseconds(500))
+        relaunched.stop()
+        let reached = await attempts.value
+        XCTAssertEqual(reached, 1, "one handshake on the sharer, once discovery said where it is")
     }
 
     /// Spec 12: a protocol mismatch is final and names both versions. The two sides exchange hellos once TLS is up, and

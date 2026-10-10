@@ -192,6 +192,24 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertTrue(networks.contains { $0.contains(IPv4Address("127.0.0.1")!) })
     }
 
+    /// A sharer whose addresses change mid-share (a new DHCP lease, another network) publishes the new ones, on the port
+    /// its listener is ready on, so a viewer does not spend up to 4 s on an address this Mac no longer has. The same
+    /// addresses again change nothing.
+    func testAnAdvertiserPublishesItsAddressesAgainWhenTheyChange() async throws {
+        let advertiser = try Advertiser(name: "Moving", code: "1234", hello: hello(.share, name: "Moving"))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let moved = [IPv4Address("192.0.2.7")!, IPv4Address("198.51.100.3")!]
+        let txt = try XCTUnwrap(advertiser.republishForTesting(addresses: moved))
+        XCTAssertEqual(txt["addrs"], "192.0.2.7,198.51.100.3")
+        XCTAssertEqual(txt["port"], "\(port)")
+        XCTAssertEqual(txt["name"], "Moving")
+        let again = try XCTUnwrap(advertiser.republishForTesting(addresses: moved))
+        XCTAssertEqual(again["addrs"], "192.0.2.7,198.51.100.3")
+        let none = try XCTUnwrap(advertiser.republishForTesting(addresses: []))
+        XCTAssertNil(none["addrs"], "no IPv4 address left: none published")
+    }
+
     /// Live: the advertiser publishes the port its listener got and this Mac's addresses, and a browser hands both on.
     func testABrowsedSharerCarriesTheAddressesAndPortItListensOn() async throws {
         let name = "Published \(UInt32.random(in: 0..<1_000_000))"

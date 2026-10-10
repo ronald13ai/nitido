@@ -39,7 +39,8 @@ public final class LinkSession: @unchecked Sendable {
     public var backlogBytes: Int { current?.backlogBytes ?? 0 }
 
     /// Where the sharer may be reached, in the order they are tried; the last one is the Bonjour service
-    /// (`Peer.routes(on:)`). Asked again for every attempt: this Mac's networks may have changed since the last one.
+    /// (`Peer.routes(on:)`). Asked again for every attempt: this Mac's networks, and what discovery says about the
+    /// sharer, may have changed since the last one.
     private let findRoutes: @Sendable () -> [NWEndpoint]
     private let code: String, sharerName: String, hello: Hello
     /// Handed to every `Link` this session makes (`Link.connect`); only tests shorten them.
@@ -58,10 +59,12 @@ public final class LinkSession: @unchecked Sendable {
     /// The longest a published address may go without answering before the next route is tried.
     static let unreachableAfter: Double = 4
 
-    /// To the sharer on `peer`, under the name it keyed its listener with (`Peer.keyName`), through its routes.
-    public convenience init(peer: Peer, code: String, hello: Hello) {
+    /// To the sharer on `peer`, under the name it keyed its listener with (`Peer.keyName`), through its routes as
+    /// `currentPeer` gives them at each attempt: what discovery says about that sharer then (a sharer that relaunched or
+    /// rotated its code listens on a new port, and publishes it), or `peer` itself without one.
+    public convenience init(peer: Peer, code: String, hello: Hello, currentPeer: (@Sendable () -> Peer)? = nil) {
         self.init(peer: peer, code: code, hello: hello, connectTimeout: Link.defaultConnectTimeout, waitingTimeout: 5,
-                  unreachableAfter: Self.unreachableAfter)
+                  unreachableAfter: Self.unreachableAfter, currentPeer: currentPeer)
     }
 
     /// To `endpoint` alone.
@@ -74,15 +77,16 @@ public final class LinkSession: @unchecked Sendable {
     /// is dialled before one on none of them, so a desktop sharer whose Ethernet is on another network does not hold up
     /// its Wi-Fi address, and one on none of them is still dialled, before the Bonjour service.
     convenience init(peer: Peer, code: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double,
-                     subnets: @escaping @Sendable () -> [IPv4Subnet] = IPv4Subnet.local) {
+                     subnets: @escaping @Sendable () -> [IPv4Subnet] = IPv4Subnet.local, currentPeer: (@Sendable () -> Peer)? = nil) {
         self.init(findRoutes: {
             let networks = subnets()
-            let elsewhere = peer.dialled(on: networks).filter { address in !networks.contains { $0.contains(address) } }
+            let current = currentPeer?() ?? peer
+            let elsewhere = current.dialled(on: networks).filter { address in !networks.contains { $0.contains(address) } }
             if !elsewhere.isEmpty {
                 let shown = elsewhere.map { "\($0)" }.joined(separator: ", ")
                 log.info("dialling \(shown, privacy: .public) last of the published addresses: on none of this Mac's networks")
             }
-            return peer.routes(on: networks)
+            return current.routes(on: networks)
         }, code: code, sharerName: peer.keyName, hello: hello, connectTimeout: connectTimeout, waitingTimeout: waitingTimeout,
                   unreachableAfter: unreachableAfter)
     }
@@ -153,7 +157,8 @@ public final class LinkSession: @unchecked Sendable {
     }
 
     /// Forwards `link`'s messages and answers its states; a route that did not reach the sharer hands over to the next.
-    private func follow(_ link: Link, _ routes: [NWEndpoint], route index: Int, deadline: Double) {
+    /// `refusedSoFar`: every published address this attempt tried before `link` refused the connection.
+    private func follow(_ link: Link, _ routes: [NWEndpoint], route index: Int, deadline: Double, refusedSoFar: Bool = true) {
         Task { [weak self] in
             guard let self else { return }
             for await m in link.messages { messageOut.yield(m) }
@@ -171,9 +176,18 @@ public final class LinkSession: @unchecked Sendable {
                         let theirs = link.peerHello.map { "\($0.protocolVersion)" } ?? "unknown"
                         log.error("\(self.sharerName, privacy: .public) speaks protocol \(theirs, privacy: .public); ending the session")
                         end(.incompatible(peerVersion: link.peerHello?.protocolVersion))
+                    } else if link.unreachable, index + 1 < routes.count, refusedSoFar, link.refused, index + 1 == routes.count - 1,
+                              lock.withLock({ everReady }) {
+                        // A reconnect every published address refused: nothing listens on the sharer's port any more. It
+                        // binds a new one only when it relaunches or rotates its code, and both change the code, or it
+                        // is gone. The Bonjour service would make three or four failed handshakes there per attempt
+                        // between two Macs, which rotates its code again under whoever is typing it: the next attempt
+                        // dials what discovery says by then instead (`currentPeer`), and fails no handshake meanwhile.
+                        log.info("every published address of \(self.sharerName, privacy: .public) refused the reconnect: its listener moved (a new code) or is gone; waiting for discovery instead of trying the Bonjour service")
+                        scheduleRetry(after: reason, codeRejected: false)
                     } else if link.unreachable, index + 1 < routes.count, let next = nextRoute(routes, after: index, deadline: deadline) {
                         log.info("\(String(describing: routes[index]), privacy: .public) did not reach \(self.sharerName, privacy: .public) (\(reason, privacy: .public)); trying the next route")
-                        follow(next, routes, route: index + 1, deadline: deadline)
+                        follow(next, routes, route: index + 1, deadline: deadline, refusedSoFar: refusedSoFar && link.refused)
                     } else {
                         scheduleRetry(after: reason, codeRejected: link.keyMismatch)
                     }
