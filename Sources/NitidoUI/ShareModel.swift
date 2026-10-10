@@ -517,7 +517,7 @@ public final class ShareModel {
             // A decode error let the decoder go, and only a keyframe's setup makes the next one. The keyframe asked for
             // may never come out (the encoder failed or dropped it), so every delta until then asks again: it only
             // sets a flag, and the loop never waits for the periodic keyframe, or forever over a still source.
-            if !f.isKey { encoder?.requestKeyframe() }
+            if !f.isKey { askForLoopKeyframe() }
             return
         }
         let result = decoder.submit(f.videoFrame)
@@ -530,10 +530,10 @@ public final class ShareModel {
         if case .fellBehind(let backlog) = result {
             log.info("the codec loop's decoder fell behind with \(backlog.frames, privacy: .public) frames waiting, the oldest for \(backlog.oldestWait * 1000, format: .fixed(precision: 1), privacy: .public) ms; skipping to the next keyframe")
             loopKeyframeAskedAt = now
-            encoder?.requestKeyframe()
+            askForLoopKeyframe()
         } else if loopKeyframeAskedAt.map({ now - $0 >= 1 }) ?? true {
             loopKeyframeAskedAt = now
-            encoder?.requestKeyframe()
+            askForLoopKeyframe()
         }
     }
 
@@ -579,7 +579,7 @@ public final class ShareModel {
         d.invalidate(); decoder = nil; decoderConfig = nil
         decodeFailures += 1
         if decodeFailures >= 10 { failCodec("decoder", message: "Video decoding keeps failing."); return }
-        encoder?.requestKeyframe()
+        askForLoopKeyframe()
     }
 
     /// A frame that goes to the viewer, with its setup when it carries one; the strip's bitrate counts it.
@@ -738,11 +738,25 @@ public final class ShareModel {
     /// from it only over many frames (60 then 2 Mbps gave a 2 Mbps keyframe as sharp as the 60 Mbps one). Once per
     /// rest, not once per slider step. The new encoder is made here, on the main actor (a hardware session and its
     /// prepare): that happens once per rest and only over a still source, where nothing moves that it could delay.
+    ///
+    /// With a viewer connected the encoder feeds it too, and a new encoder's keyframe at every rest would reach it faster
+    /// than its half-second limit allows (spec 8: keyframes fill the link they should clear). Then the running encoder's
+    /// keyframe is forced through that limit instead (`forceKeyframe`): the loop's still picture takes the new rate as
+    /// the encoder's rate control moves to it, within a few frames of the content moving.
     private func qualityRested() {
         guard loopback, state == .capturing, encoder != nil, let raw = latestRaw,
               CACurrentMediaTime() - lastCaptureAt >= Self.stillAfter else { return }
+        guard !isSending else { forceKeyframe(); return }
         makeEncoder(width: CVPixelBufferGetWidth(raw.pixelBuffer), height: CVPixelBufferGetHeight(raw.pixelBuffer))
         encodeNewestAgain()
+    }
+
+    /// The loop's decoder needs a keyframe (it fell behind, failed a frame, or was let go). With a viewer connected the
+    /// encoder feeds it too, so the keyframe goes through the viewer's half-second limit (`forceKeyframe`) like every
+    /// other forced one; with none, it is asked for at once.
+    private func askForLoopKeyframe() {
+        guard isSending else { encoder?.requestKeyframe(); return }
+        forceKeyframe()
     }
 
     private func handle(_ event: CaptureEvent) {

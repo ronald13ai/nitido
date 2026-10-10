@@ -1458,6 +1458,36 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// With the codec loop on and a viewer connected, the encoder feeds both, so the loop's own keyframes reach the
+    /// viewer too: a quality slider moved in short steps over a still source asks for one at every rest, and those go
+    /// through the viewer's half-second limit like every other forced keyframe (spec 8), instead of a new encoder's
+    /// keyframe every 150 ms.
+    @MainActor
+    func testTheLoopsKeyframesKeepTheViewersHalfSecondLimit() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())           // the only frame: the source is still from here on
+        await drain()
+        let (viewer, received, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        share.loopback = true
+        try await waitUntil("the loop's encoder sends its keyframe") { received.keyframeTimes.count == 2 }
+        try await Task.sleep(for: .milliseconds(600))    // past the half second after the pairing keyframe
+        let before = received.keyframeTimes.count
+        for step in 0..<5 {                              // five rests of 200 ms: each one past the 150 ms rest
+            share.qualityMbps = Double(10 + step * 5)
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        try await Task.sleep(for: .milliseconds(600))
+        let times = Array(received.keyframeTimes.dropFirst(before))
+        XCTAssertFalse(times.isEmpty, "a rest still refreshes the picture")
+        for (a, b) in zip(times, times.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(b - a, 0.45, "keyframes half a second apart at least: \(times)")
+        }
+        XCTAssertLessThanOrEqual(times.count, 3, "at most one per half second over 1.6 s: \(times)")
+        viewer.close()
+        await share.stop()
+    }
+
     /// A frame VideoToolbox drops that carried a keyframe request leaves the request standing (`VideoEncoder`). Over a
     /// still source no next frame comes to carry it, so the share encodes the newest frame again: the keyframe still
     /// reaches the viewer, rather than a viewer that took over or drained waiting for the content to move.
