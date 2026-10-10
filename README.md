@@ -1,4 +1,4 @@
-<!-- Before publishing: work through "Before publishing" in docs/testing.md, then run scripts/check-readme.sh until it passes. -->
+<!-- Before publishing: work through "Before publishing" in docs/testing.md; its step 3, scripts/check-readme.sh, must pass before the repository goes public. -->
 
 # Nítido
 
@@ -6,7 +6,7 @@ A native macOS app that shares a window or a screen to another Mac on the local 
 
 ![Viewer with ink from both sides](docs/screenshots/03-viewer.png)
 
-I built it in a week in October 2026, as a prototype of the core loop of a pair-programming tool: capture, encode, send, decode and draw a screen, and measure each step honestly.
+I built it in a week in October 2026, as a prototype of the core loop of a pair-programming tool: capture, encode, send, decode and draw a screen, and measure each step.
 
 ## What it does
 
@@ -53,14 +53,14 @@ Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple 
 | Raw capture to display, full display 3024×1964 px | (fill in) ms | |
 | Codec loop, HEVC at 2 Mbps, same window, text scrolling | codec 10 ms, capture to display 34 ms, real rate 1.5 Mbps, still text sharp | 168b191 |
 | Codec loop, HEVC at 20 Mbps, same window | codec (fill in) ms, capture to display (fill in) ms | |
-| Two Macs, glass to glass (estimated) | 30 to 46 ms | 168b191, cae00eb |
-| Two Macs, RTT | 9 to 10 ms | 168b191, cae00eb |
+| Two Macs, glass to glass (estimated) | 30 to 40 ms | cae00eb |
+| Two Macs, RTT | 9 to 10 ms | 168b191 |
 
 - Capture to display is exact on one Mac: the capture time and the presentation time come from the same host clock.
 - Glass to glass across two Macs is an estimate: it uses an NTP-style clock offset from the fastest pong of the last 10 s, and the strip labels it "(est.)".
-- The spec aimed for capture to display under 20 ms on one Mac; I measured 21 ms raw and 34 ms through the codec loop.
+- The spec aimed for capture to display under 20 ms through the codec loop. I measured 34 ms there at 2 Mbps, and 21 ms without the codec. Glass to glass met its target of under 100 ms.
 - At 2 Mbps the encoder kept to the limit (1.5 Mbps real), and still text stayed sharp. Whether it stays sharp while it scrolls is still to be checked.
-- The two-Mac figures were taken before that evening's fixes (the backlog rule, the keyframe limit, the pacer's cadence check) and are to be re-measured. 46 ms is the morning run, when the Air still showed 33 of 58 fps; 30 to 40 ms is the evening run after the first pacer fix.
+- Both two-Mac runs came before the fixes made after the evening run (the backlog rule, the keyframe limit, the pacer's cadence check) and are to be re-measured. The first run (168b191) read 46 ms while the Air showed 33 of 58 fps (bug 2 below).
 
 ![The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it](docs/screenshots/02-share-loopback.png)
 
@@ -78,7 +78,7 @@ One Swift package: five library targets, a thin app target, and a test-support t
 
 **`NitidoLink`** wraps Network.framework: a Bonjour `_nitido._tcp` listener and browser, and one TLS connection per peer for both directions. A ping every 500 ms gives the RTT and the clock offset; a link with no pong for 3 s fails. The sharer publishes its port and IPv4 addresses in its TXT record, and the viewer dials up to two of them, then the Bonjour service, within 8 s. After a drop the viewer reconnects with backoff (0.5, 1, 2 and 4 s, then every 5 s), each time to where discovery says the sharer is now. Both sides say hello with their protocol version first, and a mismatch ends the session with a message naming both versions.
 
-**`NitidoUI`** holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` keeps only the newest frame and as few drawables in flight as the display needs, because each drawable queued ahead of a frame delays it by a refresh ([`FramePacer.swift`](Sources/NitidoUI/FramePacer.swift) explains how many). `InkOverlay` draws strokes as variable-width ribbons over the video, and `TelemetryStrip` reads a snapshot four times a second. Drawing the held frame again after a resize never counts as a displayed frame, so the fps and latency figures stay honest.
+**`NitidoUI`** holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` keeps only the newest frame and as few drawables in flight as the display needs, because each drawable queued ahead of a frame delays it by a refresh ([`FramePacer.swift`](Sources/NitidoUI/FramePacer.swift) explains how many). `InkOverlay` draws strokes as variable-width ribbons over the video, and `TelemetryStrip` reads a snapshot four times a second. Drawing the held frame again after a resize never counts as a displayed frame, so the fps and latency figures count only frames that reached the screen.
 
 **`nitido`** is the app: one window, the menus, and a quit that tells the other Mac `bye` before the process ends (2 s at most). It has no logic of its own.
 
@@ -105,8 +105,8 @@ On 2026-10-09 I ran Nítido on two Macs for the first time: the MacBook Pro shar
    Fix: the viewer dials the addresses the sharer publishes, so the TLS failure comes back at once, and the sharer counts failures from one address less than 1 s apart as one attempt. That evening the viewer said "Wrong code" at once.
 2. **The 60 Hz viewer showed 33 of 58 fps.** With one drawable in flight a frame costs two refreshes, so a 60 Hz panel showed every other frame; the ProMotion sharer starved the same way, because its screen said 120 Hz while presenting at 60.\
    Fix: two drawables in flight on a panel slower than twice the capture rate, a check of the real presentation cadence every second, and only the newest decoded frame waiting for the main thread. That evening the Air logged no more "fell behind" lines and showed glass to glass 30 to 40 ms.
-3. **Colours were slightly off on the viewer.** The encoder set no colour tags, so the decoder read the capture's sRGB values as BT.709 and came out up to 12 code values off.\
-   Fix: the stream is tagged BT.709 primaries and matrix with the sRGB transfer function. A test now holds flat colours within 2 code values; the Digital Color Meter check between two Macs is still to do.
+3. **Colours were slightly off on the viewer.** The encoder set no colour tags, so the decoder read the capture's sRGB values as BT.709.\
+   Fix: the stream is tagged BT.709 primaries and matrix with the sRGB transfer function. A test on one Mac went from up to 12 code values off to within 2. On the evening build, which had the tags, the Air's colours still looked slightly different by eye; the Digital Color Meter check ([docs/testing.md](docs/testing.md) item 27) will tell the codec apart from the two displays' profiles.
 4. **The backlog rule turned into a keyframe slideshow.** While a long window scrolled, the sharer showed 58 fps and the viewer 10 to 48: one Wi-Fi burst tripped a skip, and the keyframe that ended it tripped the next, every 50 to 100 ms.\
    Fix: `BacklogPolicy` judges the backlog in time (150 ms worth for 100 ms, or 1 s worth at once) without the keyframe on its way, and `KeyframeLimiter` forces at most one keyframe per half second per viewer.
 5. **VideoToolbox's drops failed the share.** Under that keyframe storm the realtime encoder dropped ten frames in a row, and the app counted each as a failure: "Video encoding keeps failing."\
@@ -114,7 +114,7 @@ On 2026-10-09 I ran Nítido on two Macs for the first time: the MacBook Pro shar
 6. **The app crashed on a second share.** After one share stopped and another started, SwiftUI kept the ink canvas for the new share, but the canvas still held the old share's controller `unowned`, and its 30 Hz timer called into it after it was freed.\
    Fix: the canvas holds its controller weakly, follows the one it is handed, and ticks only while it is in a window. Tests reproduce the switch.
 
-Fixes 4, 5 and 6, and the ProMotion half of 2, came after that session. Each has tests; a second two-Mac run (the Two Macs and Failure drills sections of [docs/testing.md](docs/testing.md)) checks them on the hardware.
+Fixes 4, 5 and 6, and the ProMotion half of 2, came after that session. Each has tests, but none has run on the Macs yet: items 16 and 24 to 26 of [docs/testing.md](docs/testing.md) check them.
 
 ## Security
 
@@ -150,8 +150,8 @@ The picker and the Screen Recording grant, what reaches a real screen, and two r
 - The 4-digit code is safe only on a trusted network (see Security). Next: SPAKE2 or a secret shared by QR code.
 - The build is signed for development, not notarized.
 - No audio, no remote control, no recording.
-- Next for the picture: a region-diff pass so the unchanged parts of a frame cost no bits, and AV1 where the hardware encodes it.
-- Still to check by hand: text at 2 Mbps while it scrolls, colours between two Macs with Digital Color Meter, and the evening fixes on two Macs.
+- Next for the picture: coding text regions at higher quality than photos, so small text stays sharp at low bitrates, and AV1 where the hardware encodes it.
+- Still to check by hand: text at 2 Mbps while it scrolls, colours between two Macs with Digital Color Meter, and, on the Macs, fixes 4, 5 and 6 and the ProMotion half of 2.
 
 ## License
 
