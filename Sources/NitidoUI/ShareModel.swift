@@ -919,6 +919,9 @@ public final class ShareModel {
             linkTasks.forEach { $0.cancel() }
             link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
             viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNotice = nil
+            // The hello the link sent was the listener's when the connection came in: a resize since (its handshake can
+            // straddle one) would leave this viewer with the old size and scale. The current ones are said again.
+            l.send(.hello(hello))
             linkTasks = [
                 pairing.states,
                 Task { [weak self] in

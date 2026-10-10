@@ -1431,6 +1431,33 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Spec 12: a resize sends a hello with the new size and scale. A connection the listener took before a resize is
+    /// made with the hello of that moment, and may finish its handshake after it: at the takeover the sharer says its
+    /// current size and scale again, so that viewer does not keep the old ones until the next resize. Here the listener
+    /// is handed the old hello back, as a connection made before the resize would carry it.
+    @MainActor
+    func testAViewerWhoseHandshakeStraddlesAResizeHearsTheNewSize() async throws {
+        let (share, source) = try await listeningShare()
+        let advertiser = try XCTUnwrap(share.advertiser)
+        source.emit(.started(pixelWidth: 640, pixelHeight: 360, scale: 1))
+        await drain()
+        advertiser.update(hello: Hello(protocolVersion: protocolVersion, role: .share, name: share.name,
+                                       pixelWidth: 320, pixelHeight: 180, scale: 2))
+        let hello = Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer", pixelWidth: 0, pixelHeight: 0, scale: 2)
+        let viewer = NitidoLink.Link.connect(to: peer(for: share).endpoint, code: share.code, sharerName: share.name, hello: hello)
+        let received = ReceivedMessages()
+        let reader = Task { @MainActor in for await m in viewer.messages { received.messages.append(m) } }
+        defer { reader.cancel() }
+        try await waitUntil("the viewer hears the current size") {
+            received.messages.contains { if case .hello(let h) = $0 { return h.pixelWidth == 640 }; return false }
+        }
+        let last = received.messages.last { if case .hello = $0 { return true }; return false }
+        guard case .hello(let h)? = last else { return XCTFail("no hello") }
+        XCTAssertEqual(h.pixelWidth, 640); XCTAssertEqual(h.pixelHeight, 360); XCTAssertEqual(h.scale, 1)
+        viewer.close()
+        await share.stop()
+    }
+
     /// A frame VideoToolbox drops that carried a keyframe request leaves the request standing (`VideoEncoder`). Over a
     /// still source no next frame comes to carry it, so the share encodes the newest frame again: the keyframe still
     /// reaches the viewer, rather than a viewer that took over or drained waiting for the content to move.
