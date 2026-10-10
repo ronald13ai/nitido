@@ -83,6 +83,12 @@ public struct InkDocument: Sendable, Equatable {
         strokes[i].endedAt = now
     }
 
+    /// Ends every remote stroke still being drawn: its peer's link dropped, and the `.end` it would have sent was lost, so
+    /// it fades from `now` like any other (`fadeAfter`).
+    public mutating func endRemoteStrokes(now: Double) {
+        for i in strokes.indices where strokes[i].isRemote && strokes[i].endedAt == nil { strokes[i].endedAt = now }
+    }
+
     @discardableResult
     public mutating func undoLastLocal() -> UInt32? {
         guard let i = strokes.lastIndex(where: { !$0.isRemote }) else { return nil }

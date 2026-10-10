@@ -286,7 +286,10 @@ public final class ViewModel {
             state = .connected; connectionCount += 1; decodeFailures = 0; lastSeq = nil; reportedClockMismatch = false
             awaitingKeyframe = true
             askForKeyframe()
-        case .reconnecting(let attempt, _): state = .reconnecting(peer, attempt: attempt)
+        case .reconnecting(let attempt, _):
+            // A stroke the sharer was drawing gets no `.end` over the dropped link: it fades like an ended one.
+            ink.endRemoteStrokes()
+            state = .reconnecting(peer, attempt: attempt)
         case .codeRejected:
             // The handshake failed on the keys: the code is wrong. Back to the code for that Mac, where the field
             // shakes and says "Wrong code", instead of a failure screen. Every other way a first attempt fails
@@ -298,7 +301,7 @@ public final class ViewModel {
             // Spec 12: both versions named, and the one fix.
             let theirs = version.map { " (protocol \($0); this Mac speaks \(protocolVersion))" } ?? ""
             state = .failed("\(peer.keyName) runs a different version of Nítido\(theirs). Update both Macs.", peer)
-        case .closed(let reason): state = .failed(reason ?? "Disconnected.", peer)
+        case .closed(let reason): ink.endRemoteStrokes(); state = .failed(reason ?? "Disconnected.", peer)
         }
     }
 

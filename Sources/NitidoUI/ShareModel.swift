@@ -929,7 +929,7 @@ public final class ShareModel {
     /// staying connected over a frozen picture, and the listener stops, so nobody new pairs with a share that sends
     /// nothing. Retry listens again (`start`, then `.started`, then `startAdvertising`).
     private func endViewers() {
-        if link != nil { log.info("the share stopped sending; ending the viewer's link and the listener") }
+        if link != nil { log.info("the share stopped sending; ending the viewer's link and the listener"); ink.endRemoteStrokes() }
         link?.close(reason: ByeReason.sharingStopped); link = nil
         linkTasks.forEach { $0.cancel() }; linkTasks = []
         unpaired.values.forEach { $0.link.close(); $0.states.cancel() }; unpaired = [:]
@@ -977,6 +977,7 @@ public final class ShareModel {
             // The handshake proved the code: this viewer takes over from the current one, which is told the sharer
             // ended its session. Its messages are heard from now on (they wait in the link's stream until then).
             guard let pairing = unpaired.removeValue(forKey: ObjectIdentifier(l)) else { return }
+            if link != nil { ink.endRemoteStrokes() }   // the viewer it replaces sends no more points
             link?.close()
             linkTasks.forEach { $0.cancel() }
             link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
@@ -1026,8 +1027,10 @@ public final class ShareModel {
                 return
             }
             guard l === link else { return }
-            // Gone without `bye`: a viewer reconnects by itself (`LinkSession`), so it is shown as reconnecting.
+            // Gone without `bye`: a viewer reconnects by itself (`LinkSession`), so it is shown as reconnecting. A stroke
+            // it was drawing gets no `.end` now: it fades like an ended one.
             isSending = false; link = nil; log.info("viewer link failed: \(m, privacy: .public)")
+            ink.endRemoteStrokes()
             viewerReconnecting = true
             reconnectGraceToken &+= 1
             let token = reconnectGraceToken, grace = reconnectGrace
@@ -1044,6 +1047,7 @@ public final class ShareModel {
             }
             guard l === link else { return }
             isSending = false; viewerName = nil; link = nil; viewerReconnecting = false; reconnectGraceToken &+= 1
+            ink.endRemoteStrokes()
         case .connecting: break
         }
     }

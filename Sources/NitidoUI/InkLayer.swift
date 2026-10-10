@@ -42,6 +42,8 @@ public final class InkController {
     }
     public func undoRemote(id: UInt32) { document.remove(id: id); canvas?.remove(id: id, duration: 0.15) }
     public func clearRemote() { document.clear(); canvas?.removeAll() }
+    /// The peer's link dropped: its strokes still being drawn will get no `.end`, so they end now and fade in four seconds.
+    public func endRemoteStrokes() { document.endRemoteStrokes(now: CACurrentMediaTime()) }
     public func remoteCursor(_ c: Cursor, name: String) { canvas?.showRemoteCursor(c, name: name) }
 
     // Commands

@@ -57,6 +57,19 @@ final class InkTests: XCTestCase {
         XCTAssertTrue(doc.strokes.isEmpty)
     }
 
+    /// A peer's stroke whose end never comes (its link dropped mid-stroke, so the `.end` was lost) is ended when the link
+    /// drops, and fades four seconds later like any other; the strokes already ended, and this side's own, keep theirs.
+    func testRemoteStrokesStillBeingDrawnEndWhenTheirLinkDrops() {
+        var doc = InkDocument()
+        doc.apply(StrokeMessage(strokeId: 1, phase: .begin, color: .cream, baseWidth: 3, points: [pt(0, 0)]), isRemote: true, now: 10)
+        doc.apply(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 3, points: [pt(0, 0)]), isRemote: true, now: 10)
+        doc.apply(StrokeMessage(strokeId: 3, phase: .end, color: .cream, baseWidth: 3, points: []), isRemote: true, now: 11)
+        doc.apply(StrokeMessage(strokeId: 2, phase: .begin, color: .gold, baseWidth: 3, points: [pt(0, 0)]), isRemote: false, now: 10)
+        doc.endRemoteStrokes(now: 20)
+        XCTAssertEqual(doc.strokes.map(\.endedAt), [20, 11, nil])
+        XCTAssertEqual(doc.opacity(of: doc.strokes[0], now: 24.3), 0.5, accuracy: 0.001)
+    }
+
     func testClearRemovesEverything() {
         var doc = InkDocument()
         doc.apply(StrokeMessage(strokeId: 2, phase: .begin, color: .gold, baseWidth: 3, points: [pt(0, 0)]), isRemote: false, now: 0)

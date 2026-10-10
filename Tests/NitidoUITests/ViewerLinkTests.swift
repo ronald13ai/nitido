@@ -1856,6 +1856,24 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A viewer's link that drops mid-stroke loses the stroke's `.end`: the sharer ends that stroke when the link drops,
+    /// so it fades after four seconds instead of staying on the picture until ⌘⌫.
+    @MainActor
+    func testAStrokeWhoseLinkDropsMidwayEndsOnTheSharer() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let (viewer, _, reader) = try await rawViewer(of: share)
+        defer { reader.cancel() }
+        viewer.send(.stroke(StrokeMessage(strokeId: 7, phase: .begin, color: .cream, baseWidth: 4,
+                                          points: [StrokePoint(x: 0.5, y: 0.5, pressure: 1, tMs: 0)])))
+        try await waitUntil("the stroke reaches the sharer") { share.ink.document.strokes.contains { $0.id == 7 } }
+        XCTAssertNil(share.ink.document.strokes.first { $0.id == 7 }?.endedAt)
+        viewer.abort()                                   // a cut network: no `.end`, no bye
+        try await waitUntil("the sharer ends the stroke") { share.ink.document.strokes.first { $0.id == 7 }?.endedAt != nil }
+        await share.stop()
+    }
+
     /// Three wrong codes mean someone is guessing: the sharer shows a new code and listens with its key, the old code no
     /// longer pairs, and the viewer who had paired goes on as it was. One attempt that fails the handshake several times
     /// in a row from one address (on two Macs, most likely Network.framework trying each address of the sharer) is one
