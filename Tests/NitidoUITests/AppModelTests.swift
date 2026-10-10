@@ -56,4 +56,25 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: true).question, "Stop sharing and disconnect?")
         XCTAssertEqual(AppModel.stopWording(sharing: true, viewing: true).action, "Stop and Disconnect")
     }
+
+    /// The menu offers what the screen shown can do (spec 9): the Esc item says what it stops, and Undo Stroke, Clear
+    /// Ink and Codec Loop are disabled where they would do nothing, or act on a share running behind the View screen.
+    func testTheMenuOffersWhatTheScreenShownCanDo() {
+        let welcome = AppModel.menu(screen: .welcome, sharing: false, viewing: false)
+        XCTAssertEqual(welcome, .init(stopTitle: "Stop", canStop: false, canToggleTelemetry: false, canInk: false, canToggleLoop: false))
+        let picking = AppModel.menu(screen: .share, sharing: false, viewing: false)
+        XCTAssertEqual(picking, .init(stopTitle: "Stop Sharing", canStop: true, canToggleTelemetry: true, canInk: false, canToggleLoop: false))
+        let sharing = AppModel.menu(screen: .share, sharing: true, viewing: false)
+        XCTAssertEqual(sharing, .init(stopTitle: "Stop Sharing", canStop: true, canToggleTelemetry: true, canInk: true, canToggleLoop: true))
+        let list = AppModel.menu(screen: .view, sharing: false, viewing: false)
+        XCTAssertEqual(list, .init(stopTitle: "Back", canStop: true, canToggleTelemetry: true, canInk: false, canToggleLoop: false))
+        let viewing = AppModel.menu(screen: .view, sharing: false, viewing: true)
+        XCTAssertEqual(viewing, .init(stopTitle: "Disconnect", canStop: true, canToggleTelemetry: true, canInk: true, canToggleLoop: false))
+        let both = AppModel.menu(screen: .view, sharing: true, viewing: true)
+        XCTAssertEqual(both, .init(stopTitle: "Stop Sharing and Disconnect", canStop: true, canToggleTelemetry: true, canInk: true, canToggleLoop: false),
+                       "the share behind the View screen keeps its loop")
+        let listOverAShare = AppModel.menu(screen: .view, sharing: true, viewing: false)
+        XCTAssertEqual(listOverAShare.stopTitle, "Stop Sharing")
+        XCTAssertFalse(listOverAShare.canInk, "no picture shown, so no ink to act on")
+    }
 }

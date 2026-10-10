@@ -48,7 +48,8 @@ struct NitidoApp: App {
                 Divider()
                 // Listed for discoverability; while the window is key, Esc is handled inside it (RootView). Both go
                 // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while something is live.
-                Button("Stop") { app.escape() }.keyboardShortcut(.escape, modifiers: [])
+                Button(app.menu.stopTitle) { app.escape() }.keyboardShortcut(.escape, modifiers: [])
+                    .disabled(!app.menu.canStop)
             }
             // The app menu. The standard group owns ⌘H for Hide, which would swallow Toggle Telemetry's ⌘H.
             CommandGroup(replacing: .appVisibility) {
@@ -59,13 +60,13 @@ struct NitidoApp: App {
             // Edit. The standard Undo owns ⌘Z, and SwiftUI then drops ⌘Z from Undo Stroke, so ⌘Z would do nothing:
             // the ink's own items take its place.
             CommandGroup(replacing: .undoRedo) {
-                Button("Undo Stroke") { app.undo() }.keyboardShortcut("z")
-                Button("Clear Ink") { app.clearInk() }.keyboardShortcut(.delete)
+                Button("Undo Stroke") { app.undo() }.keyboardShortcut("z").disabled(!app.menu.canInk)
+                Button("Clear Ink") { app.clearInk() }.keyboardShortcut(.delete).disabled(!app.menu.canInk)
             }
             // View.
             CommandGroup(before: .toolbar) {
-                Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h")
-                Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l")
+                Button("Toggle Telemetry") { app.toggleTelemetry() }.keyboardShortcut("h").disabled(!app.menu.canToggleTelemetry)
+                Button("Codec Loop") { app.toggleLoopback() }.keyboardShortcut("l").disabled(!app.menu.canToggleLoop)
                 Divider()
             }
         }

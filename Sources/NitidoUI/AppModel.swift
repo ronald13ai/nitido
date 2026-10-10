@@ -38,13 +38,63 @@ public final class AppModel {
         screen = .view
     }
 
-    public func toggleTelemetry() { share?.showTelemetry.toggle(); view?.showTelemetry.toggle() }
+    /// ⌘H, ⌘Z, ⌘⌫ and ⌘L act on the screen shown, never on a share running behind the View screen.
+    public func toggleTelemetry() {
+        switch screen {
+        case .share: share?.showTelemetry.toggle()
+        case .view: view?.showTelemetry.toggle()
+        case .welcome: break
+        }
+    }
 
-    public func toggleLoopback() { share?.loopback.toggle() }
+    public func toggleLoopback() {
+        guard menu.canToggleLoop else { return }
+        share?.loopback.toggle()
+    }
 
-    public func undo() { share?.ink.undoLocal(); view?.ink.undoLocal() }
+    public func undo() {
+        switch screen {
+        case .share: share?.ink.undoLocal()
+        case .view: view?.ink.undoLocal()
+        case .welcome: break
+        }
+    }
 
-    public func clearInk() { share?.ink.clearLocal(); view?.ink.clearLocal() }
+    public func clearInk() {
+        switch screen {
+        case .share: share?.ink.clearLocal()
+        case .view: view?.ink.clearLocal()
+        case .welcome: break
+        }
+    }
+
+    /// What the menu offers on the screen shown: an item that would do nothing there is disabled, and the Esc item
+    /// says what it stops.
+    public struct Menu: Equatable, Sendable {
+        public var stopTitle: String
+        public var canStop: Bool
+        public var canToggleTelemetry: Bool
+        public var canInk: Bool
+        public var canToggleLoop: Bool
+    }
+
+    public var menu: Menu { Self.menu(screen: screen, sharing: sharing, viewing: viewing) }
+
+    /// `sharing`: a picture is being shared; `viewing`: a viewer is connected or reconnecting. Esc on Welcome does
+    /// nothing; the ink is there only over a live picture; the codec loop belongs to a live share.
+    nonisolated static func menu(screen: Screen, sharing: Bool, viewing: Bool) -> Menu {
+        let stopTitle: String = switch (sharing, viewing, screen) {
+        case (true, true, _): "Stop Sharing and Disconnect"
+        case (true, false, _): "Stop Sharing"
+        case (false, true, _): "Disconnect"
+        case (false, false, .share): "Stop Sharing"
+        case (false, false, .view): "Back"
+        case (false, false, .welcome): "Stop"
+        }
+        return Menu(stopTitle: stopTitle, canStop: screen != .welcome, canToggleTelemetry: screen != .welcome,
+                    canInk: screen == .share ? sharing : screen == .view ? viewing : false,
+                    canToggleLoop: screen == .share && sharing)
+    }
 
     /// Detach before the await (Task 8 fix): a Share or View that lands while the old one is still stopping
     /// keeps its own model instead of being cleared when this stop resumes. Returns once the other Mac has been told

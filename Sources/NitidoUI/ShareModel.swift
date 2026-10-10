@@ -236,6 +236,11 @@ public final class ShareModel {
         }
     }
 
+    /// The pairing code and the Codec loop switch belong to a live share (`ShareView`): while picking, or after a failure
+    /// (the listener is stopped until Retry), the code would send a viewer looking for a Mac it cannot find, and the
+    /// switch would do nothing.
+    public var showsLiveControls: Bool { state == .capturing }
+
     public var resolutionLabel: String { Fit.resolutionLabel(pixelSize: pixelSize, scale: scale, factor: fitFactor) }
 
     /// The content's point size at 1:1 on the display the picture is on. The sink says which (SwiftUI observes it, so

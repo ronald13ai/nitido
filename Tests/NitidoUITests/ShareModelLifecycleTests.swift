@@ -451,6 +451,25 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
+    /// The pairing code and the Codec loop switch show only over a live share: not while picking, and not after a
+    /// failure, when the listener is stopped and a viewer told the code would look for a Mac it cannot find.
+    @MainActor
+    func testTheCodeAndTheLoopSwitchShowOnlyWhileCapturing() async {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "v")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        XCTAssertFalse(model.showsLiveControls, "picking")
+        factory.made[0].emit(.started(pixelWidth: 200, pixelHeight: 100, scale: 2))
+        await drain()
+        XCTAssertTrue(model.showsLiveControls, "capturing")
+        factory.made[0].emit(.failed("The stream stopped."))
+        await drain()
+        XCTAssertFalse(model.showsLiveControls, "failed: the listener is stopped")
+        await model.stop()
+    }
+
     /// Stop while a restart waits for the old session's stop: the new picker never appears.
     @MainActor
     func testStopWhileARestartWaitsDoesNotPresent() async {

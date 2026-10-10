@@ -41,11 +41,15 @@ public struct ShareView: View {
                     .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
                     .allowsHitTesting(false)
                 }
-                // The name viewers see in their list ("Mac (2)" when another Mac has this one); the key stays derived
-                // from `name`, which the TXT record publishes.
-                PairingPanel(name: model.advertisedName ?? model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
-                             connectionCount: model.connectionCount, ringShownFor: $model.ringShownFor).padding(14)
-                LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                // Only over a live share: while picking, or after a failure (the listener is stopped until Retry), the
+                // code would send a viewer looking for a Mac it cannot find, and the switch would do nothing.
+                if model.showsLiveControls {
+                    // The name viewers see in their list ("Mac (2)" when another Mac has this one); the key stays derived
+                    // from `name`, which the TXT record publishes.
+                    PairingPanel(name: model.advertisedName ?? model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
+                                 connectionCount: model.connectionCount, ringShownFor: $model.ringShownFor).padding(14)
+                    LoopbackPanel(model: model).padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
             // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
             // a tiny picture spills left and down and never moves the picture off the window's top left corner.
