@@ -14,18 +14,25 @@ public final class AppModel {
     public var confirmStop = false
     /// The question on screen was asked by a quit (`requestQuit`): Stop quits once the session has stopped.
     @ObservationIgnored private var quitAsked = false
-    /// Makes the share and the viewer, and quits the app; tests give their own.
+    /// Makes the share and the viewer, quits the app, and brings the window back from the Dock; tests give their own.
     @ObservationIgnored private let makeShare: @MainActor () -> ShareModel
     @ObservationIgnored private let makeView: @MainActor () -> ViewModel
     @ObservationIgnored private let terminate: @MainActor () -> Void
+    @ObservationIgnored private let revealWindow: @MainActor () -> Void
 
     public convenience init() {
         self.init(makeShare: { ShareModel() }, makeView: { ViewModel() }, terminate: { NSApplication.shared.terminate(nil) })
     }
 
     init(makeShare: @escaping @MainActor () -> ShareModel, makeView: @escaping @MainActor () -> ViewModel,
-         terminate: @escaping @MainActor () -> Void) {
-        self.makeShare = makeShare; self.makeView = makeView; self.terminate = terminate
+         terminate: @escaping @MainActor () -> Void, revealWindow: @escaping @MainActor () -> Void = AppModel.revealMinimizedWindow) {
+        self.makeShare = makeShare; self.makeView = makeView; self.terminate = terminate; self.revealWindow = revealWindow
+    }
+
+    /// The app's window back from the Dock, if it is there: the stop question is a sheet on it (`RootView`), which a
+    /// minimized window does not show until it comes back.
+    static func revealMinimizedWindow() {
+        NSApplication.shared.windows.first { $0.isMiniaturized }?.deminiaturize(nil)
     }
 
     /// Shows the Share screen and the picker. One share at a time: while a share is picking or capturing this
@@ -153,6 +160,14 @@ public final class AppModel {
     public func requestQuit() {
         guard sharing || viewing else { terminate(); return }
         quitAsked = true
+        ask()
+    }
+
+    /// Raises the stop question, with the window back from the Dock first: the question is a sheet on the window, and
+    /// on a minimized one it would not show until the window came back, so ⌘Q, or the File menu's Esc item (which works
+    /// with no window key), would seem to do nothing.
+    private func ask() {
+        revealWindow()
         confirmStop = true
     }
 
@@ -258,7 +273,7 @@ public final class AppModel {
         if viewBack, let view { view.disconnect(); return }
         if shareBack { cancelShare(); return }
         quitAsked = false
-        if sharing || viewing { confirmStop = true } else { Task { await stop() } }
+        if sharing || viewing { ask() } else { Task { await stop() } }
     }
 
     /// The one entry point for Esc: the invisible in-window button on the Share and View screens and the Stop

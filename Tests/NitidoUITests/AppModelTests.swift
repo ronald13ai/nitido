@@ -32,6 +32,14 @@ private final class PickerSources {
 @MainActor
 private final class Quits { var count = 0 }
 
+/// Each time the app brought its window back from the Dock, whether the stop question was up already.
+@MainActor
+private final class Reveals {
+    weak var app: AppModel?
+    var questionUp: [Bool] = []
+    func reveal() { questionUp.append(app?.confirmStop ?? true) }
+}
+
 private struct TimedOut: Error {}
 
 final class AppModelTests: XCTestCase {
@@ -277,6 +285,36 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(app.view)
         try await waitUntil("the other Mac heard the goodbye") { !other.isSending && other.viewerName == nil }
         await other.stop()
+    }
+
+    /// ⌘Q while the only window is in the Dock: the question is a sheet on that window, which would not show until the
+    /// window came back, so ⌘Q seemed to do nothing. The window comes back first, then the question; the same for the File
+    /// menu's Esc item, which works with no window key. With nothing live the app quits and brings nothing back.
+    @MainActor
+    func testTheQuestionBringsAMinimizedWindowBackFirst() async throws {
+        let sources = PickerSources(), quits = Quits(), reveals = Reveals()
+        let app = AppModel(makeShare: { ShareModel(makeSource: sources.make, screenRecordingGranted: { true }) },
+                           makeView: { ViewModel(startingDiscovery: false) }, terminate: { quits.count += 1 },
+                           revealWindow: { reveals.reveal() })
+        reveals.app = app
+        app.requestQuit()
+        XCTAssertEqual(quits.count, 1, "nothing live: quit at once")
+        XCTAssertEqual(reveals.questionUp, [], "and nothing to bring back")
+
+        app.startShare()
+        await drain()
+        sources.made.last?.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the share captures") { app.share?.state == .capturing }
+        app.requestQuit()
+        XCTAssertTrue(app.confirmStop, "asks first")
+        XCTAssertEqual(reveals.questionUp, [false], "the window came back before the question")
+        app.cancelledStop(); app.confirmStop = false
+        app.escape()
+        XCTAssertTrue(app.confirmStop)
+        XCTAssertEqual(reveals.questionUp, [false, false], "Esc's question too")
+        app.cancelledStop(); app.confirmStop = false
+        XCTAssertEqual(quits.count, 1)
+        await app.stop()
     }
 
     /// The close button, and ⌘W, which presses it (`NSWindow.performClose`), go through `requestQuit`.
