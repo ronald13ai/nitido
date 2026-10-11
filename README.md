@@ -4,7 +4,7 @@
 
 A native macOS app that shares a window or a screen to another Mac on the local network, with crisp text, measured latency and ink on top. Swift 6.2, ScreenCaptureKit, VideoToolbox, Network.framework and Metal; no third-party code.
 
-![Viewer with ink from both sides](docs/screenshots/03-viewer.png)
+![The viewer paired over loopback, with ink from both sides and the sharer's pointer (captured from the real window through the render harness over a synthetic desktop)](docs/screenshots/03-viewer.png)
 
 I built it in a week in October 2026, as a prototype of the core loop of a pair-programming tool: capture, encode, send, decode and draw a screen, and measure each step.
 
@@ -49,10 +49,11 @@ Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple 
 
 | Scenario | Result | Build |
 |---|---|---|
-| Raw capture to display, window 1346×878 pt @2x (2692×1756 px) | 21 ms at 58 fps | 168b191 |
-| Raw capture to display, full display 3024×1964 px | (fill in) ms | |
-| Codec loop, HEVC at 2 Mbps, same window, text scrolling | codec 10 ms, capture to display 34 ms, real rate 1.5 Mbps, still text sharp (under the earlier cap of 1.5 times the rate per second; to be re-measured) | 168b191 |
-| Codec loop, HEVC at 20 Mbps, same window | codec (fill in) ms, capture to display (fill in) ms | |
+| Raw capture to display, window 1346×878 pt @2x (2692×1756 px) | 23 ms at 58 fps (21 ms on 168b191) | 6a87a21 |
+| Raw capture to display, the whole display (2704×1756 px: the panel in its 1352×878 pt scaled mode) | 24 ms at 56 fps, shown fitted at 83% | 6a87a21 |
+| Codec loop, HEVC at 2 Mbps, same window, text scrolling | codec 10 ms, capture to display 34 ms, real rate 1.5 Mbps, still text sharp (under the earlier cap of 1.5 times the rate per second; the next row is the final build on a still picture) | 168b191 |
+| Codec loop, HEVC at 20 Mbps, same window, text scrolling | codec 10 ms, capture to display 32 ms, real rate 7.7 Mbps | 6a87a21 |
+| Codec loop, HEVC at 2 Mbps, same window, still | codec 5 ms, capture to display 27 ms | 6a87a21 |
 | Two Macs, glass to glass (estimated) | 30 to 40 ms | cae00eb |
 | Two Macs, RTT | 9 to 10 ms | 168b191 |
 
@@ -60,7 +61,7 @@ Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple 
 - Glass to glass across two Macs is an estimate: it uses an NTP-style clock offset from the fastest pong of the last 10 s, and the strip labels it "(est.)".
 - The spec aimed for capture to display under 20 ms through the codec loop. I measured 34 ms there at 2 Mbps, and 21 ms without the codec. Glass to glass met its target of under 100 ms.
 - At 2 Mbps the encoder kept under the rate (1.5 Mbps real), and still text stayed sharp. That was measured on build 168b191, under the earlier hard cap of 1.5 times the rate per second; the cap is now twice the rate over 2 s (spec 7), so the 2 Mbps row is to be measured again. Whether text stays sharp while it scrolls is still to be checked.
-- Both two-Mac runs came before the fixes made after the evening run (the backlog rule, the keyframe limit, the pacer's cadence check) and are to be re-measured. The first run (168b191) read 46 ms while the Air showed 33 of 58 fps (bug 2 below).
+- Both two-Mac runs came before the fixes made after the evening run (the backlog rule, the keyframe limit, the pacer's cadence check). They were not measured again on the final build: the second Mac was not available on 2026-10-11, when the one-Mac rows above were taken. The first run (168b191) read 46 ms while the Air showed 33 of 58 fps (bug 2 below).
 
 ![The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it](docs/screenshots/02-share-loopback.png)
 
