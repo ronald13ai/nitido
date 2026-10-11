@@ -13,13 +13,22 @@ public struct Stroke: Sendable, Equatable, Identifiable {
 public enum InkGeometry {
     /// Centripetal Catmull-Rom through the points: `segments` interpolated points per span, endpoints kept exactly.
     public static func smooth(_ pts: [StrokePoint], segments: Int = 6) -> [SIMD2<Float>] {
-        let p = pts.map { SIMD2($0.x, $0.y) }
-        guard p.count > 1 else { return p }
-        var out: [SIMD2<Float>] = [p[0]]
-        for i in 0..<(p.count - 1) {
-            let p0 = i == 0 ? p[0] : p[i - 1]
-            let p1 = p[i], p2 = p[i + 1]
-            let p3 = i + 2 < p.count ? p[i + 2] : p[i + 1]
+        guard pts.count > 1 else { return pts.map { SIMD2($0.x, $0.y) } }
+        return [SIMD2(pts[0].x, pts[0].y)] + smoothSpans(pts, 0..<(pts.count - 1), segments: segments)
+    }
+
+    /// The points `smooth` gives for the spans in `spans` (span i runs from point i to point i + 1), in order: `segments`
+    /// per span, the last of each the span's end point exactly. `smooth` is point 0 followed by every span's points. Span
+    /// i reads points i - 1 to i + 2, so it is final once point i + 2 exists; the last span reads its own end twice until
+    /// the next point comes. A ribbon redrawn as a stroke grows (`InkCanvasView`) computes only the spans near its end.
+    public static func smoothSpans(_ pts: [StrokePoint], _ spans: Range<Int>, segments: Int = 6) -> [SIMD2<Float>] {
+        var out: [SIMD2<Float>] = []
+        out.reserveCapacity(spans.count * segments)
+        for i in spans {
+            let before = i == 0 ? 0 : i - 1
+            let p0 = SIMD2(pts[before].x, pts[before].y)
+            let p1 = SIMD2(pts[i].x, pts[i].y), p2 = SIMD2(pts[i + 1].x, pts[i + 1].y)
+            let p3 = i + 2 < pts.count ? SIMD2(pts[i + 2].x, pts[i + 2].y) : p2
             for s in 1...segments {
                 let t = Float(s) / Float(segments)
                 let t2 = t * t, t3 = t2 * t

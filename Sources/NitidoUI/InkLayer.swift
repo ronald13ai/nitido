@@ -54,7 +54,9 @@ public final class InkController {
 
     public func applyRemote(_ m: StrokeMessage) {
         guard isPeers(m.strokeId) else { return }
-        let existing = document.strokes.first { $0.id == m.strokeId }
+        // What is known of the stroke, without its points: a copy of the stroke held across `apply` would make the append
+        // copy every point it has, so each point of a long stroke would cost more than the one before.
+        let existing = document.strokes.first { $0.id == m.strokeId }.map { (isRemote: $0.isRemote, count: $0.points.count) }
         var points = m.points.compactMap(Self.sanitized)
         switch m.phase {
         case .begin:
@@ -63,7 +65,7 @@ public final class InkController {
             points = Array(points.prefix(Self.maxPointsPerStroke))
         case .append:
             guard let existing, existing.isRemote else { return }
-            points = Array(points.prefix(max(0, Self.maxPointsPerStroke - existing.points.count)))
+            points = Array(points.prefix(max(0, Self.maxPointsPerStroke - existing.count)))
             guard !points.isEmpty else { return }
         case .end:
             guard existing?.isRemote ?? false else { return }
@@ -125,7 +127,7 @@ public final class InkCanvasView: NSView {
     /// with its model. Held unowned, the canvas's next tick read the old one after it was gone and aborted the app
     /// (`swift_abortRetainUnowned`, the evening two-Mac test of 2026-10-09: a share stopped, then a new one started).
     private(set) weak var controller: InkController?
-    private var layers: [UInt32: CAShapeLayer] = [:]
+    private var layers: [UInt32: StrokeLayers] = [:]
     private var fading: Set<UInt32> = []
     private var activeId: UInt32?
     private var strokeStart: Double = 0
@@ -176,7 +178,7 @@ public final class InkCanvasView: NSView {
     func attach(to controller: InkController) {
         if self.controller !== controller {
             if let old = self.controller, old.canvas === self { old.canvas = nil }
-            layers.values.forEach { $0.removeFromSuperlayer() }
+            layers.values.forEach { $0.shape.removeFromSuperlayer() }
             layers = [:]; fading = []; activeId = nil; lastPoint = nil
         }
         self.controller = controller
@@ -227,9 +229,8 @@ public final class InkCanvasView: NSView {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         for stroke in controller?.document.strokes ?? [] {
-            guard let shape = layers[stroke.id] else { continue }
-            let path = ribbon(for: stroke)
-            shape.path = path; shape.shadowPath = path
+            guard let entry = layers[stroke.id] else { continue }
+            draw(stroke, on: entry, again: true)
         }
         if let last = lastRemoteCursor { placeRemoteCursor(last.cursor, name: last.name) }
     }
@@ -316,62 +317,155 @@ public final class InkCanvasView: NSView {
     }
 
     // Rendering
+
+    /// One stroke's layers. `shape` is the stroke's layer on the canvas, the one that fades and goes. While the ribbon is
+    /// all live it draws the ribbon and its halo, as every stroke did. Once a long stroke has frozen pieces
+    /// (`RibbonOutline`), `shape` draws nothing itself: `halos` holds a halo per piece and `fills` the pieces in the
+    /// stroke's colour, the live part's last in each, and every halo lies under every fill, as one shape's halo lies under
+    /// its fill, so a piece's halo never shades the piece before it at their joint.
+    @MainActor
+    private final class StrokeLayers {
+        let shape: CAShapeLayer
+        /// The peer's stroke, in cream; this side's is gold.
+        let remote: Bool
+        var outline: RibbonOutline?
+        var pieces: (halos: CALayer, fills: CALayer, liveHalo: CAShapeLayer, liveFill: CAShapeLayer)?
+        init(shape: CAShapeLayer, remote: Bool) { self.shape = shape; self.remote = remote }
+
+        /// The window's scale, for the stroke's layer and every piece.
+        var contentsScale: CGFloat {
+            get { shape.contentsScale }
+            set {
+                shape.contentsScale = newValue
+                pieces?.halos.sublayers?.forEach { $0.contentsScale = newValue }
+                pieces?.fills.sublayers?.forEach { $0.contentsScale = newValue }
+            }
+        }
+    }
+
     func update(_ stroke: Stroke) {
-        let shape = layers[stroke.id] ?? makeLayer(for: stroke)
-        let path = ribbon(for: stroke)
-        shape.path = path
-        // The halo follows the ribbon; given its path, Core Animation does not work it out from the pixels each frame.
-        shape.shadowPath = path
+        let entry = layers[stroke.id] ?? makeLayers(for: stroke)
+        draw(stroke, on: entry)
         if window != nil { startTicking() }
     }
 
-    /// A ribbon in gold (this side) or cream (the peer), with a soft dark halo so the cream, about 1.2:1 on a white
-    /// document, and the gold, about 2.2:1, still read on the most common picture.
-    private func makeLayer(for stroke: Stroke) -> CAShapeLayer {
+    /// Draws `stroke` on its layers at the canvas's size: only the live part its new points changed, the frozen pieces
+    /// staying as they are (`RibbonOutline`). `again`, a new size, fewer points or a stroke begun again under the same id
+    /// draws it all from the start. Pieces come and go with actions off, so none fades in or out.
+    private func draw(_ stroke: Stroke, on entry: StrokeLayers, again: Bool = false) {
+        let pts = stroke.points
+        let fresh = again || pts.count < 2 || entry.outline.map {
+            $0.size != bounds.size || $0.startedAt != stroke.startedAt || $0.pointCount > pts.count
+        } ?? true
+        var frozen: [CGPath] = []
+        let live: CGPath
+        if pts.count < 2 {
+            entry.outline = nil
+            live = dot(for: stroke)
+        } else {
+            if fresh { entry.outline = RibbonOutline(baseWidth: stroke.baseWidth, startedAt: stroke.startedAt, size: bounds.size) }
+            // In place: a copy of the outline would make its widths copied on every point.
+            frozen = entry.outline!.advance(to: pts)
+            live = entry.outline!.livePath(pts)
+        }
+        let restructure = (fresh && entry.pieces != nil) || !frozen.isEmpty
+        if restructure { CATransaction.begin(); CATransaction.setDisableActions(true) }
+        defer { if restructure { CATransaction.commit() } }
+        if fresh, let pieces = entry.pieces {
+            pieces.halos.removeFromSuperlayer(); pieces.fills.removeFromSuperlayer()
+            entry.pieces = nil
+            entry.shape.shadowOpacity = Self.haloOpacity
+        }
+        if !frozen.isEmpty {
+            let pieces = entry.pieces ?? makePieces(on: entry)
+            for path in frozen {
+                let halo = makeHalo(remote: entry.remote, scale: entry.contentsScale)
+                halo.path = path; halo.shadowPath = path
+                pieces.halos.insertSublayer(halo, below: pieces.liveHalo)
+                let fill = CAShapeLayer()
+                style(fill, remote: entry.remote, scale: entry.contentsScale)
+                fill.path = path
+                pieces.fills.insertSublayer(fill, below: pieces.liveFill)
+            }
+        }
+        if let pieces = entry.pieces {
+            pieces.liveFill.path = live
+            pieces.liveHalo.path = live; pieces.liveHalo.shadowPath = live
+        } else {
+            entry.shape.path = live
+            // The halo follows the ribbon; given its path, Core Animation does not work it out from the pixels each frame.
+            entry.shape.shadowPath = live
+        }
+    }
+
+    /// The halo's opacity and radius: soft and dark, so the cream, about 1.2:1 on a white document, and the gold, about
+    /// 2.2:1, still read on the most common picture.
+    private static let haloOpacity: Float = 0.35
+    private static let haloRadius: CGFloat = 1.5
+
+    /// A ribbon in gold (this side) or cream (the peer), with its halo.
+    private func makeLayers(for stroke: Stroke) -> StrokeLayers {
         let l = CAShapeLayer()
-        let color = stroke.isRemote ? Theme.CanvasColors.cream : Theme.CanvasColors.gold
-        l.fillColor = color.cgColor; l.strokeColor = color.cgColor; l.lineWidth = 1; l.lineJoin = .round; l.lineCap = .round
-        l.shadowColor = NSColor.black.cgColor; l.shadowOpacity = 0.35; l.shadowRadius = 1.5; l.shadowOffset = .zero
-        l.contentsScale = window?.backingScaleFactor ?? 2
+        style(l, remote: stroke.isRemote, scale: window?.backingScaleFactor ?? 2)
+        l.shadowColor = NSColor.black.cgColor; l.shadowOpacity = Self.haloOpacity; l.shadowRadius = Self.haloRadius; l.shadowOffset = .zero
         layer?.insertSublayer(l, below: cursorDot)
-        layers[stroke.id] = l
+        let entry = StrokeLayers(shape: l, remote: stroke.isRemote)
+        layers[stroke.id] = entry
+        return entry
+    }
+
+    /// A ribbon's fill: the stroke's colour, edged with a 1 pt line of it, round joins and caps.
+    private func style(_ l: CAShapeLayer, remote: Bool, scale: CGFloat) {
+        let color = remote ? Theme.CanvasColors.cream : Theme.CanvasColors.gold
+        l.fillColor = color.cgColor; l.strokeColor = color.cgColor; l.lineWidth = 1; l.lineJoin = .round; l.lineCap = .round
+        l.contentsScale = scale
+    }
+
+    /// A piece's halo: the piece filled in the stroke's colour, without the edge line, with the halo of its path. The fill
+    /// is there so the layer has content (Core Animation's own renderer draws no shadow for a layer that draws nothing),
+    /// and the piece's fill layer, edge line and all, covers it whole.
+    private func makeHalo(remote: Bool, scale: CGFloat) -> CAShapeLayer {
+        let l = CAShapeLayer()
+        style(l, remote: remote, scale: scale)
+        l.strokeColor = nil
+        l.shadowColor = NSColor.black.cgColor; l.shadowOpacity = Self.haloOpacity; l.shadowRadius = Self.haloRadius; l.shadowOffset = .zero
         return l
     }
 
-    /// Variable-width ribbon: the smoothed centerline offset by half the per-point width on each side.
-    private func ribbon(for stroke: Stroke) -> CGPath {
+    /// The stroke's layer stops drawing the ribbon itself and holds the pieces: the halos first, then the fills.
+    private func makePieces(on entry: StrokeLayers) -> (halos: CALayer, fills: CALayer, liveHalo: CAShapeLayer, liveFill: CAShapeLayer) {
+        let shape = entry.shape
+        shape.path = nil; shape.shadowPath = nil; shape.shadowOpacity = 0
+        let halos = CALayer(), fills = CALayer()
+        shape.addSublayer(halos); shape.addSublayer(fills)
+        let liveHalo = makeHalo(remote: entry.remote, scale: shape.contentsScale)
+        let liveFill = CAShapeLayer()
+        style(liveFill, remote: entry.remote, scale: shape.contentsScale)
+        halos.addSublayer(liveHalo); fills.addSublayer(liveFill)
+        let pieces = (halos: halos, fills: fills, liveHalo: liveHalo, liveFill: liveFill)
+        entry.pieces = pieces
+        return pieces
+    }
+
+    /// A stroke of one point is a dot; of none, nothing.
+    private func dot(for stroke: Stroke) -> CGPath {
         let path = CGMutablePath()
+        guard let first = stroke.points.first else { return path }
         let w = bounds.width, h = bounds.height
-        let pts = stroke.points
-        guard let first = pts.first else { return path }
-        if pts.count == 1 {
-            let r = CGFloat(stroke.baseWidth) * 0.6
-            path.addEllipse(in: CGRect(x: CGFloat(first.x) * w - r, y: CGFloat(first.y) * h - r, width: 2 * r, height: 2 * r))
-            return path
-        }
-        var widths: [CGFloat] = []
-        var smoothed: Float = stroke.baseWidth
-        for i in 0..<pts.count {
-            let speed = i == 0 ? 0 : InkGeometry.speed(from: pts[i - 1], to: pts[i])
-            let target = InkGeometry.width(base: stroke.baseWidth * pts[i].pressure, speedPerMs: speed)
-            smoothed += (target - smoothed) * 0.3
-            widths.append(CGFloat(smoothed))
-        }
-        let center = InkGeometry.smooth(pts, segments: 6).map { CGPoint(x: CGFloat($0.x) * w, y: CGFloat($0.y) * h) }
-        guard center.count > 1 else { return path }
-        var left: [CGPoint] = [], right: [CGPoint] = []
-        for i in 0..<center.count {
-            let a = center[max(0, i - 1)], b = center[min(center.count - 1, i + 1)]
-            var nx = -(b.y - a.y), ny = b.x - a.x
-            let len = max(hypot(nx, ny), 0.0001); nx /= len; ny /= len
-            let half = widths[min(widths.count - 1, i * (widths.count - 1) / max(1, center.count - 1))] / 2
-            left.append(CGPoint(x: center[i].x + nx * half, y: center[i].y + ny * half))
-            right.append(CGPoint(x: center[i].x - nx * half, y: center[i].y - ny * half))
-        }
-        path.move(to: left[0]); left.dropFirst().forEach { path.addLine(to: $0) }
-        right.reversed().forEach { path.addLine(to: $0) }
-        path.closeSubpath()
+        let r = CGFloat(stroke.baseWidth) * 0.6
+        path.addEllipse(in: CGRect(x: CGFloat(first.x) * w - r, y: CGFloat(first.y) * h - r, width: 2 * r, height: 2 * r))
         return path
+    }
+
+    /// Test only: the paths `id`'s ribbon is drawn with, the frozen pieces' oldest first and the live part's last (one
+    /// path while it is all live), and their halos' paths in the same order.
+    func ribbonForTesting(id: UInt32) -> (fills: [CGPath], halos: [CGPath])? {
+        guard let entry = layers[id] else { return nil }
+        guard let pieces = entry.pieces else {
+            return (entry.shape.path.map { [$0] } ?? [], entry.shape.shadowPath.map { [$0] } ?? [])
+        }
+        return ((pieces.fills.sublayers ?? []).compactMap { ($0 as? CAShapeLayer)?.path },
+                (pieces.halos.sublayers ?? []).compactMap(\.shadowPath))
     }
 
     /// Fades the stroke's layer out and then takes it off. The end of the fade goes by the layer, not the id alone: a
@@ -379,12 +473,12 @@ public final class InkCanvasView: NSView {
     /// the new share's stroke. `passive`: the fade four seconds after the last point, which eases in and out so the
     /// stroke fades away instead of popping off; otherwise (undo, clear) the entrance curve, quick and decided.
     func fade(id: UInt32, duration: Double, passive: Bool = false) {
-        guard !fading.contains(id), let l = layers[id] else { return }
+        guard !fading.contains(id), let entry = layers[id] else { return }
         fading.insert(id)
         let curve = passive ? CAMediaTimingFunction(name: .easeInEaseOut) : CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
-        animateOpacity(l, to: 0, duration: duration, curve: curve) { [weak self] in
-            guard let self, layers[id] === l else { return }
-            l.removeFromSuperlayer(); layers[id] = nil; fading.remove(id)
+        animateOpacity(entry.shape, to: 0, duration: duration, curve: curve) { [weak self] in
+            guard let self, layers[id] === entry else { return }
+            entry.shape.removeFromSuperlayer(); layers[id] = nil; fading.remove(id)
         }
     }
     func remove(id: UInt32, duration: Double) { fade(id: id, duration: duration) }
@@ -429,6 +523,94 @@ public final class InkCanvasView: NSView {
                                   width: width + 12, height: height + 6)
         cursorLabel.frame = CGRect(x: 6, y: 3, width: width, height: height)
         CATransaction.commit()
+    }
+}
+
+/// The outline of one stroke's ribbon, built as its points come: the smoothed centre line (`InkGeometry.smooth`, six
+/// points per span) offset on each side by half the width at its point, the left edge forward and the right edge back.
+/// Redrawn whole at every point, a ribbon cost more for each point than for the one before, so a peer growing a long
+/// stroke a point at a time could hold the main actor longer and longer. A new point changes only the last two spans,
+/// though: once a stretch of `pieceLength` points can no longer change, it is frozen as a finished piece, and each point
+/// after it draws only the live part, between 3 and `pieceLength` + 2 points. A piece and the next meet on a shared
+/// cross-section, and every outline point is the one the whole ribbon had there, computed the same way.
+struct RibbonOutline {
+    /// Points per frozen piece.
+    static let pieceLength = 64
+    /// Points of the centre line per span of the stroke, as `InkGeometry.smooth` makes them: point i of the stroke is
+    /// centre point `segments * i`.
+    static let segments = 6
+
+    let baseWidth: Float
+    let startedAt: Double
+    /// The canvas size the outline is drawn at.
+    let size: CGSize
+    /// Each point's width so far, smoothed from the stroke's first point on, so a new point's needs only the one before.
+    private var widths: [CGFloat] = []
+    private var smoothed: Float
+    /// The first point of the live part: the points before it are drawn by the frozen pieces.
+    private(set) var liveStart = 0
+
+    init(baseWidth: Float, startedAt: Double, size: CGSize) {
+        self.baseWidth = baseWidth; self.startedAt = startedAt; self.size = size; smoothed = baseWidth
+    }
+
+    /// The stroke's points the outline has taken in.
+    var pointCount: Int { widths.count }
+
+    /// Takes in `pts` after the points it has (a stroke that only grew), and returns the paths of the pieces that can no
+    /// longer change, oldest first. The outline at centre point j reads the centre points either side of it, so it is
+    /// final once their spans are, and span i is final once point i + 2 exists: of n points, a piece can end at point
+    /// n - 3.
+    mutating func advance(to pts: [StrokePoint]) -> [CGPath] {
+        for i in widths.count..<pts.count {
+            let speed = i == 0 ? 0 : InkGeometry.speed(from: pts[i - 1], to: pts[i])
+            let target = InkGeometry.width(base: baseWidth * pts[i].pressure, speedPerMs: speed)
+            smoothed += (target - smoothed) * 0.3
+            widths.append(CGFloat(smoothed))
+        }
+        var frozen: [CGPath] = []
+        while liveStart + Self.pieceLength <= pts.count - 3 {
+            let end = liveStart + Self.pieceLength
+            frozen.append(path(pts, from: liveStart * Self.segments, through: end * Self.segments))
+            liveStart = end
+        }
+        return frozen
+    }
+
+    /// The live part, from `liveStart` to the last of `pts` (the points `advance` took in last).
+    func livePath(_ pts: [StrokePoint]) -> CGPath {
+        path(pts, from: liveStart * Self.segments, through: (pts.count - 1) * Self.segments)
+    }
+
+    /// The closed outline through centre points `from` to `through`: the left edge forward, the right edge back. Only the
+    /// spans those points and their neighbours lie on are smoothed.
+    private func path(_ pts: [StrokePoint], from: Int, through: Int) -> CGPath {
+        let segments = Self.segments
+        let last = (pts.count - 1) * segments
+        let lo = max(0, from - 1), hi = min(last, through + 1)
+        // Centre point j > 0 lies on span (j - 1) / segments; centre point 0 is the stroke's first point.
+        let firstSpan = lo == 0 ? 0 : (lo - 1) / segments
+        var line = InkGeometry.smoothSpans(pts, firstSpan..<((hi - 1) / segments + 1), segments: segments)
+        var base = firstSpan * segments + 1   // the centre point `line[0]` is
+        if lo == 0 { line.insert(SIMD2(pts[0].x, pts[0].y), at: 0); base = 0 }
+        let w = size.width, h = size.height
+        func centre(_ j: Int) -> CGPoint { let v = line[j - base]; return CGPoint(x: CGFloat(v.x) * w, y: CGFloat(v.y) * h) }
+        var left: [CGPoint] = [], right: [CGPoint] = []
+        left.reserveCapacity(through - from + 1); right.reserveCapacity(through - from + 1)
+        for i in from...through {
+            let a = centre(max(0, i - 1)), b = centre(min(last, i + 1))
+            var nx = -(b.y - a.y), ny = b.x - a.x
+            let len = max(hypot(nx, ny), 0.0001); nx /= len; ny /= len
+            let half = widths[min(widths.count - 1, i * (widths.count - 1) / max(1, last))] / 2
+            let c = centre(i)
+            left.append(CGPoint(x: c.x + nx * half, y: c.y + ny * half))
+            right.append(CGPoint(x: c.x - nx * half, y: c.y - ny * half))
+        }
+        let path = CGMutablePath()
+        path.move(to: left[0]); left.dropFirst().forEach { path.addLine(to: $0) }
+        right.reversed().forEach { path.addLine(to: $0) }
+        path.closeSubpath()
+        return path
     }
 }
 

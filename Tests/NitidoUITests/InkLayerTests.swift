@@ -566,3 +566,201 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertEqual(layers.first?.animation(forKey: "opacity")?.duration, 0.6)
     }
 }
+
+/// A long stroke is drawn in pieces (`RibbonOutline`): each new point costs the canvas the same at its end as at its
+/// start, so a peer that grows one stroke a point at a time cannot make every point cost more on the main actor than the
+/// one before (spec 6), and the pieces draw the ribbon the whole stroke drew.
+final class InkRibbonPiecesTests: XCTestCase {
+    /// A point of a long, winding stroke, about 8 ms after the one before, as a trackpad gives them.
+    private func point(_ i: Int) -> StrokePoint {
+        let t = Float(i)
+        return StrokePoint(x: 0.5 + 0.4 * cos(t / 50), y: 0.5 + 0.3 * sin(t / 70), pressure: 0.6 + 0.4 * sin(t / 9), tMs: UInt32(i * 8))
+    }
+
+    /// 2000 points appended one by one to one of the peer's strokes: the last hundred appends together take no more
+    /// than three times the first hundred. Redrawn whole at every point, the ribbon made them about forty times slower.
+    @MainActor
+    func testEachAppendedPointCostsBoundedTime() {
+        let ink = InkController(role: .share)
+        let canvas = InkCanvasView(controller: ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 500)
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 4, points: [point(0)]))
+        let clock = ContinuousClock()
+        var costs: [Duration] = []
+        costs.reserveCapacity(2000)
+        for i in 1...2000 {
+            let m = StrokeMessage(strokeId: 3, phase: .append, color: .cream, baseWidth: 4, points: [point(i)])
+            let start = clock.now
+            ink.applyRemote(m)
+            costs.append(clock.now - start)
+        }
+        XCTAssertEqual(ink.document.strokes.first?.points.count, 2001)
+        let first = costs.prefix(100).reduce(Duration.zero, +), last = costs.suffix(100).reduce(Duration.zero, +)
+        XCTAssertLessThanOrEqual(last, first * 3, "the last 100 appends took \(last), the first 100 \(first)")
+    }
+
+    /// Drawn in pieces as it grows, a long stroke has the very outline the whole ribbon had: every point of both edges
+    /// the same, at every length (a piece just frozen, just before and after it, points coming several at a time), and
+    /// again after a resize; the pieces meet on a shared cross-section, and each piece's halo follows it.
+    @MainActor
+    func testAStrokeDrawnInPiecesHasTheWholeRibbonsOutline() throws {
+        let ink = InkController(role: .share)
+        let canvas = InkCanvasView(controller: ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 500)
+        var sent = [point(0)]
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 5, points: sent))
+        func check(_ when: String) throws {
+            let drawn = try XCTUnwrap(canvas.ribbonForTesting(id: 3))
+            XCTAssertEqual(drawn.halos, drawn.fills, "each halo follows its piece \(when)")
+            var left: [CGPoint] = [], right: [CGPoint] = []
+            for (n, fill) in drawn.fills.enumerated() {
+                let piece = edges(of: fill)
+                guard n > 0 else { (left, right) = piece; continue }
+                XCTAssertEqual(piece.left.first, left.last, "pieces meet \(when)")
+                XCTAssertEqual(piece.right.first, right.last, "pieces meet \(when)")
+                left += piece.left.dropFirst(); right += piece.right.dropFirst()
+            }
+            let whole = wholeOutline(sent, baseWidth: 5, size: canvas.bounds.size)
+            XCTAssertTrue(left == whole.left && right == whole.right, "the whole ribbon's outline \(when)")
+        }
+        for target in [2, 3, 7, 66, 67, 68, 69, 70, 131, 132, 133, 200, 777] {
+            while sent.count < target {
+                // One point at a time, and from 200 on five at a time where they fit.
+                let more = sent.count >= 200 ? min(5, target - sent.count) : 1
+                let points = (sent.count..<(sent.count + more)).map(point)
+                ink.applyRemote(StrokeMessage(strokeId: 3, phase: .append, color: .cream, baseWidth: 5, points: points))
+                sent += points
+            }
+            try check("at \(target) points")
+        }
+        XCTAssertEqual(canvas.ribbonForTesting(id: 3)?.fills.count, 13, "777 points: twelve pieces of 64 and the live part")
+        canvas.setFrameSize(NSSize(width: 640, height: 400))
+        try check("after a resize")
+    }
+
+    /// Drawn in pieces, a long stroke looks like the whole ribbon. Rendered offscreen on white at 1x and 2x, against the
+    /// whole ribbon's polygon halo under its fill and edge line (what Core Animation draws for one layer with that
+    /// `shadowPath`; its offscreen renderer shades what a layer draws instead, so the reference is built that way), no
+    /// channel is more than 10 % off and under 1 % of the ribbon's channels are off at all: a few pixels of antialiasing
+    /// where two pieces meet. Every halo lies under every fill; a piece's halo over the piece before it would darken a
+    /// band across the ribbon at each joint.
+    @MainActor
+    func testAStrokeDrawnInPiecesLooksLikeTheWholeRibbon() throws {
+        let ink = InkController(role: .share)
+        let canvas = InkCanvasView(controller: ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 400, height: 250)
+        let pts = (0..<300).map(point)
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 5, points: [pts[0]]))
+        for p in pts.dropFirst() { ink.applyRemote(StrokeMessage(strokeId: 3, phase: .append, color: .cream, baseWidth: 5, points: [p])) }
+        XCTAssertEqual(canvas.ribbonForTesting(id: 3)?.fills.count, 5, "four pieces and the live part")
+        let stroke = try XCTUnwrap((canvas.layer?.sublayers ?? []).compactMap { $0 as? CAShapeLayer }.first)
+
+        let outline = wholeOutline(pts, baseWidth: 5, size: canvas.bounds.size)
+        let whole = CGMutablePath()
+        whole.move(to: outline.left[0]); outline.left.dropFirst().forEach { whole.addLine(to: $0) }
+        outline.right.reversed().forEach { whole.addLine(to: $0) }
+        whole.closeSubpath()
+        let cream = Theme.CanvasColors.cream.cgColor
+        let halo = CAShapeLayer()
+        halo.path = whole; halo.fillColor = cream
+        halo.shadowColor = NSColor.black.cgColor; halo.shadowOpacity = 0.35; halo.shadowRadius = 1.5; halo.shadowOffset = .zero
+        let fill = CAShapeLayer()
+        fill.path = whole; fill.fillColor = cream; fill.strokeColor = cream; fill.lineWidth = 1; fill.lineJoin = .round; fill.lineCap = .round
+        let reference = CALayer()
+        reference.addSublayer(halo); reference.addSublayer(fill)
+
+        for scale in [CGFloat(1), 2] {
+            let drawn = rendered(stroke, size: canvas.bounds.size, scale: scale)
+            let expected = rendered(reference, size: canvas.bounds.size, scale: scale)
+            var worst = 0, off = 0, inked = 0
+            for i in drawn.indices where i % 4 != 3 {
+                let d = abs(Int(drawn[i]) - Int(expected[i]))
+                worst = max(worst, d)
+                if d > 2 { off += 1 }
+                if drawn[i] != 255 || expected[i] != 255 { inked += 1 }
+            }
+            XCTAssertGreaterThan(inked, 10_000, "the ribbon is drawn at \(scale)x")
+            XCTAssertLessThanOrEqual(worst, 25, "no channel more than 10 % off at \(scale)x")
+            XCTAssertLessThan(off * 100, inked, "under 1 % of the ribbon's channels off at \(scale)x: \(off) of \(inked)")
+        }
+    }
+
+    /// `layer` drawn on white at `scale`, as RGBA bytes.
+    private func rendered(_ layer: CALayer, size: CGSize, scale: CGFloat) -> [UInt8] {
+        let w = Int(size.width * scale), h = Int(size.height * scale)
+        guard let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data
+        else { XCTFail("no bitmap context"); return [] }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        context.scaleBy(x: scale, y: scale)
+        layer.render(in: context)
+        return Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self), count: w * h * 4))
+    }
+
+    /// The ribbon as the canvas drew it whole before pieces (`InkCanvasView.ribbon(for:)` at f182a34), returning its two
+    /// edges, with the smoothing as `InkGeometry.smooth` was then: the reference the pieces must match point for point.
+    private func wholeOutline(_ pts: [StrokePoint], baseWidth: Float, size: CGSize) -> (left: [CGPoint], right: [CGPoint]) {
+        let w = size.width, h = size.height
+        var widths: [CGFloat] = []
+        var smoothed: Float = baseWidth
+        for i in 0..<pts.count {
+            let speed = i == 0 ? 0 : InkGeometry.speed(from: pts[i - 1], to: pts[i])
+            let target = InkGeometry.width(base: baseWidth * pts[i].pressure, speedPerMs: speed)
+            smoothed += (target - smoothed) * 0.3
+            widths.append(CGFloat(smoothed))
+        }
+        let center = wholeSmooth(pts).map { CGPoint(x: CGFloat($0.x) * w, y: CGFloat($0.y) * h) }
+        var left: [CGPoint] = [], right: [CGPoint] = []
+        for i in 0..<center.count {
+            let a = center[max(0, i - 1)], b = center[min(center.count - 1, i + 1)]
+            var nx = -(b.y - a.y), ny = b.x - a.x
+            let len = max(hypot(nx, ny), 0.0001); nx /= len; ny /= len
+            let half = widths[min(widths.count - 1, i * (widths.count - 1) / max(1, center.count - 1))] / 2
+            left.append(CGPoint(x: center[i].x + nx * half, y: center[i].y + ny * half))
+            right.append(CGPoint(x: center[i].x - nx * half, y: center[i].y - ny * half))
+        }
+        return (left, right)
+    }
+
+    private func wholeSmooth(_ pts: [StrokePoint]) -> [SIMD2<Float>] {
+        let p = pts.map { SIMD2($0.x, $0.y) }
+        guard p.count > 1 else { return p }
+        var out: [SIMD2<Float>] = [p[0]]
+        for i in 0..<(p.count - 1) {
+            let p0 = i == 0 ? p[0] : p[i - 1]
+            let p1 = p[i], p2 = p[i + 1]
+            let p3 = i + 2 < p.count ? p[i + 2] : p[i + 1]
+            for s in 1...6 {
+                let t = Float(s) / 6
+                let t2 = t * t, t3 = t2 * t
+                let a: SIMD2<Float> = 2 * p1
+                let b: SIMD2<Float> = (p2 - p0) * t
+                let c: SIMD2<Float> = (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
+                let d: SIMD2<Float> = (3 * p1 - 3 * p2 + p3 - p0) * t3
+                let v: SIMD2<Float> = 0.5 * (a + b + c + d)
+                out.append(s == 6 ? p2 : v)
+            }
+        }
+        return out
+    }
+
+    /// The two edges of a ribbon piece's closed path: it moves to the first left point, runs along the left edge, then
+    /// back along the right.
+    private func edges(of path: CGPath) -> (left: [CGPoint], right: [CGPoint]) {
+        var points: [CGPoint] = []
+        var closed = false
+        path.applyWithBlock { element in
+            switch element.pointee.type {
+            case .moveToPoint, .addLineToPoint: points.append(element.pointee.points[0])
+            case .closeSubpath: closed = true
+            default: XCTFail("a ribbon is straight lines")
+            }
+        }
+        XCTAssertTrue(closed, "a piece is closed")
+        let k = points.count / 2
+        return (Array(points[..<k]), Array(points[k...].reversed()))
+    }
+}
