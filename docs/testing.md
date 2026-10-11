@@ -14,8 +14,8 @@ The log lines quoted below are info or error lines. Read them with `log stream -
    The picture appears at 1:1 with the strip under it.
 4. Open each menu on Welcome, then again over a live share.\
    Nítido appears once, as the app menu; File holds Share… (⌘N) and View… (⌘⇧V), Edit holds Undo Stroke and Clear Ink, View holds Toggle Telemetry and Codec Loop; every shortcut works from its menu, all of these but Share… and View… are dimmed on Welcome, and Codec Loop is dimmed away from a live share.
-5. Press Esc on Welcome, in the picker, and on the list of Macs.\
-   Welcome ignores it; the picker and the list go back to Welcome at once, without asking.
+5. Press Esc on Welcome, in the picker, on the code screen of a Mac in the list, and on the list of Macs.\
+   Welcome ignores it; the picker and the list go back to Welcome at once, without asking; the code screen goes back to the list, as its Back button does.
 6. Press Esc over a live share, then over a connected viewer.\
    Each asks first ("Stop sharing?", "Disconnect?"), and the File menu's Esc item reads Stop Sharing or Disconnect to match.
 7. With a share running, open View (⌘⇧V) and press Esc on the list of Macs.\
@@ -82,8 +82,8 @@ Items 29 and 30 need two Macs: two copies on one Mac may keep their link when th
     While it is off the viewer shows "Reconnecting…" over the dimmed picture and the sharer's panel shows the viewer as Reconnecting…, its gold ring gone; once it is back, the picture recovers with a keyframe, the ring draws again, and nothing restarts.
 30. Draw on the viewer and turn its Wi-Fi off before letting go.\
     On the sharer the stroke stops growing and fades about seven seconds after the Wi-Fi goes off (three to notice the drop, four before the fade), instead of staying until ⌘⌫.
-31. With a viewer connected, quit the sharer with ⌘Q; then relaunch it, share, pair again and close the sharer's window.\
-    Each time the viewer says "The sharer ended the session."
+31. With a viewer connected, quit the sharer with ⌘Q and choose Stop; then relaunch it, share, pair again, click the sharer's close button and choose Stop.\
+    Each time the sharer asks "Stop sharing?" first, and the viewer says "The sharer ended the session."
 32. With a viewer connected, kill the sharer with `kill -9`.\
     The viewer shows "Reconnecting…", and its log ("link failed (...); retry n in ...s") shows growing gaps between attempts.
 33. Relaunch the sharer and share again.\
@@ -104,6 +104,11 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
 
 37. On battery on both Macs, with `caffeinate` not running (`pgrep caffeinate` prints nothing), pair them and leave both untouched for 10 minutes, longer than the display-off time in System Settings, Battery. Run `pmset -g assertions | grep -i nitido` on each Mac during the session and again after Esc ends it.\
     Both displays stay on and the session stays connected; during it each Mac lists Nítido preventing idle display sleep and idle system sleep ("Viewing <Mac>" on the viewer, "Sharing the screen" on the sharer), and after it neither does.
+
+38. With a viewer connected, press ⌘W on the viewer, then click its close button, then press ⌘Q, choosing Cancel each time; then press ⌘W and choose Disconnect.\
+    Each time the viewer asks "Disconnect?" and Cancel keeps the picture live and the sharer's panel unchanged; after Disconnect the viewer quits and the sharer shows no viewer.
+39. Connected as a viewer, press ⌘N, cancel the system picker; then ⌘N again, pick a window, choose Stop Sharing in the menu bar's screen-sharing menu, press Retry and cancel that picker.\
+    Each cancel goes back to the View screen with the picture still live and no question asked, and the sharer's panel keeps this Mac as its viewer.
 
 ## Before publishing
 

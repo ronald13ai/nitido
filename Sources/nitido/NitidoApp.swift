@@ -7,7 +7,9 @@ import NitidoUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let app = AppModel()
 
-    /// A live share or viewer says `bye` to the other Mac before the process ends (`AppModel.shouldQuitNow`).
+    /// A live share or viewer says `bye` to the other Mac before the process ends (`AppModel.shouldQuitNow`). ⌘Q, ⌘W and
+    /// the close button ask first (`AppModel.requestQuit`) and come here with nothing live; the system's own quit (a
+    /// logout, a restart, Quit in the Dock) comes straight here and asks nothing.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         app.shouldQuitNow { sender.reply(toApplicationShouldTerminate: true) } ? .terminateNow : .terminateLater
     }
@@ -55,6 +57,10 @@ struct NitidoApp: App {
                 // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while something is live.
                 Button(app.menu.stopTitle) { app.escape() }.keyboardShortcut(.escape, modifiers: [])
                     .disabled(!app.menu.canStop)
+            }
+            // ⌘Q asks first while something is live, as Esc and the close button do (`AppModel.requestQuit`).
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Nítido") { app.requestQuit() }.keyboardShortcut("q")
             }
             // The app menu. The standard group owns ⌘H for Hide, which would swallow Toggle Telemetry's ⌘H.
             CommandGroup(replacing: .appVisibility) {
