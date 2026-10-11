@@ -640,7 +640,10 @@ final class ViewerLinkTests: XCTestCase {
         sources.made[0].emit(frame: try stripedFrame(width: 100_000, height: 2))
         try await waitUntil("the share fails") { share.state != .capturing }
         guard case .failed(let message) = share.state else { return XCTFail("expected a failure, got \(share.state)") }
-        XCTAssertTrue(message.hasPrefix("This Mac's hardware video encoder could not start"), message)
+        // No hardware encoder takes it, and the H.264 fallback's limit is what it is over: the failure says so, and that
+        // Retry needs a smaller picture, rather than a status a Retry at this size would meet again.
+        XCTAssertTrue(message.hasPrefix("The picture (100000 × 2 pixels) is too large for this Mac's hardware video encoder"), message)
+        XCTAssertTrue(message.hasSuffix("Press Retry and pick a smaller window, or choose a scaled mode for the display in System Settings."), message)
         XCTAssertNil(share.encoder, "the encoder that could not start leaves no invalidated one behind")
         XCTAssertEqual(share.codecLabel, "raw")
 
@@ -730,6 +733,47 @@ final class ViewerLinkTests: XCTestCase {
         second.disconnect()
         try await waitUntil("the sharer lets the second viewer go") { !share.isSending && share.viewerName == nil }
         first.disconnect()
+        await share.stop()
+    }
+
+    /// Viewer A's lid closes and the sharer's link to it drops; viewer B pairs and takes the empty seat. When A wakes, its
+    /// session reconnects by itself with the same code: that must not take the seat back from B, whom nobody asked. A is
+    /// told another Mac is viewing, and its person decides: a connect they ask for takes the seat as any does. A
+    /// reconnect from the seat holder's own address is that viewer replacing a link it lost, and takes it.
+    @MainActor
+    func testAnAutomaticReconnectDoesNotTakeTheSeatFromAnotherViewer() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let viewerB = ViewModel()
+        viewerB.select(peer(for: share)); viewerB.code = share.code; viewerB.connect()
+        try await waitUntil("B holds the seat") { viewerB.state == .connected && share.viewerName == viewerB.name }
+        let port = NWEndpoint.Port(rawValue: share.listeningPort!)!
+        func connectA(reconnect: Bool, from host: NWEndpoint.Host) -> NitidoLink.Link {
+            NitidoLink.Link.connect(to: .hostPort(host: host, port: port), code: share.code, sharerName: share.name,
+                                    hello: Hello(protocolVersion: protocolVersion, role: .view, name: "Viewer A", pixelWidth: 0,
+                                                 pixelHeight: 0, scale: 2, isReconnect: reconnect))
+        }
+        let automatic = connectA(reconnect: true, from: "::1")
+        var ended: NitidoLink.Link.State?
+        for await s in automatic.states { ended = s }
+        XCTAssertEqual(ended, .cancelled)
+        XCTAssertEqual(automatic.byeReason, ByeReason.replaced, "A hears another Mac is viewing")
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(viewerB.state, .connected, "B keeps the seat")
+        XCTAssertEqual(share.viewerName, viewerB.name)
+        XCTAssertEqual(share.connectionCount, 1)
+
+        let asked = connectA(reconnect: false, from: "::1")
+        defer { asked.close() }
+        try await waitUntil("A's own connect takes the seat") { share.viewerName == "Viewer A" }
+        try await waitUntil("B hears another Mac is viewing") {
+            viewerB.state == .failed("Another Mac is now viewing \(share.name).", self.peer(for: share))
+        }
+        let sameHost = connectA(reconnect: true, from: "::1")
+        defer { sameHost.close() }
+        try await waitUntil("a reconnect from the seat holder's address takes it") { share.connectionCount == 3 }
+        viewerB.disconnect()
         await share.stop()
     }
 
@@ -937,6 +981,8 @@ final class ViewerLinkTests: XCTestCase {
         guard let second = await incoming.next() else { return XCTFail("no reconnect") }
         try await waitUntil("the viewer is connected again") { viewer.state == .connected }
         XCTAssertEqual(viewer.activity.begun, 1, "a reconnect begins no second activity")
+        XCTAssertEqual(first.peerHello?.isReconnect, false, "the connect the person asked for")
+        XCTAssertEqual(second.peerHello?.isReconnect, true, "the session's own reconnect says so in its hello (spec 6)")
         second.close()
         try await waitUntil("the sharer ended the session") { if case .failed = viewer.state { true } else { false } }
         XCTAssertFalse(viewer.activity.isHeld)

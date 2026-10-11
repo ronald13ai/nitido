@@ -47,6 +47,20 @@ final class WireTests: XCTestCase {
         XCTAssertEqual(try d.feed(Wire.encode(.undo(strokeId: 5)).dropFirst(6)), [.undo(strokeId: 5)], "the partial message waited")
     }
 
+    /// The hello's flags byte (bit 0: an automatic reconnect) came later: a hello without it, from an earlier build,
+    /// reads as a connect the person asked for, and an earlier build reading one with it skips the byte it does not know.
+    func testTheHellosReconnectFlagRoundTripsAndIsOptional() throws {
+        let hello = Hello(protocolVersion: 1, role: .view, name: "Mac", pixelWidth: 0, pixelHeight: 0, scale: 2, isReconnect: true)
+        var d = Wire.Decoder()
+        XCTAssertEqual(try d.feed(Wire.encode(.hello(hello))), [.hello(hello)])
+        var old = Wire.encode(.hello(hello)).dropLast()
+        old.replaceSubrange(0..<4, with: [0, 0, 0, UInt8(old.count - Wire.headerSize)])
+        var e = Wire.Decoder()
+        guard case .hello(let read)? = try e.feed(Data(old)).first else { return XCTFail("no hello") }
+        XCTAssertFalse(read.isReconnect)
+        XCTAssertEqual(read.name, "Mac")
+    }
+
     func testEveryMessageRoundTrips() throws {
         for m in samples {
             var d = Wire.Decoder()

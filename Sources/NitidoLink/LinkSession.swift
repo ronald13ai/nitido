@@ -168,6 +168,10 @@ public final class LinkSession: @unchecked Sendable {
         let last = index == routes.count - 1
         let limit = last ? nil : max(0.25, min(unreachableAfter, left - connectTimeout / 4))
         log.info("trying \(String(describing: routes[index]), privacy: .public) (route \(index + 1) of \(routes.count))")
+        // Once the session has been ready, every attempt is a reconnect the person did not ask for: the sharer does not
+        // hand it the seat while another Mac holds it (spec 6).
+        var hello = hello
+        hello.isReconnect = everReady
         return Link.connect(to: routes[index], code: code, sharerName: sharerName, hello: hello,
                             connectTimeout: connectTimeout, waitingTimeout: waitingTimeout, timeLeft: left,
                             unreachableAfter: limit, peerToPeer: last)

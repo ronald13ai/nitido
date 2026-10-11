@@ -35,9 +35,14 @@ public struct StrokePoint: Sendable, Equatable {
 
 public struct Hello: Sendable, Equatable {
     public var protocolVersion: UInt16, role: Role, name: String, pixelWidth: UInt16, pixelHeight: UInt16, scale: Float
-    public init(protocolVersion: UInt16, role: Role, name: String, pixelWidth: UInt16, pixelHeight: UInt16, scale: Float) {
+    /// A viewer's automatic reconnect after a drop, not a connect the person asked for (flags bit 0, spec 6). The sharer
+    /// does not hand such a reconnect the seat while another Mac holds it (`ShareModel`). A hello without the flags byte
+    /// (an earlier build) reads as false.
+    public var isReconnect: Bool
+    public init(protocolVersion: UInt16, role: Role, name: String, pixelWidth: UInt16, pixelHeight: UInt16, scale: Float,
+                isReconnect: Bool = false) {
         self.protocolVersion = protocolVersion; self.role = role; self.name = name
-        self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.scale = scale
+        self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.scale = scale; self.isReconnect = isReconnect
     }
 }
 

@@ -132,6 +132,16 @@ extension ShareModel {
             // The handshake proved the code and the hellos match: this viewer takes over from the current one, which is
             // told another Mac took its seat. Its messages are heard from now on (they wait in the link's stream until then).
             guard let pairing = unpaired.removeValue(forKey: ObjectIdentifier(l)) else { return }
+            if let holder = link, l.peerHello?.isReconnect == true, l.remoteHost == nil || l.remoteHost != holder.remoteHost {
+                // A viewer's automatic reconnect, while another Mac took the seat it lost (its lid closed, its Wi-Fi
+                // dropped): it does not take the seat back by itself. It is told another Mac is viewing, and its person
+                // decides; a connect they ask for takes the seat as any does. One from the address of the viewer holding
+                // the seat is that viewer, replacing a link it lost.
+                let who = l.peerHello?.name ?? "A viewer"
+                log.info("\(who, privacy: .public) reconnected by itself while \(self.viewerName ?? "another viewer", privacy: .public) holds the seat; telling it another Mac is viewing")
+                l.close(reason: ByeReason.replaced)
+                return
+            }
             if link != nil { ink.endRemoteStrokes() }   // the viewer it replaces sends no more points
             link?.close(reason: ByeReason.replaced)
             linkTasks.forEach { $0.cancel() }

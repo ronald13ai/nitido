@@ -15,7 +15,7 @@ public enum Wire {
         switch m {
         case .hello(let h):
             w.u16(h.protocolVersion); w.u8(h.role.rawValue); w.string8(h.name)
-            w.u16(h.pixelWidth); w.u16(h.pixelHeight); w.f32(h.scale)
+            w.u16(h.pixelWidth); w.u16(h.pixelHeight); w.f32(h.scale); w.u8(h.isReconnect ? 1 : 0)
         case .videoConfig(let c):
             w.u8(c.codec.rawValue); w.u16(c.width); w.u16(c.height)
             w.u8(UInt8(min(c.parameterSets.count, 255)))
@@ -81,7 +81,10 @@ public enum Wire {
                 let v = try r.u16()
                 guard let role = Role(rawValue: try r.u8()) else { throw WireError.malformed(type: type) }
                 let name = try r.string8(); let w = try r.u16(); let h = try r.u16(); let s = try r.f32()
-                return .hello(Hello(protocolVersion: v, role: role, name: name, pixelWidth: w, pixelHeight: h, scale: s))
+                // The flags came later: a hello without them is a connect the person asked for.
+                let flags = r.isAtEnd ? 0 : try r.u8()
+                return .hello(Hello(protocolVersion: v, role: role, name: name, pixelWidth: w, pixelHeight: h, scale: s,
+                                    isReconnect: flags & 1 != 0))
             case 2:
                 guard let codec = Codec(rawValue: try r.u8()) else { throw WireError.malformed(type: type) }
                 let w = try r.u16(); let h = try r.u16(); let n = Int(try r.u8())
