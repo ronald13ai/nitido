@@ -847,7 +847,10 @@ final class ViewerLinkTests: XCTestCase {
         // Spec 12: "after ten, show an error with Reconnect", to the same Mac with the same code.
         XCTAssertEqual(viewer.state, .failed("Video decoding keeps failing.", peer(for: share)))
         XCTAssertTrue(viewer.failureOffersReconnect)
-        XCTAssertEqual(viewer.pixelSize, .zero)
+        // Spec 9: over the last frame, dimmed, without resizing the window to the bare card.
+        XCTAssertTrue(viewer.failedOverPicture)
+        XCTAssertEqual(viewer.pixelSize, CGSize(width: 320, height: 180), "the window keeps the picture's size")
+        XCTAssertEqual(viewer.sharerName, share.name)
         try await waitUntil("the strip counts every throw as dropped") { viewer.snapshot.droppedLastSecond >= 19 }
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
         viewer.reconnect()
@@ -2428,6 +2431,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertTrue(message.hasSuffix("); reconnect to try again."), message)
         XCTAssertEqual(peer, self.peer(for: share), "Reconnect goes back to the same Mac")
         XCTAssertTrue(viewer.failureOffersReconnect)
+        XCTAssertFalse(viewer.failedOverPicture, "no picture yet: the card takes the canvas")
         try await waitUntil("the sharer lets the viewer go") { !share.isSending && share.viewerName == nil }
         viewer.reconnect()
         try await waitUntil("Reconnect pairs again with the code typed") { viewer.state == .connected && share.isSending }

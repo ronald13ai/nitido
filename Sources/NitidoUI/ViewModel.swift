@@ -266,12 +266,18 @@ public final class ViewModel {
     }
 
     public func disconnect() {
-        link?.close(); link = nil; currentPeer = nil; failureOffersReconnect = false; failedOverPicture = false; failureIsFinal = false
-        linkTasks.forEach { $0.cancel() }; linkTasks = []
-        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil; awaitingKeyframe = false
+        endSession()
         ink.clearRemote(); ink.hideRemoteCursor()
         pixelSize = .zero; codecLabel = "·"; codecNotice = nil; renderFailure = nil; sharerName = ""
         state = .browsing
+    }
+
+    /// Closes the link and lets the decoder go, and leaves the picture as it is: its size, the sharer's name and the
+    /// frame the view keeps (`failForDecoder` shows its failure over it).
+    private func endSession() {
+        link?.close(); link = nil; currentPeer = nil; failureOffersReconnect = false; failedOverPicture = false; failureIsFinal = false
+        linkTasks.forEach { $0.cancel() }; linkTasks = []
+        decoder?.invalidate(); decoder = nil; decoderConfig = nil; decodeFailures = 0; lastSeq = nil; awaitingKeyframe = false
     }
 
     /// `disconnect`, and returns once the sharer has been told `bye` (`LinkSession.closeAndWait`): a quit waits for it.
@@ -403,10 +409,15 @@ public final class ViewModel {
         }
     }
 
-    /// Ends the link over a decoder that cannot go on, and offers Reconnect to the same Mac (spec 12).
+    /// Ends the link over a decoder that cannot go on, and offers Reconnect to the same Mac (spec 12). Once a picture has
+    /// been on screen the failure shows over its last frame, dimmed, without resizing the window (spec 9), as every other
+    /// failure mid-session does; it took the window to the bare 600 by 400 card before.
     private func failForDecoder(_ message: String) {
         let peer = currentPeer
-        disconnect()
+        let overPicture = pixelSize != .zero
+        endSession()
+        ink.endRemoteStrokes()
+        failedOverPicture = overPicture
         state = .failed(message, peer)
         failureOffersReconnect = peer != nil
     }
