@@ -53,8 +53,9 @@ public enum Theme {
     enum CanvasColors {
         static let gold = NSColor(hex: Hex.gold)
         static let cream = NSColor(hex: Hex.cream)
-        /// The pill under the peer's name.
+        /// The pill under the peer's name, and its hairline.
         static let surface = NSColor(hex: Hex.surface)
+        static let hairline = NSColor(hex: Hex.hairline)
     }
 
     public enum Fonts {

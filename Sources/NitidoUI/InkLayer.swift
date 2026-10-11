@@ -136,8 +136,15 @@ public final class InkCanvasView: NSView {
     /// ink is most of them. Internal so a test can fire it.
     private(set) var tickTimer: Timer?
     private let cursorDot = CALayer()
-    /// The peer's name beside its cursor, on a pill of the surface, so it reads on a white document as on a dark one.
+    /// The peer's name beside its cursor, on a solid pill of the surface with a hairline, so it reads on a white document
+    /// as on a dark one, with nothing of the document showing through.
     private let cursorPill = CALayer()
+    /// The peer's cursor as it last came, in picture units, and its name: placed again when the canvas changes size.
+    private var lastRemoteCursor: (cursor: Cursor, name: String)?
+    /// This side's pointer is over the picture and has gone out to the peer as a visible cursor.
+    private var pointerShown = false
+    /// The window whose key and miniaturize notifications the canvas observes (`viewDidMoveToWindow`).
+    private weak var observedWindow: NSWindow?
     private let cursorLabel = CATextLayer()
     private static let cursorFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
@@ -148,7 +155,8 @@ public final class InkCanvasView: NSView {
         cursorDot.backgroundColor = Theme.CanvasColors.gold.cgColor
         cursorDot.cornerRadius = 5; cursorDot.bounds = CGRect(x: 0, y: 0, width: 10, height: 10); cursorDot.opacity = 0
         cursorDot.shadowColor = NSColor.black.cgColor; cursorDot.shadowOpacity = 0.35; cursorDot.shadowRadius = 1.5; cursorDot.shadowOffset = .zero
-        cursorPill.backgroundColor = Theme.CanvasColors.surface.withAlphaComponent(0.88).cgColor
+        cursorPill.backgroundColor = Theme.CanvasColors.surface.cgColor
+        cursorPill.borderColor = Theme.CanvasColors.hairline.cgColor; cursorPill.borderWidth = 1
         cursorPill.cornerRadius = 6; cursorPill.opacity = 0
         cursorLabel.font = Self.cursorFont; cursorLabel.fontSize = 11; cursorLabel.foregroundColor = Theme.CanvasColors.cream.cgColor
         cursorLabel.alignmentMode = .left; cursorLabel.truncationMode = .end
@@ -183,6 +191,47 @@ public final class InkCanvasView: NSView {
         super.viewDidMoveToWindow()
         applyBackingScale()
         if window == nil || !hasStrokes { stopTicking() } else { startTicking() }
+        let center = NotificationCenter.default
+        if let observedWindow {
+            center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: observedWindow)
+            center.removeObserver(self, name: NSWindow.didMiniaturizeNotification, object: observedWindow)
+        }
+        observedWindow = window
+        if let window {
+            center.addObserver(self, selector: #selector(windowStoppedTracking(_:)), name: NSWindow.didResignKeyNotification, object: window)
+            center.addObserver(self, selector: #selector(windowStoppedTracking(_:)), name: NSWindow.didMiniaturizeNotification, object: window)
+        }
+    }
+
+    /// The window stopped being key (⌘Tab, a click in another app) or went to the Dock while the pointer was over the
+    /// picture: the tracking area goes inactive, AppKit sends no `mouseExited`, and the peer would go on showing this
+    /// side's dot where the pointer last was. It is hidden now.
+    @objc private func windowStoppedTracking(_ note: Notification) { hidePointerFromPeer() }
+
+    private func hidePointerFromPeer() {
+        guard pointerShown else { return }
+        pointerShown = false
+        controller?.cursorMoved(Cursor(x: 0, y: 0, visible: false))
+    }
+
+    /// A new size (the window moved to a display of another scale, the capture resized, the screen's room changed): the
+    /// strokes and the peer's cursor, kept in picture units, are laid out again, so they stay on what they mark.
+    public override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize != frame.size
+        super.setFrameSize(newSize)
+        if changed { relayout() }
+    }
+
+    /// Every stroke's ribbon and halo, and the peer's cursor, at the current size. Internal so a test can call it.
+    func relayout() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        for stroke in controller?.document.strokes ?? [] {
+            guard let shape = layers[stroke.id] else { continue }
+            let path = ribbon(for: stroke)
+            shape.path = path; shape.shadowPath = path
+        }
+        if let last = lastRemoteCursor { placeRemoteCursor(last.cursor, name: last.name) }
     }
 
     public override func viewDidChangeBackingProperties() {
@@ -247,16 +296,17 @@ public final class InkCanvasView: NSView {
         guard let id = activeId, let controller else { return }
         let p = normalized(event)
         controller.appendLocal(id, [p]); lastPoint = p
-        controller.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
+        controller.cursorMoved(Cursor(x: p.x, y: p.y, visible: true)); pointerShown = true
     }
     public override func mouseUp(with event: NSEvent) {
         guard let id = activeId else { return }
         controller?.endLocal(id); activeId = nil
     }
     public override func mouseMoved(with event: NSEvent) {
-        let p = normalized(event); controller?.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
+        let p = normalized(event); controller?.cursorMoved(Cursor(x: p.x, y: p.y, visible: true)); pointerShown = true
     }
     public override func mouseExited(with event: NSEvent) {
+        pointerShown = false
         controller?.cursorMoved(Cursor(x: 0, y: 0, visible: false))
     }
     public override func updateTrackingAreas() {
@@ -355,13 +405,21 @@ public final class InkCanvasView: NSView {
         CATransaction.commit()
     }
 
-    func hideRemoteCursor() { cursorDot.opacity = 0; cursorPill.opacity = 0 }
+    func hideRemoteCursor() { cursorDot.opacity = 0; cursorPill.opacity = 0; lastRemoteCursor = nil }
 
     /// Test only: where the peer's dot is, and whether it shows.
     var remoteCursorForTesting: (position: CGPoint, visible: Bool) { (cursorDot.position, cursorDot.opacity > 0) }
 
     /// The peer's cursor: the gold dot, and 12 pt to its right the peer's name on a pill (6 by 3 pt of padding).
     func showRemoteCursor(_ c: Cursor, name: String) {
+        lastRemoteCursor = (c, name)
+        placeRemoteCursor(c, name: name)
+        let target: Float = c.visible ? 1 : 0
+        if cursorDot.opacity != target { cursorDot.opacity = target; cursorPill.opacity = target }
+    }
+
+    /// The dot and the pill where `c` says, at the canvas's current size.
+    private func placeRemoteCursor(_ c: Cursor, name: String) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         cursorDot.position = CGPoint(x: CGFloat(c.x) * bounds.width, y: CGFloat(c.y) * bounds.height)
         if cursorLabel.string as? String != name { cursorLabel.string = name }
@@ -371,8 +429,6 @@ public final class InkCanvasView: NSView {
                                   width: width + 12, height: height + 6)
         cursorLabel.frame = CGRect(x: 6, y: 3, width: width, height: height)
         CATransaction.commit()
-        let target: Float = c.visible ? 1 : 0
-        if cursorDot.opacity != target { cursorDot.opacity = target; cursorPill.opacity = target }
     }
 }
 

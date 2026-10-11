@@ -486,6 +486,61 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 320, y: 0), "kept inside the picture")
     }
 
+    /// The canvas changes size (the window moved to a display of another scale, the capture resized): the strokes and
+    /// the peer's cursor, kept in picture units, are laid out again at the new size, rather than staying at the old place
+    /// and scale until they fade.
+    @MainActor
+    func testStrokesAndThePeersCursorFollowANewSize() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let ink = InkController(role: .share)
+        let canvas = InkCanvasView(controller: ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 4, points: [point]))
+        ink.remoteCursor(Cursor(x: 0.5, y: 0.5, visible: true), name: "Peer")
+        let stroke = try XCTUnwrap(ribbons(on: canvas).first)
+        XCTAssertEqual(stroke.path?.boundingBox.midX ?? 0, 80, accuracy: 0.5)
+        canvas.setFrameSize(NSSize(width: 640, height: 400))
+        XCTAssertEqual(stroke.path?.boundingBox.midX ?? 0, 160, accuracy: 0.5, "a quarter of the way across, at the new size")
+        XCTAssertEqual(stroke.path?.boundingBox.midY ?? 0, 100, accuracy: 0.5)
+        XCTAssertEqual(stroke.shadowPath, stroke.path, "the halo follows")
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 320, y: 200), "the peer's dot too")
+    }
+
+    /// ⌘Tab away (or a click in another app) while the pointer is over the picture: AppKit sends no `mouseExited`, so the
+    /// canvas hides this side's dot on the peer when its window stops being key or goes to the Dock.
+    @MainActor
+    func testThePointerIsHiddenFromThePeerWhenTheWindowStopsBeingKey() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let ink = InkController(role: .view)
+        var sent: [Message] = []
+        ink.onOutgoing = { sent.append($0) }
+        let canvas = InkCanvasView(controller: ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        let move = try XCTUnwrap(NSEvent.mouseEvent(with: .mouseMoved, location: NSPoint(x: 160, y: 100), modifierFlags: [],
+                                                    timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                                    clickCount: 0, pressure: 0))
+        canvas.mouseMoved(with: move)
+        XCTAssertEqual(sent.last, .cursor(Cursor(x: 0.5, y: 0.5, visible: true)))
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertEqual(sent.last, .cursor(Cursor(x: 0, y: 0, visible: false)), "hidden on the peer")
+        let count = sent.count
+        NotificationCenter.default.post(name: NSWindow.didMiniaturizeNotification, object: window)
+        XCTAssertEqual(sent.count, count, "once: it is hidden already")
+    }
+
+    /// The peer's name sits on a solid pill with a hairline, so a document's text does not show through it.
+    @MainActor
+    func testThePeersNameSitsOnASolidPill() {
+        let canvas = InkCanvasView(controller: InkController(role: .share))
+        let pill = canvas.layer?.sublayers?.first { $0.cornerRadius == 6 }
+        XCTAssertEqual(pill?.backgroundColor?.alpha, 1)
+        XCTAssertEqual(pill?.borderWidth, 1)
+    }
+
     /// The canvas draws with the theme's palette (spec 11), defined once for SwiftUI and the layers: this side's strokes
     /// in gold, the peer's in cream. A fade lasts what it is asked for: Reduce Motion takes away scale and the ring, never
     /// the fades.

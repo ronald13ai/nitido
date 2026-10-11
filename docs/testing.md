@@ -121,6 +121,8 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
     VoiceOver says "Wrong code", "Connected to <Mac>" and "Reconnecting to <Mac>", and names the picture "Screen shared by <Mac>", an image.
 45. Run seven or more copies sharing (`open -n build/Nítido.app` on two Macs), and open View on another.\
     The list scrolls inside the window, and every Mac can be reached and picked.
+46. With a viewer on a Mac with a Retina display and an external 1x display, draw a stroke over a word and, within four seconds, drag the viewer window to the other display; then, with the pointer over the picture, press ⌘Tab to another app.\
+    The stroke stays on the word at the new size while it fades, and the sharer's gold dot for the viewer disappears at the ⌘Tab.
 
 ## Before publishing
 

@@ -62,7 +62,7 @@ nitido (app)  ->  NitidoUI  ->  NitidoCapture, NitidoCodec, NitidoLink  ->  Niti
 
 ### NitidoUI (SwiftUI, AppKit, Metal)
 - `VideoView`: `CAMetalLayer` drawing a `CVPixelBuffer` with 1:1 pixel mapping when the window's backing scale and size allow it, otherwise a high-quality Lanczos downscale through CoreImage. The window opens at the content's point size so the default is 1:1.
-- `InkLayer`: `CALayer` above the video; one `CAShapeLayer` per stroke; local strokes in gold, remote strokes in cream; remote cursor as a gold dot with the peer's name.
+- `InkLayer`: `CALayer` above the video; one `CAShapeLayer` per stroke; local strokes in gold, remote strokes in cream; remote cursor as a gold dot with the peer's name. Strokes and the peer's cursor are kept in picture units and laid out again whenever the picture changes size (a move to a display of another scale, a resized capture), and this side's dot is hidden on the peer when its window stops being key or goes to the Dock, where AppKit sends no exit (amended 2026-10-11).
 - `TelemetryStrip`: the HUD (section 10).
 - Windows: Welcome, Share, View (section 9).
 
