@@ -117,6 +117,18 @@ extension ShareModel {
         unpaired[ObjectIdentifier(incoming)] = (incoming, states)
     }
 
+    /// Whether a viewer's automatic reconnect, from `host` with `name` in its hello, is the viewer holding the seat (from
+    /// `holderHost`, named `holderName`), replacing a link it lost: it comes from the same address, or says the same name.
+    /// A viewer whose own link failed at once (its Wi-Fi off, its Ethernet on) comes back from another address before this
+    /// side has noticed the old link is gone (3 s without a pong); by the address alone it was told another Mac was viewing,
+    /// about itself. The protocol carries no token for a viewer's session, so two Macs with the same name count as one
+    /// viewer here: the other one's reconnect takes the seat as this viewer's would (spec 6).
+    nonisolated static func isSameViewer(host: String?, name: String?, holderHost: String?, holderName: String?) -> Bool {
+        if let host, host == holderHost { return true }
+        if let name, !name.isEmpty, name == holderName { return true }
+        return false
+    }
+
     /// At most this many connections prove the code at once, and at most `maxUnpairedPerAddress` from one address.
     nonisolated static let maxUnpaired = 8
     nonisolated static let maxUnpairedPerAddress = 3
@@ -132,11 +144,12 @@ extension ShareModel {
             // The handshake proved the code and the hellos match: this viewer takes over from the current one, which is
             // told another Mac took its seat. Its messages are heard from now on (they wait in the link's stream until then).
             guard let pairing = unpaired.removeValue(forKey: ObjectIdentifier(l)) else { return }
-            if let holder = link, l.peerHello?.isReconnect == true, l.remoteHost == nil || l.remoteHost != holder.remoteHost {
+            if let holder = link, l.peerHello?.isReconnect == true,
+               !Self.isSameViewer(host: l.remoteHost, name: l.peerHello?.name, holderHost: holder.remoteHost, holderName: holder.peerHello?.name) {
                 // A viewer's automatic reconnect, while another Mac took the seat it lost (its lid closed, its Wi-Fi
                 // dropped): it does not take the seat back by itself. It is told another Mac is viewing, and its person
-                // decides; a connect they ask for takes the seat as any does. One from the address of the viewer holding
-                // the seat is that viewer, replacing a link it lost.
+                // decides; a connect they ask for takes the seat as any does. One that is the viewer holding the seat
+                // (`isSameViewer`) replaces a link it lost.
                 let who = l.peerHello?.name ?? "A viewer"
                 log.info("\(who, privacy: .public) reconnected by itself while \(self.viewerName ?? "another viewer", privacy: .public) holds the seat; telling it another Mac is viewing")
                 l.close(reason: ByeReason.replaced)

@@ -777,6 +777,56 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A viewer whose own link failed at once (its Wi-Fi off, its Ethernet on) reconnects by itself from another address
+    /// before the sharer has noticed the old link is gone (3 s without a pong). Its hello says the name of the viewer
+    /// holding the seat, so it is that viewer: it takes its seat back, instead of being told another Mac is viewing about
+    /// itself. A reconnect from another address under another name is still turned away.
+    @MainActor
+    func testAViewerThatReconnectsFromAnotherAddressTakesItsOwnSeatBack() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let port = NWEndpoint.Port(rawValue: share.listeningPort!)!
+        func connect(_ name: String, reconnect: Bool, from host: NWEndpoint.Host) -> NitidoLink.Link {
+            NitidoLink.Link.connect(to: .hostPort(host: host, port: port), code: share.code, sharerName: share.name,
+                                    hello: Hello(protocolVersion: protocolVersion, role: .view, name: name, pixelWidth: 0,
+                                                 pixelHeight: 0, scale: 2, isReconnect: reconnect))
+        }
+        let lost = connect("Viewer A", reconnect: false, from: "127.0.0.1")
+        defer { lost.close() }
+        try await waitUntil("A holds the seat") { share.viewerName == "Viewer A" && share.isSending }
+
+        let stranger = connect("Viewer C", reconnect: true, from: "::1")
+        var ended: NitidoLink.Link.State?
+        for await s in stranger.states { ended = s }
+        XCTAssertEqual(ended, .cancelled)
+        XCTAssertEqual(stranger.byeReason, ByeReason.replaced, "another Mac's reconnect is told another Mac is viewing")
+        XCTAssertEqual(share.connectionCount, 1)
+
+        let back = connect("Viewer A", reconnect: true, from: "::1")
+        defer { back.close() }
+        try await waitUntil("A's reconnect from another address takes its seat back") { share.connectionCount == 2 }
+        XCTAssertEqual(share.viewerName, "Viewer A")
+        XCTAssertEqual(share.link?.remoteHost, "::1", "the new link holds the seat")
+        try await waitUntil("the link it lost is let go") { lost.state == .cancelled }
+        XCTAssertNil(back.byeReason)
+        await share.stop()
+    }
+
+    /// The viewer holding the seat, coming back by itself, is the same address or the same name in its hello; an unknown
+    /// address or an empty name tells nothing.
+    func testTheSameViewerIsTheSameAddressOrTheSameName() {
+        XCTAssertTrue(ShareModel.isSameViewer(host: "192.168.1.20", name: "Ana", holderHost: "192.168.1.20", holderName: "Ana"))
+        XCTAssertTrue(ShareModel.isSameViewer(host: "10.0.0.20", name: "Ana", holderHost: "192.168.1.20", holderName: "Ana"),
+                      "another address, the same name")
+        XCTAssertTrue(ShareModel.isSameViewer(host: "192.168.1.20", name: "Bo", holderHost: "192.168.1.20", holderName: "Ana"),
+                      "the same address")
+        XCTAssertFalse(ShareModel.isSameViewer(host: "10.0.0.20", name: "Bo", holderHost: "192.168.1.20", holderName: "Ana"))
+        XCTAssertFalse(ShareModel.isSameViewer(host: nil, name: nil, holderHost: nil, holderName: nil), "nothing known")
+        XCTAssertFalse(ShareModel.isSameViewer(host: "10.0.0.20", name: "", holderHost: "192.168.1.20", holderName: ""),
+                       "an empty name tells nothing")
+    }
+
     /// Spec 12: a viewer on another protocol version that types the right code never takes the seat. Its link is ready
     /// only once the hellos match, which they never do, so the paired viewer goes on as it was (before, it was told the
     /// sharer ended its session), and the sharer says over the picture which version the other Mac speaks.
