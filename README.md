@@ -29,7 +29,7 @@ Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon
 
 ```bash
 git clone https://github.com/ronald13ai/nitido && cd nitido
-swift test                            # 354 tests (and 6 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
+swift test                            # 394 tests (and 6 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
 swift scripts/make-icon.swift build   # optional: the app icon
 scripts/bundle.sh                     # release build: build/Nítido.app, signed, and its zip
 open build/Nítido.app
@@ -76,11 +76,11 @@ One Swift package: five library targets, a thin app target, and a test-support t
 
 **`NitidoCodec`** wraps VideoToolbox in realtime mode with no frame reordering: HEVC Main, or H.264 High when there is no hardware HEVC encoder, with a keyframe every 120 frames or on request. The stream is tagged BT.709 with the sRGB transfer function, and the decoder hands its 4:2:0 pictures to Core Image, which converts them on the GPU as it draws.
 
-**`NitidoLink`** wraps Network.framework: a Bonjour `_nitido._tcp` listener and browser, and one TLS connection per peer for both directions. A ping every 500 ms gives the RTT and the clock offset; a link with no pong for 3 s fails. The sharer publishes its port and IPv4 addresses in its TXT record, and the viewer dials up to two of them, then the Bonjour service, within 8 s. After a drop the viewer reconnects with backoff (0.5, 1, 2 and 4 s, then every 5 s), each time to where discovery says the sharer is now. Both sides say hello with their protocol version first, and a mismatch ends the session with a message naming both versions.
+**`NitidoLink`** wraps Network.framework: a Bonjour `_nitido._tcp` listener and browser, and one TLS connection per peer for both directions. A ping every 500 ms gives the RTT and the clock offset; a link with no pong for 3 s fails. The sharer publishes its port and IPv4 addresses in its TXT record, and the viewer dials up to two of them, then the Bonjour service, within 8 s. After a drop the viewer reconnects with backoff (0.5, 1, 2 and 4 s, then every 5 s), each time to where discovery says the sharer is now, and says the sharer is no longer sharing once it has left discovery and refused for 30 s. Connected through a published address, the viewer browses without peer-to-peer Wi-Fi, which would otherwise keep the radio hopping between channels. Both sides say hello with their protocol version first, and a mismatch ends the session with a message naming both versions.
 
 **`NitidoUI`** holds the models and the windows. `VideoView` draws into a `CAMetalLayer` through Core Image: 1:1 when the window allows it, a Lanczos downscale when it does not, never an upscale. `FramePacer` keeps only the newest frame and as few drawables in flight as the display needs, because each drawable queued ahead of a frame delays it by a refresh ([`FramePacer.swift`](Sources/NitidoUI/FramePacer.swift) explains how many). `InkOverlay` draws strokes as variable-width ribbons over the video, and `TelemetryStrip` reads a snapshot four times a second. Drawing the held frame again after a resize never counts as a displayed frame, so the fps and latency figures count only frames that reached the screen.
 
-**`nitido`** is the app: one window, the menus, and a quit that tells the other Mac `bye` before the process ends (2 s at most). It has no logic of its own.
+**`nitido`** is the app: one window, the menus, and a quit that asks first while something is live and tells the other Mac `bye` before the process ends (2 s at most). It has no logic of its own.
 
 Every stage drops work instead of queueing it:
 
@@ -134,20 +134,21 @@ So the 4-digit code is for a network you trust (home, office), not public Wi-Fi.
 
 ## Testing
 
-`swift test` runs 354 XCTest tests, with no failures at the current commit (just under three minutes on an M5 once built); 6 more, the render gallery and the soak tests, run only with NITIDO_RENDER=1 or NITIDO_SOAK=1.
+`swift test` runs 394 XCTest tests, with no failures at the current commit (about three minutes on an M5 once built); 6 more, the render gallery and the soak tests, run only with NITIDO_RENDER=1 or NITIDO_SOAK=1.
 
-- `NitidoCore` (56): wire round-trips and decoding fed byte by byte, telemetry percentiles, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
-- `NitidoCodec` (20): encode and decode loops on real VideoToolbox sessions, keyframe requests, the decoder's skip rule, colour tags, failure reporting and the rate cap on a dense scrolling page.
-- `NitidoLink` (49): real TLS connections on this Mac (frames both ways, a wrong code, the negotiated ciphersuite, reconnects), the TXT record and the order of routes.
+- `NitidoCore` (59): wire round-trips and decoding fed byte by byte or a megabyte at a time, telemetry percentiles, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
+- `NitidoCodec` (23): encode and decode loops on real VideoToolbox sessions, odd sizes kept 1:1, H.264's size limit, keyframe requests, the decoder's skip rule, colour tags, failure reporting and the rate cap on a dense scrolling page.
+- `NitidoLink` (56): real TLS connections on this Mac (frames both ways, a wrong code, the negotiated ciphersuite, reconnects, a sharer gone for good), connections from outside the local network turned away before their handshake, the TXT record, the order of routes and discovery with and without peer-to-peer Wi-Fi.
 - `NitidoCapture` (16): restarts after a resize or a display mode change, the serial start and stop, and the capture clock.
-- `NitidoUI` (213): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink, window sizes and menus.
+- `NitidoUI` (240): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink (a hostile peer's included), window sizes, menus, quitting and the sleep a live session holds off.
 
 The picker and the Screen Recording grant, what reaches a real screen, and two real Macs are checked by hand: [docs/testing.md](docs/testing.md) is the checklist, one action and one expected result per item.
 
 ## Limits and what's next
 
 - Local network only: discovery is Bonjour and there is no NAT traversal. Next: WebRTC with STUN/TURN for the open internet.
-- One viewer at a time: a second viewer that proves the code takes the seat, and the first is told so.
+- One viewer at a time: a second viewer that proves the code takes the seat, and the first is told so; a viewer that reconnects by itself never takes it back.
+- Through the Bonjour service alone (when no IPv4 address the sharer publishes routes, on an IPv6-only network say), one wrong code can count as two or three on the sharer and reads as no answer on the viewer. Next: publish the IPv6 addresses too and dial them one at a time.
 - The 4-digit code is safe only on a trusted network (see Security). Next: SPAKE2 or a secret shared by QR code.
 - The build is signed for development, not notarized.
 - No audio, no remote control, no recording.
