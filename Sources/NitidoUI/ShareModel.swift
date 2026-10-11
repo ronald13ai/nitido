@@ -74,6 +74,12 @@ public final class ShareModel {
     /// next encoder output or frame failure, either of which frees a slot, encodes it (`encodePendingNewest`). Spec
     /// sections 5 and 8: the newest frame is the one that gets through, and a still source would send no other.
     @ObservationIgnored var newestPending = false
+    /// The capture time `encodePendingNewest` gives the frame waiting at the cap: the one it was turned away with (its
+    /// capture time, or the time it was encoded again over a still source, `encodeNewestAgain`).
+    @ObservationIgnored var newestPendingStamp: UInt64?
+    /// The pixel count of the encoder a rebuild let go (`rebuildEncoder`): the next one keeps the viewer's rate, and the
+    /// failures in a row go on counting, so failures that persist across rebuilds still end the share at ten.
+    @ObservationIgnored var rebuiltEncoderPixels: Int?
     /// Bumped by every quality change, loop off and retire, so a pending `qualityRested` for an earlier one does nothing.
     @ObservationIgnored var qualityRestToken: UInt64 = 0
     @ObservationIgnored var encodeStarts: [UInt32: Double] = [:]

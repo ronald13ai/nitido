@@ -4,6 +4,7 @@
 // failures in a row fail the share with Retry (`handleCodecError`, `failCodec`, `dropCodec`).
 
 import CoreVideo
+import VideoToolbox
 import QuartzCore
 import NitidoCore
 import NitidoCodec
@@ -41,24 +42,38 @@ extension ShareModel {
             // frees (`encodePendingNewest`), and counts as dropped only if a newer frame replaces it first (`ingest`,
             // `dropCodec`). The model never holds an invalidated encoder (`dropCodec` goes with every invalidation), so a
             // refusal here is always the cap.
-            if encoder.nextSeq == n { newestPending = true }
+            if encoder.nextSeq == n { newestPending = true; newestPendingStamp = captureHostTimeNs }
         }
     }
 
     /// After an encoder output or a frame failure, which frees a slot: the newest frame, turned away at the cap, goes in
-    /// now with its own capture time. Turned away again, it stays pending for the next one, so nothing builds a queue.
+    /// now with the stamp it was turned away with: its capture time, or for a still source's frame encoded again, the
+    /// time of that encode. Its capture time there would count how long the source had been still, seconds maybe, as
+    /// latency. Turned away again, it stays pending for the next one, so nothing builds a queue.
     private func encodePendingNewest() {
         guard newestPending else { return }
         newestPending = false
+        let stamp = newestPendingStamp
+        newestPendingStamp = nil
         guard loopback || isSending, state == .capturing, let raw = latestRaw else { return }
-        encode(raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs)
+        encode(raw.pixelBuffer, captureHostTimeNs: stamp ?? raw.captureHostTimeNs)
     }
 
     func makeEncoder(width: Int, height: Int) {
+        // A size change with a viewer connected (or a rebuild after failures) keeps what the controller learnt about the
+        // link: the rate scales with the pixel count. A new viewer, or the loop, sets its own (`linkStateChanged`).
+        let rebuilding = rebuiltEncoderPixels != nil
+        let previousPixels = encoder.map { $0.width * $0.height } ?? rebuiltEncoderPixels
+        rebuiltEncoderPixels = nil
         encoder?.invalidate(); decoder?.invalidate(); decoder = nil; decoderConfig = nil
-        codecNotice = nil; encodeFailures = 0; decodeFailures = 0
+        codecNotice = nil; decodeFailures = 0
+        if !rebuilding { encodeFailures = 0 }
         do throws(CodecError) {
-            let bitsPerSecond = loopback ? Int(qualityMbps * 1_000_000) : BitrateController.initialBitrate(width: width, height: height)
+            let keepsController = !loopback && isSending && previousPixels != nil
+            var rescaled = controller
+            let bitsPerSecond = loopback ? Int(qualityMbps * 1_000_000)
+                : keepsController ? rescaled.rescale(fromPixels: previousPixels!, toPixels: width * height)
+                : BitrateController.initialBitrate(width: width, height: height)
             let e = try VideoEncoder(width: width, height: height, preferred: .hevc, bitsPerSecond: bitsPerSecond)
             // Both through the session's mailbox, in the order they come (`encoderOutput`). `onError` is set before the
             // first encode. It runs on a VideoToolbox queue, or on this thread inside `encode` and `setBitrate`, and a
@@ -68,7 +83,8 @@ extension ShareModel {
             e.onFrame = { f in output?.yield(.frame(f)) }
             e.onError = { err in output?.yield(.error(err)) }
             encoder = e
-            currentBitrate = bitsPerSecond; controller = BitrateController(initial: currentBitrate)
+            currentBitrate = bitsPerSecond
+            controller = keepsController ? rescaled : BitrateController(initial: currentBitrate)
             codecLabel = e.codec == .hevc ? "HEVC" : "H.264"
         } catch {
             log.error("could not create the video encoder: \(String(describing: error), privacy: .public)")
@@ -120,6 +136,11 @@ extension ShareModel {
             // VideoToolbox dropped (`droppedByEncoder`). Not once the encoder is gone (the loop turned off, a share
             // retired): a late failure from it makes no new one.
             guard let encoder else { return }
+            if Self.rebuildsEncoder(after: error, failuresInARow: encodeFailures) {
+                log.error("the video encoder failed \(self.encodeFailures, privacy: .public) frames in a row, the last with \(String(describing: error), privacy: .public); making a fresh one")
+                rebuildEncoder()
+                return
+            }
             encodePendingNewest()
             if encoder.isKeyframeRequested { sendKeyframe() }
         case .property(let key, let status):
@@ -146,6 +167,25 @@ extension ShareModel {
         if encoder.isKeyframeRequested { sendKeyframe() }
     }
 
+    /// Whether an encode failure lets the encoder go for a fresh one: every third in a row, as the viewer lets its decoder
+    /// go (`ViewModel.decodeFailed`), and at once for a session VideoToolbox no longer runs (invalidated, which a sleep and
+    /// wake or a GPU reset can leave behind, or malfunctioning), which fails every frame. Ten in a row still end the share.
+    nonisolated static func rebuildsEncoder(after error: CodecError, failuresInARow: Int) -> Bool {
+        if case .encode(let status) = error,
+           [kVTInvalidSessionErr, kVTVideoEncoderMalfunctionErr, kVTSessionMalfunctionErr].contains(status) { return true }
+        return failuresInARow % 3 == 0
+    }
+
+    /// Lets a failing encoder go. The next frame makes a fresh one (`encode`), at the same rate for a viewer, with the
+    /// failures in a row still counting, and its first frame is a keyframe that carries the setup; over a still source
+    /// `sendKeyframe` encodes the newest frame again to make it. VideoToolbox reports nothing more from the one let go.
+    private func rebuildEncoder() {
+        rebuiltEncoderPixels = encoder.map { $0.width * $0.height }
+        encoder?.invalidate(); encoder = nil
+        encodePendingNewest()
+        sendKeyframe()
+    }
+
     /// The encoder or the decoder (`part`) is not coming back by itself: stop both, keep the raw picture, offer Retry
     /// (a fresh session and encoder).
     func failCodec(_ part: String, message: String) {
@@ -162,5 +202,6 @@ extension ShareModel {
         if newestPending { telemetry.recordDrop(at: CACurrentMediaTime()) }
         encoder?.invalidate(); decoder?.invalidate(); encoder = nil; decoder = nil; decoderConfig = nil
         encodeFailures = 0; decodeFailures = 0; codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); newestPending = false
+        newestPendingStamp = nil; rebuiltEncoderPixels = nil
     }
 }

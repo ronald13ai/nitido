@@ -24,6 +24,18 @@ public struct BitrateController: Sendable {
         return Swift.max(2_000_000, Swift.min(60_000_000, Int(bps)))
     }
 
+    /// The picture changed size (a window resized, a display mode changed): the rate scales by the ratio of the pixel
+    /// counts, within the bounds, and what the controller learnt about the link (the RTT baseline, a hold after a cut)
+    /// stays. Starting from the initial rate would throw away the cuts a congested link needed, and its keyframe would
+    /// flood the link the controller had calmed. Returns the new rate.
+    @discardableResult
+    public mutating func rescale(fromPixels old: Int, toPixels new: Int) -> Int {
+        guard old > 0, new > 0, old != new else { return bitsPerSecond }
+        let scaled = Double(bitsPerSecond) * Double(new) / Double(old)
+        bitsPerSecond = Swift.max(minimum, Swift.min(maximum, Int(scaled.rounded())))
+        return bitsPerSecond
+    }
+
     /// The rate to encode at from now on. `rttMs` is the RTT p50 of the last second, `backlogBytes` the link's send
     /// backlog (the measure the sender's dropping rule judges: without the keyframe on its way), `frameAgeMs`
     /// the age of the newest frame the viewer reported (nil when unknown); `now` is in seconds. `skippedForBacklog`

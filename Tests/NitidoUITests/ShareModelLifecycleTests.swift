@@ -1,5 +1,6 @@
 import XCTest
 import CoreVideo
+import VideoToolbox
 import QuartzCore
 import CoreText
 import CoreImage
@@ -1238,6 +1239,75 @@ final class ShareModelLifecycleTests: XCTestCase {
             model.state == .failed("Video encoding keeps failing.")
         }
         XCTAssertEqual(model.codecLabel, "raw")
+        await model.stop()
+    }
+
+    /// A session VideoToolbox stopped running (invalidated after a sleep and wake, say) fails every frame. Every third
+    /// failure in a row lets the encoder go, and a status that says the session is gone does so at once: the next frame
+    /// makes a fresh encoder, whose first frame is a keyframe, and the share goes on instead of failing within ten frames.
+    @MainActor
+    func testAFailingEncoderIsMadeAgainBeforeTheShareFails() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "x")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        await drain()
+        model.loopback = true
+        source.emit(frame: try capturedFrame(index: 0))
+        try await waitUntil("the loop makes an encoder") { model.encoder != nil }
+        let first = try XCTUnwrap(model.encoder)
+        try await Task.sleep(for: .milliseconds(300))
+        let report = try XCTUnwrap(first.onError)
+        report(.encode(-12902)); report(.encode(-12902))
+        await drain()
+        XCTAssertTrue(model.encoder === first, "two failures leave the encoder")
+        report(.encode(-12902))
+        // The third lets it go; a still source sends nothing, so the newest frame is encoded again by a fresh encoder.
+        try await waitUntil("a fresh encoder") { model.encoder != nil && model.encoder !== first }
+        XCTAssertEqual(model.state, .capturing)
+        let second = try XCTUnwrap(model.encoder)
+        try await Task.sleep(for: .milliseconds(300))
+        try XCTUnwrap(second.onError)(.encode(kVTInvalidSessionErr))
+        try await waitUntil("an invalidated session goes at once") { model.encoder != nil && model.encoder !== second }
+        XCTAssertEqual(model.state, .capturing)
+        await model.stop()
+    }
+
+    /// A still source's frame encoded again is stamped as it reaches the encoder, so the latency does not count how long
+    /// the source has been still. Turned away at the encoder's two-in-flight cap, it keeps that stamp when it goes in
+    /// once a slot frees, rather than its capture time seconds ago.
+    @MainActor
+    func testAFrameEncodedAgainKeepsItsStampWhenTheCapHoldsItBack() async throws {
+        let journal = Journal()
+        let factory = Factory(journal: journal, prefix: "w")
+        let model = ShareModel(makeSource: factory.make, screenRecordingGranted: { true })
+        model.start(excludingWindowIDs: [])
+        await drain()
+        let source = factory.made[0]
+        source.emit(.started(pixelWidth: 1920, pixelHeight: 1080, scale: 2))
+        await drain()
+        model.loopback = true
+        let still = try solidFrame(index: 0, width: 1920, height: 1080)
+        source.emit(frame: still)
+        try await waitUntil("the loop makes an encoder") { model.encoder != nil }
+        let encoder = try XCTUnwrap(model.encoder)
+        try await Task.sleep(for: .milliseconds(700))   // the source has been still for most of a second
+        let emitted = EncodedTimes()
+        let deliver = encoder.onFrame
+        encoder.onFrame = { frame in
+            let time = frame.captureHostTimeNs
+            Task { @MainActor in emitted.times.append(time) }
+            deliver?(frame)
+        }
+        let again = UInt64(CACurrentMediaTime() * 1e9)
+        for _ in 0..<3 { model.encodeNewestAgain() }   // more than the two the encoder takes at once
+        XCTAssertTrue(model.newestPending, "the cap held the third back")
+        try await waitUntil("all three went in") { emitted.times.count >= 3 }
+        XCTAssertTrue(emitted.times.allSatisfy { $0 >= again }, "every one stamped as it was encoded again, none with the capture time: \(emitted.times.map { Int64($0) - Int64(again) })")
+        XCTAssertFalse(emitted.times.contains(still.captureHostTimeNs))
         await model.stop()
     }
 

@@ -101,4 +101,17 @@ final class BitrateControllerTests: XCTestCase {
         for i in 0..<20 { _ = d.update(rttMs: 10, backlogBytes: 0, frameAgeMs: nil, fps: 60, now: Double(i * 3)) }
         XCTAssertEqual(d.bitsPerSecond, 60_000_000)
     }
+
+    /// A resize scales the rate by the pixel count within the bounds, and the controller keeps its hold after a cut.
+    func testARescaleScalesByThePixelCountAndKeepsTheHold() {
+        var c = BitrateController(initial: 20_000_000)
+        _ = c.update(rttMs: 10, backlogBytes: 10_000_000, frameAgeMs: nil, fps: 60, now: 0)   // a cut, and its hold
+        XCTAssertEqual(c.bitsPerSecond, 15_000_000)
+        XCTAssertEqual(c.rescale(fromPixels: 1000, toPixels: 2000), 30_000_000)
+        XCTAssertEqual(c.update(rttMs: 10, backlogBytes: 10_000_000, frameAgeMs: nil, fps: 60, now: 1), 30_000_000,
+                       "still within the hold of the cut before the resize")
+        XCTAssertEqual(c.rescale(fromPixels: 1, toPixels: 100), 60_000_000, "the maximum")
+        XCTAssertEqual(c.rescale(fromPixels: 1000, toPixels: 1), 2_000_000, "the minimum")
+        XCTAssertEqual(c.rescale(fromPixels: 0, toPixels: 5), 2_000_000, "no size to scale from: unchanged")
+    }
 }

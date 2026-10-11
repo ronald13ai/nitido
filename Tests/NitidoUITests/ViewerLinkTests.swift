@@ -2054,6 +2054,35 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A resize with a viewer connected keeps what the controller learnt about the link: the new encoder starts at the
+    /// rate the controller had cut to, scaled by the pixel count, not at the initial rate for the new size, which on a
+    /// congested link would flood it again with a keyframe and deltas the controller had to cut back down.
+    @MainActor
+    func testAResizeKeepsTheViewersAdaptedRateScaledByThePixelCount() async throws {
+        let (share, source) = try await listeningShare(width: 1920, height: 1080)
+        source.emit(frame: try stripedFrame(width: 1920, height: 1080))
+        await drain()
+        let viewer = ViewModel()
+        viewer.select(peer(for: share)); viewer.code = share.code; viewer.connect()
+        let initial = BitrateController.initialBitrate(width: 1920, height: 1080)
+        try await waitUntil("the viewer is connected at the initial rate") { viewer.state == .connected && share.currentBitrate == initial }
+        let link = try XCTUnwrap(share.link)
+        let congestion = 40 * share.frameBytes
+        link.addBacklogForTesting(congestion)
+        try await waitUntil("the controller cuts the rate") { share.currentBitrate < initial }
+        link.addBacklogForTesting(-congestion)
+        let cut = share.currentBitrate
+
+        source.emit(.started(pixelWidth: 960, pixelHeight: 540, scale: 2))
+        source.emit(frame: try stripedFrame(width: 960, height: 540))
+        try await waitUntil("the encoder is made for the new size") { share.encoder?.width == 960 }
+        XCTAssertEqual(share.currentBitrate, max(2_000_000, cut / 4), "a quarter of the pixels, a quarter of the rate it had cut to")
+        XCTAssertEqual(share.controller.bitsPerSecond, share.currentBitrate, "the controller goes on from there")
+        XCTAssertNotEqual(share.currentBitrate, BitrateController.initialBitrate(width: 960, height: 540))
+        viewer.disconnect()
+        await share.stop()
+    }
+
     /// Spec 1 allows connecting a viewer, then turning the codec loop on: the loop's picture and the strip's bitrate then
     /// show the slider's rate (20 Mbps by default), not the rate the controller had set for the viewer (2 Mbps for this
     /// 320x180 picture), which the loop would otherwise keep until the slider moved. A new encoder takes the slider's
