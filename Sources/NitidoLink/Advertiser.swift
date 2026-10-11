@@ -39,8 +39,18 @@ public final class Advertiser: @unchecked Sendable {
     private let paths = NWPathMonitor()
     /// The addresses the TXT record publishes now. Only touched on `queue`.
     private var published: [IPv4Address] = []
+    /// Connections turned away before their handshake because they did not come from the local network (`admit`).
+    private let rejected = OSAllocatedUnfairLock(initialState: 0)
+    /// Test only: how many connections `admit` turned away.
+    var rejectedForTesting: Int { rejected.withLock { $0 } }
 
-    public init(name: String, code: String, hello: Hello, port: UInt16? = nil) throws {
+    public convenience init(name: String, code: String, hello: Hello, port: UInt16? = nil) throws {
+        try self.init(name: name, code: code, hello: hello, port: port, networks: LocalNetworks.current)
+    }
+
+    /// `networks` says what this Mac's networks are when a connection comes in (`InboundFilter`); a test gives its own.
+    init(name: String, code: String, hello: Hello, port: UInt16? = nil,
+         networks: @escaping @Sendable () -> LocalNetworks) throws {
         let params = LinkTLS.parameters(code: code, sharerName: name)
         listener = try port.map { try NWListener(using: params, on: NWEndpoint.Port(rawValue: $0)!) } ?? NWListener(using: params)
         self.name = name
@@ -51,11 +61,25 @@ public final class Advertiser: @unchecked Sendable {
         self.hello = OSAllocatedUnfairLock(initialState: hello)
         listener.serviceRegistrationUpdateHandler = { [weak self] change in self?.registrationChanged(change) }
         listener.newConnectionHandler = { [weak self] connection in
-            guard let self else { return }
+            // Nobody would hold or cancel it, and Network.framework keeps a connection until it is cancelled.
+            guard let self else { connection.cancel(); return }
+            guard admit(connection, networks: networks()) else { return }
             let link = Link(connection: connection, role: .share, hello: self.hello.withLock { $0 })
             link.start()
             deliver(link)
         }
+    }
+
+    /// Spec 13: only the local network reaches the code. A connection from anywhere else (over a VPN tunnel, cellular,
+    /// or from a public address on none of this Mac's networks, such as a globally routable IPv6 address the router lets
+    /// through) is cancelled here, before `Link.start` begins its TLS handshake, so it never tests a guess and never
+    /// counts as a wrong code; the log says why. Called on `queue`.
+    private func admit(_ connection: NWConnection, networks: LocalNetworks) -> Bool {
+        guard let reason = InboundFilter.rejection(of: connection, networks: networks) else { return true }
+        rejected.withLock { $0 += 1 }
+        log.info("turning away a connection from \(String(describing: connection.endpoint), privacy: .public) before its handshake: \(reason, privacy: .public)")
+        connection.cancel()
+        return false
     }
 
     /// Puts a connection the listener took on `incoming`. One taken while the listener stops (a rotation, on another

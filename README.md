@@ -123,6 +123,7 @@ Pairing uses TLS 1.2 with a pre-shared key derived with HKDF-SHA256 from the 4-d
 - Someone who only records the traffic cannot decrypt it, not even after learning the code later, because of the ephemeral key exchange.
 - A wrong code fails the handshake, and three wrong codes change the code. The sharer counts attempts, not handshakes: failures from one address less than a second apart are one attempt, up to four. So the code changes by the ninth failed handshake from one address at the latest, and a port scan or a connection cut short counts for nothing.
 - At most eight connections prove the code at once, three from one address.
+- Only the local network reaches the code: a connection over a VPN tunnel or cellular, or from a public address on none of the sharer's networks (a globally routable IPv6 address, say), is closed before its handshake and logged. Private addresses on another VLAN of the same network still get through.
 
 What it does not protect against:
 
