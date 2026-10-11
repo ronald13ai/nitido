@@ -113,6 +113,66 @@ final class AppModelTests: XCTestCase {
         await other.stop()
     }
 
+    /// Connected as a viewer, ⌘N to share back, then Esc (or the File menu's Esc item, titled Cancel Sharing there) on the
+    /// Share screen while the picker is up, after a capture failure, and after Retry: Esc does what the picker's Cancel
+    /// does. Only the share goes, back to the View screen, with no "Disconnect?", and the Mac being watched never sees
+    /// this one leave.
+    @MainActor
+    func testEscapeOnThePickerOrAFailureWhileViewingDropsOnlyTheShare() async throws {
+        let (other, peer) = try await otherMac()
+        let sources = PickerSources()
+        let app = app(sources)
+        app.startView()
+        let viewer = try XCTUnwrap(app.view)
+        viewer.select(peer); viewer.code = other.code; viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && other.isSending }
+
+        /// Esc on the Share screen: the share goes alone, and the viewer stays as it was.
+        func escapeDropsOnlyTheShare(_ when: String) async throws {
+            XCTAssertEqual(app.screen, .share, when)
+            XCTAssertEqual(app.menu.stopTitle, "Cancel Sharing", "the menu item says what Esc does \(when)")
+            app.escape()
+            XCTAssertFalse(app.confirmStop, "no \"Disconnect?\" \(when): only the share was being picked")
+            try await waitUntil("the share goes \(when)") { app.share == nil }
+            XCTAssertEqual(app.screen, .view, "back to where the person came from \(when)")
+            XCTAssertTrue(app.view === viewer, when)
+            XCTAssertEqual(viewer.state, .connected, "the viewer kept its link \(when)")
+        }
+
+        // While the picker is up.
+        app.startShare()
+        await drain()
+        XCTAssertEqual(app.share?.state, .picking)
+        try await escapeDropsOnlyTheShare("while picking")
+
+        // After a capture failure: the failure card, with Retry.
+        app.startShare()
+        await drain()
+        sources.made.last?.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the share captures") { app.share?.state == .capturing }
+        sources.made.last?.emit(.failed(CaptureFailure(reason: .other, detail: "the stream stopped")))
+        try await waitUntil("the share failed") { if case .failed = app.share?.state { true } else { false } }
+        try await escapeDropsOnlyTheShare("after a failure")
+
+        // After Retry: the picker is up again.
+        app.startShare()
+        await drain()
+        sources.made.last?.emit(.failed(CaptureFailure(reason: .other, detail: "the stream could not start")))
+        try await waitUntil("the share failed") { if case .failed = app.share?.state { true } else { false } }
+        app.share?.retry()
+        await drain()
+        XCTAssertEqual(app.share?.state, .picking)
+        try await escapeDropsOnlyTheShare("after Retry")
+
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(viewer.state, .connected)
+        XCTAssertTrue(other.isSending, "the Mac being watched never saw this one leave")
+        XCTAssertEqual(other.viewerName, viewer.name)
+
+        await app.stop()
+        await other.stop()
+    }
+
     /// With a viewer that is only looking for Macs, a cancelled picker also goes back to View; with none, to Welcome.
     @MainActor
     func testACancelledPickerGoesBackToWelcomeOrToTheViewScreen() async throws {
@@ -360,5 +420,10 @@ final class AppModelTests: XCTestCase {
         let listOverAShare = AppModel.menu(screen: .view, sharing: true, viewing: false)
         XCTAssertEqual(listOverAShare.stopTitle, "Stop Sharing")
         XCTAssertFalse(listOverAShare.canInk, "no picture shown, so no ink to act on")
+        let pickingOverAView = AppModel.menu(screen: .share, sharing: false, viewing: true, shareBack: true)
+        XCTAssertEqual(pickingOverAView, .init(stopTitle: "Cancel Sharing", canStop: true, canToggleTelemetry: true, canInk: false, canToggleLoop: false),
+                       "Esc on the picker or a failure, with a viewer open, drops the share alone and goes back to View")
+        XCTAssertEqual(AppModel.menu(screen: .share, sharing: false, viewing: false, shareBack: true).stopTitle, "Cancel Sharing",
+                       "with a viewer only looking for Macs too")
     }
 }

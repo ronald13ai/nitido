@@ -48,10 +48,11 @@ public final class AppModel {
         model.start(excludingWindowIDs: excluded)
     }
 
-    /// The share's picker was cancelled before anything was shared (its first pick, or the one after Retry): only the
-    /// share goes. The window goes back where the person came from: the View screen while a viewer is open (on the Share
-    /// screen a viewer can only be there because they came from View with ⌘N, since `stop` always lets the viewer go),
-    /// Welcome otherwise. A viewer's link stays as it was, connected or not.
+    /// The share's picker was cancelled before anything was shared (its first pick, or the one after Retry), or Esc was
+    /// pressed on the picker or a failure with a viewer open (`shareBack`): only the share goes. The window goes back
+    /// where the person came from: the View screen while a viewer is open (on the Share screen a viewer can only be there
+    /// because they came from View with ⌘N, since `stop` always lets the viewer go), Welcome otherwise. A viewer's link
+    /// stays as it was, connected or not.
     func cancelShare() {
         let s = share
         share = nil
@@ -106,14 +107,19 @@ public final class AppModel {
         public var canToggleLoop: Bool
     }
 
-    public var menu: Menu { Self.menu(screen: screen, sharing: sharing, viewing: viewing, viewBack: viewBack) }
+    public var menu: Menu {
+        Self.menu(screen: screen, sharing: sharing, viewing: viewing, viewBack: viewBack, shareBack: shareBack)
+    }
 
     /// `sharing`: a picture is being shared; `viewing`: a viewer is connected or reconnecting; `viewBack`: the View
-    /// screen shows the code or a failure, where Esc does what Back does (`requestStop`). Esc on Welcome does
-    /// nothing; the ink is there only over a live picture; the codec loop belongs to a live share.
-    nonisolated static func menu(screen: Screen, sharing: Bool, viewing: Bool, viewBack: Bool = false) -> Menu {
+    /// screen shows the code or a failure, where Esc does what Back does (`requestStop`); `shareBack`: the Share screen
+    /// shows the picker or a failure while a viewer is open, where Esc does what the picker's Cancel does. Esc on
+    /// Welcome does nothing; the ink is there only over a live picture; the codec loop belongs to a live share.
+    nonisolated static func menu(screen: Screen, sharing: Bool, viewing: Bool, viewBack: Bool = false,
+                                 shareBack: Bool = false) -> Menu {
         let stopTitle: String = switch (sharing, viewing, screen) {
         case (_, _, .view) where viewBack: "Back"
+        case (false, _, .share) where shareBack: "Cancel Sharing"
         case (true, true, _): "Stop Sharing and Disconnect"
         case (true, false, _): "Stop Sharing"
         case (false, true, _): "Disconnect"
@@ -238,11 +244,19 @@ public final class AppModel {
         }
     }
 
-    /// On the code or a failure of the View screen, Esc is Back: to the list of Macs (`viewBack`). Otherwise it asks
-    /// first (`stopQuestion`, `RootView`) while a picture is being shared or a viewer is connected or reconnecting; with
-    /// nothing live (a picker, the list of Macs) it stops at once.
+    /// The Share screen shows the picker or a failure (nothing is being shared) while a viewer is open: the person came
+    /// from View with ⌘N (`cancelShare`). Esc there does what the picker's Cancel does, instead of asking about the
+    /// viewer's link.
+    private var shareBack: Bool { screen == .share && share != nil && !sharing && view != nil }
+
+    /// On the code or a failure of the View screen, Esc is Back: to the list of Macs (`viewBack`). On the picker or a
+    /// failure of the Share screen with a viewer open, Esc is the picker's Cancel: the share goes alone, back to View,
+    /// and the viewer keeps its link (`shareBack`). Otherwise it asks first (`stopQuestion`, `RootView`) while a picture
+    /// is being shared or a viewer is connected or reconnecting; with nothing live (a picker, the list of Macs) it stops
+    /// at once.
     public func requestStop() {
         if viewBack, let view { view.disconnect(); return }
+        if shareBack { cancelShare(); return }
         quitAsked = false
         if sharing || viewing { confirmStop = true } else { Task { await stop() } }
     }
