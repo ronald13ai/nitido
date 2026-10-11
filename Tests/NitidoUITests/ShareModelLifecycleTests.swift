@@ -1033,9 +1033,11 @@ final class ShareModelLifecycleTests: XCTestCase {
         await model.stop()
     }
 
-    /// Spec 9: a codec that cannot start is said in one plain sentence, what happened and what to do, with the status
-    /// for whoever reads the log alongside (the log names the case). No hardware encoder takes a picture 100,000 pixels
-    /// wide, so the loop's encoder cannot start here, as on a Mac whose encoder is not available.
+    /// Spec 9: a codec that cannot start is said in plain sentences, what happened and what to do (the log names the
+    /// case and both statuses). No hardware encoder takes a picture 100,000 pixels wide, so the loop's encoder cannot
+    /// start here; the H.264 fallback's limit is what the picture is over, so the way forward is a smaller picture, not
+    /// a Retry at this size (every size within that limit starts on this Mac, so the generic sentence is not reachable
+    /// here).
     @MainActor
     func testAnEncoderThatCannotStartSaysSoInOneSentence() async throws {
         let journal = Journal()
@@ -1050,8 +1052,7 @@ final class ShareModelLifecycleTests: XCTestCase {
         source.emit(frame: try capturedFrame(index: 0, width: 100_000, height: 2))
         try await waitUntil("the share fails") { model.state != .capturing }
         guard case .failed(let message) = model.state else { return XCTFail("expected a failure, got \(model.state)") }
-        XCTAssertTrue(message.hasPrefix("This Mac's hardware video encoder could not start (error "), message)
-        XCTAssertTrue(message.hasSuffix("); press Retry to try again."), message)
+        XCTAssertEqual(message, "The picture (100000 × 2 pixels) is too large for this Mac's hardware video encoder, which takes up to 4096 × 2304. Press Retry and pick a smaller window, or choose a scaled mode for the display in System Settings.")
         XCTAssertFalse(message.contains("VideoToolbox"), message)
         await model.stop()
     }
