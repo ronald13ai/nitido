@@ -107,8 +107,8 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
 
 38. With a viewer connected, press ⌘W on the viewer, then click its close button, then press ⌘Q, choosing Cancel each time; then press ⌘W and choose Disconnect.\
     Each time the viewer asks "Disconnect?" and Cancel keeps the picture live and the sharer's panel unchanged; after Disconnect the viewer quits and the sharer shows no viewer.
-39. Connected as a viewer, press ⌘N, cancel the system picker; then ⌘N again, pick a window, choose Stop Sharing in the menu bar's screen-sharing menu, press Retry and cancel that picker.\
-    Each cancel goes back to the View screen with the picture still live and no question asked, and the sharer's panel keeps this Mac as its viewer.
+39. Connected as a viewer, press ⌘N, cancel the system picker; then ⌘N again, pick a window, choose Stop Sharing in the menu bar's screen-sharing menu, press Retry and cancel that picker. Then press ⌘N and, with the picker up, press Esc in the Nítido window; then ⌘N, pick a window, choose Stop Sharing in the menu bar and press Esc on the failure card.\
+    Each cancel and each Esc goes back to the View screen with the picture still live and no question asked (on the picker and the failure card the File menu's Esc item reads Cancel Sharing), and the sharer's panel keeps this Mac as its viewer.
 40. On a 1x display (or with the display at a scaled mode that gives 1 px per point), share a TextEdit window and drag it to an odd width and height (the strip's size figure ends in odd numbers, such as 1347×879), turn on the Codec loop at 60 Mbps and drag the divider across, then pair a viewer.\
     The text right of the divider is as sharp as left of it across the whole picture, middle included, with no step at the divider; the viewer's picture is the same size as in the sharer's strip, with no dark line along its left or bottom edge.
 41. With viewer A connected, close A's lid (or turn its Wi-Fi off) for a minute; meanwhile pair viewer B, a third Mac or a second copy on another Mac, with the same code; then open A again.\
