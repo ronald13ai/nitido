@@ -125,6 +125,8 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
     The stroke stays on the word at the new size while it fades, and the sharer's gold dot for the viewer disappears at the ⌘Tab.
 47. On the macOS 15 Mac and the macOS 26 Mac, look at Nítido.app in Finder's list view, in Spotlight's results and in the ⌘Tab switcher.\
     Note how the N reads at those small sizes on each system (the icon there is Icon Composer's, flattened; spec 11 says why the tuned small sizes do not reach it).
+48. With a viewer connected, minimize its window to the Dock (its yellow button, or ⌘M) and press ⌘Q; choose Cancel, minimize it again and press Esc (the File menu's Disconnect item).\
+    Each time the window comes back from the Dock at once with "Disconnect?" on it, and Cancel keeps the picture live.
 
 ## Before publishing
 
