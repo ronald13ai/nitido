@@ -596,7 +596,7 @@ final class InkRibbonPiecesTests: XCTestCase {
         }
         XCTAssertEqual(ink.document.strokes.first?.points.count, 2001)
         let first = costs.prefix(100).reduce(Duration.zero, +), last = costs.suffix(100).reduce(Duration.zero, +)
-        XCTAssertLessThanOrEqual(last, first * 3, "the last 100 appends took \(last), the first 100 \(first)")
+        XCTAssertLessThanOrEqual(last, first * 6, "the last 100 appends took \(last), the first 100 \(first); the bound is loose so one scheduler preemption cannot fail it, while the old quadratic ribbon took about 37x")
     }
 
     /// Drawn in pieces as it grows, a long stroke has the very outline the whole ribbon had: every point of both edges

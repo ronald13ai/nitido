@@ -54,7 +54,7 @@ struct NitidoApp: App {
             CommandGroup(after: .newItem) {
                 Divider()
                 // Listed for discoverability; while the window is key, Esc is handled inside it (RootView). Both go
-                // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while something is live.
+                // through `escape()`, which asks "Stop sharing?" or "Disconnect?" first while a capture or a connected viewer is live, and cancels the share alone when only the picker or a failure card is up with a viewer open.
                 Button(app.menu.stopTitle) { app.escape() }.keyboardShortcut(.escape, modifiers: [])
                     .disabled(!app.menu.canStop)
             }
