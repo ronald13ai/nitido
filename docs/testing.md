@@ -9,7 +9,7 @@ The log lines quoted below are info or error lines. Read them with `log stream -
 1. On a user account that has never granted Nítido Screen Recording, click Share.\
    While the system picker is up, the Share window says macOS may ask for Screen Recording after the pick, and why.
 2. Pick a window, and deny Screen Recording when macOS asks.\
-   The Share window says "Nítido is not allowed to record the screen." with the fix, offers Open System Settings and Retry, and shows no system wording such as "TCC".
+   The Share window shows the card "Screen Recording is off": it says "Nítido is not allowed to record the screen.", to turn Screen Recording on for Nítido in System Settings and then quit and reopen Nítido, and that if the switch is on already another copy of Nítido holds it (remove Nítido from the list with the minus button and add it again). It offers Open System Settings and Quit and Reopen, no Retry, and shows no system wording such as "TCC".
 3. Turn on Screen Recording for Nítido in System Settings, choose Later if macOS offers Quit & Reopen, then press Quit and Reopen on Nítido's card, click Share in the copy that opens and pick the window again.\
    The card said to quit and reopen (not Retry) and that a switch already on belongs to another copy; Quit and Reopen opened Nítido again on Welcome, and the picture appears at 1:1 with the strip under it.
 4. Open each menu on Welcome, then again over a live share.\
