@@ -7,11 +7,28 @@ import UniformTypeIdentifiers
 // template's shadow) with a thin gold italic N, a faint gold glow behind it and a 1 px highlight along the top edge.
 // Every slot of the iconset is drawn at its own pixel size; at 16, 32 and 64 px the N is also stroked, so Cormorant's
 // hairline diagonals hold instead of breaking up. It also writes the N alone as a layer for Icon Composer
-// (AppIcon.icon, macOS 26), which draws the tile, the glass and the shadow itself.
+// (AppIcon.icon), which draws the tile, the glass and the shadow itself, and which is what macOS 15 and 26 both show:
+// the app's bundle names it (`CFBundleIconName`, scripts/bundle.sh), and actool flattens its one 1024 px layer for
+// every size. The iconset's tuned small sizes therefore reach only a system older than the app's minimum (macOS 11).
 // Usage: swift scripts/make-icon.swift build
 let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "build"
-let fontURL = URL(fileURLWithPath: "Sources/NitidoUI/Fonts/CormorantGaramond-Italic.ttf")
-CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
+// The font next to this script's repository, wherever it is run from: from anywhere but the repository root, a path
+// relative to the current directory found nothing, Core Text fell back to a system font without a word, and the icon
+// got the wrong N.
+let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+let fontURL = repository.appendingPathComponent("Sources/NitidoUI/Fonts/CormorantGaramond-Italic.ttf")
+var registrationError: Unmanaged<CFError>?
+if !CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, &registrationError) {
+    let error = registrationError?.takeRetainedValue()
+    // Registered already in this process is fine; anything else (the file missing, unreadable) is not.
+    if (error.map { CFErrorGetCode($0) } ?? 0) != CTFontManagerError.alreadyRegistered.rawValue {
+        fatalError("could not register \(fontURL.path): \(error.map { String(describing: $0) } ?? "unknown error")")
+    }
+}
+let checked = CTFontCreateWithName("CormorantGaramond-Italic" as CFString, 12, nil)
+guard CTFontCopyPostScriptName(checked) as String == "CormorantGaramond-Italic" else {
+    fatalError("Core Text gave \(CTFontCopyPostScriptName(checked)) for Cormorant Garamond Italic: the icon would get the wrong N")
+}
 let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
 
 func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
@@ -145,6 +162,7 @@ for (name, px) in [("16", 16), ("16@2x", 32), ("32", 32), ("32@2x", 64), ("128",
 }
 let util = Process(); util.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil"); util.arguments = ["-c", "icns", iconset, "-o", "\(outDir)/AppIcon.icns"]
 try util.run(); util.waitUntilExit()
+guard util.terminationStatus == 0 else { fatalError("iconutil could not make \(outDir)/AppIcon.icns (status \(util.terminationStatus))") }
 print("wrote \(outDir)/AppIcon.icns")
 
 // Icon Composer's format: the tile's fill, and the N as its own layer, which macOS 26 lays on its own glass and shadow.

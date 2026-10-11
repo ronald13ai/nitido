@@ -123,6 +123,8 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
     The list scrolls inside the window, and every Mac can be reached and picked.
 46. With a viewer on a Mac with a Retina display and an external 1x display, draw a stroke over a word and, within four seconds, drag the viewer window to the other display; then, with the pointer over the picture, press ⌘Tab to another app.\
     The stroke stays on the word at the new size while it fades, and the sharer's gold dot for the viewer disappears at the ⌘Tab.
+47. On the macOS 15 Mac and the macOS 26 Mac, look at Nítido.app in Finder's list view, in Spotlight's results and in the ⌘Tab switcher.\
+    Note how the N reads at those small sizes on each system (the icon there is Icon Composer's, flattened; spec 11 says why the tuned small sizes do not reach it).
 
 ## Before publishing
 

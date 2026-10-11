@@ -25,7 +25,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/nitido "$APP/Contents/MacOS/nitido"
 cp -R .build/release/nitido_NitidoUI.bundle "$APP/Contents/Resources/"
 # The icon (scripts/make-icon.swift): Icon Composer's AppIcon.icon, compiled into the asset catalog, is the one macOS
-# shows (macOS 26 lays the N on its own glass; actool flattens it for macOS 15); AppIcon.icns stays as the fallback.
+# shows from macOS 11 on, and so on every system Nítido runs on: macOS 26 lays the N on its own glass, and actool
+# flattens the one 1024 px layer for macOS 15 at every size (the iconset's stroked 16 and 32 px do not reach it: an app
+# icon set passed to actool beside the .icon changes nothing in the catalog, measured with Xcode 26). actool writes its
+# own AppIcon.icns from the .icon too; make-icon's goes in only when there is no .icon to compile.
 ICON_NAME=""
 if [ -d build/AppIcon.icon ]; then
   # Absolute paths: given relative ones, actool reports the file missing and still exits 0, so the catalog is checked too.
@@ -38,7 +41,7 @@ if [ -d build/AppIcon.icon ]; then
   fi
   ICON_NAME="  <key>CFBundleIconName</key><string>AppIcon</string>"
 fi
-[ -f build/AppIcon.icns ] && cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+if [ -z "$ICON_NAME" ] && [ -f build/AppIcon.icns ]; then cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"; fi
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
