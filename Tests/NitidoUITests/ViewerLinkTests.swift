@@ -971,6 +971,23 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Bonjour may rename a sharer that comes back: viewed as "MacBook Pro (2)", relaunched after the other "MacBook Pro"
+    /// left, it lists as "MacBook Pro" under another id. The viewer finds it by the name its key is derived from, which it
+    /// publishes, when exactly one listed Mac has that name; with two, it cannot tell them apart and keeps what it chose.
+    func testAPeerRenamedByBonjourIsFoundByItsKeyName() {
+        let service = { (name: String) in NWEndpoint.service(name: name, type: "_nitido._tcp", domain: "local.", interface: nil) }
+        let chosen = Peer(id: "MacBook Pro (2)", name: "MacBook Pro (2)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (2)"), port: 50_001)
+        let renamed = Peer(id: "MacBook Pro", name: "MacBook Pro", keyName: "MacBook Pro", endpoint: service("MacBook Pro"), port: 50_002)
+        let other = Peer(id: "Mac mini", name: "Mac mini", keyName: "Mac mini", endpoint: service("Mac mini"), port: 50_003)
+        XCTAssertEqual(ViewModel.latest(chosen, in: [other, renamed]).port, 50_002, "found under its new name")
+        XCTAssertNotNil(ViewModel.listing(of: chosen, in: [other, renamed]))
+        let twin = Peer(id: "MacBook Pro (3)", name: "MacBook Pro (3)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (3)"), port: 50_004)
+        XCTAssertEqual(ViewModel.latest(chosen, in: [renamed, twin]).port, 50_001, "two with that name: the one chosen")
+        XCTAssertNil(ViewModel.listing(of: chosen, in: [renamed, twin]))
+        XCTAssertNil(ViewModel.listing(of: chosen, in: [other]), "gone from discovery")
+        XCTAssertEqual(ViewModel.latest(chosen, in: [renamed, chosen]).port, 50_001, "its own id first")
+    }
+
     /// A sharer that drops without saying bye (a cable pull, a process that died) puts the viewer in Reconnecting, and
     /// the viewer pairs again by itself as soon as the sharer answers, asking for a keyframe.
     @MainActor

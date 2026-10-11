@@ -221,7 +221,8 @@ public final class ViewModel {
         // a sharer that relaunched or rotated its code listens on a new port, and publishes it.
         let listed = listed
         let session = LinkSession(peer: Self.latest(peer, in: peers), code: code, hello: hello,
-                                  currentPeer: { Self.latest(peer, in: listed.withLock { $0 }) })
+                                  currentPeer: { Self.latest(peer, in: listed.withLock { $0 }) },
+                                  isListed: { Self.listing(of: peer, in: listed.withLock { $0 }) != nil })
         link?.close()
         link = session
         currentPeer = peer
@@ -247,9 +248,21 @@ public final class ViewModel {
         session.start()
     }
 
-    /// What discovery says now about `peer`, chosen from the list earlier: the entry with its id (a sharer whose code
-    /// rotated listens on a new port, and publishes it), or `peer` as it was chosen once the list no longer has it.
-    nonisolated static func latest(_ peer: Peer, in list: [Peer]) -> Peer { list.first { $0.id == peer.id } ?? peer }
+    /// What discovery says now about `peer`, chosen from the list earlier (`listing`), or `peer` as it was chosen once the
+    /// list no longer has it.
+    nonisolated static func latest(_ peer: Peer, in list: [Peer]) -> Peer { listing(of: peer, in: list) ?? peer }
+
+    /// `peer`'s entry in `list`: the one with its id (a sharer whose code rotated listens on a new port, and publishes
+    /// it), or else the one entry with its key name. Bonjour may rename a service that comes back: two Macs left at the
+    /// default name list as "MacBook Pro" and "MacBook Pro (2)", and the one being viewed, relaunched after the other
+    /// left, comes back as "MacBook Pro" under another id. It still publishes the name its key is derived from, so the
+    /// reconnect finds its new port (and says its code changed) instead of dialling the old one for ever. Nil when the
+    /// list has neither, or more than one entry with that key name.
+    nonisolated static func listing(of peer: Peer, in list: [Peer]) -> Peer? {
+        if let same = list.first(where: { $0.id == peer.id }) { return same }
+        let named = list.filter { $0.keyName == peer.keyName }
+        return named.count == 1 ? named[0] : nil
+    }
 
     public func retry() {
         wrongCodeCount = 0; failureOffersReconnect = false; failedOverPicture = false; failureIsFinal = false

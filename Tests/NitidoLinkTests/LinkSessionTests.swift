@@ -168,6 +168,40 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertEqual(reached, 1, "one handshake on the sharer, once discovery said where it is")
     }
 
+    /// A sharer that was force-quit, crashed or shut down: every published address refuses the reconnects, and discovery
+    /// no longer lists it. After the grace the sharer itself gives a dropped viewer, the session ends saying so, instead
+    /// of showing Reconnecting for ever (a relaunched sharer has a new code, so no reconnect could pass by itself). While
+    /// discovery still lists it, the session keeps waiting for what discovery says next.
+    func testASharerGoneFromDiscoveryWhoseAddressesKeepRefusingEndsTheSession() async throws {
+        for listed in [false, true] {
+            let first = try Advertiser(name: "Sharer", code: "1234", hello: hello(.share))
+            let firstPort = try await first.start()
+            let peer = discovered(port: firstPort, service: absentService())
+            let session = LinkSession(peer: peer, code: "1234", hello: hello(.view), connectTimeout: 8, waitingTimeout: 5,
+                                      unreachableAfter: 4, currentPeer: { peer }, isListed: { listed }, goneAfter: 2)
+            let watcher = Task { () -> [LinkSession.State] in
+                var seen: [LinkSession.State] = []
+                for await s in session.states { seen.append(s) }
+                return seen
+            }
+            session.start()
+            var incoming = first.incoming.makeAsyncIterator()
+            guard let dropped = await incoming.next() else { return XCTFail("no connection") }
+            for await s in dropped.states { if s == .ready { break } }
+            dropped.abort(); first.stop()   // gone: nothing listens on its port any more
+            try await Task.sleep(for: .seconds(6))
+            session.close()
+            let seen = await watcher.value
+            if listed {
+                XCTAssertTrue(seen.contains { if case .reconnecting = $0 { true } else { false } })
+                XCTAssertEqual(seen.last, .closed(nil), "still listed: it goes on waiting until the person leaves")
+            } else {
+                XCTAssertEqual(seen.filter { if case .closed = $0 { true } else { false } }, [.closed("Sharer is no longer sharing.")],
+                               "gone from discovery and refusing for the grace: \(seen)")
+            }
+        }
+    }
+
     /// Spec 12: a protocol mismatch is final and names both versions. The two sides exchange hellos once TLS is up, and
     /// a link is ready only when they match, so a sharer on another version is never shown as connected, and the
     /// session ends as `.incompatible` with the sharer's version instead of reconnecting every 5 s forever.

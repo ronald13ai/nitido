@@ -54,18 +54,30 @@ public final class LinkSession: @unchecked Sendable {
     private var open = true
     private var attempt = 0
     private var everReady = false
+    /// When the reconnects began to find every published address refusing (`follow`); nil once one does not.
+    private var refusedSince: Double?
+    /// Whether discovery still lists the sharer; asked when every published address refuses a reconnect.
+    private let isListed: @Sendable () -> Bool
+    /// How long every published address may refuse the reconnects, with the sharer gone from discovery, before the
+    /// session ends: the sharer gives a dropped viewer as long (spec 12). Only tests shorten it.
+    private let goneAfter: Double
     private let messageOut: AsyncStream<Message>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
 
     /// The longest a published address may go without taking the connection (TCP's setup) before the next route is tried.
     static let unreachableAfter: Double = 4
+    /// `goneAfter` in the app: 30 s, the grace the sharer gives a viewer that dropped.
+    static let goneAfter: Double = 30
 
     /// To the sharer on `peer`, under the name it keyed its listener with (`Peer.keyName`), through its routes as
     /// `currentPeer` gives them at each attempt: what discovery says about that sharer then (a sharer that relaunched or
-    /// rotated its code listens on a new port, and publishes it), or `peer` itself without one.
-    public convenience init(peer: Peer, code: String, hello: Hello, currentPeer: (@Sendable () -> Peer)? = nil) {
+    /// rotated its code listens on a new port, and publishes it), or `peer` itself without one. `isListed` says whether
+    /// discovery still lists that sharer: one gone from it whose every published address has refused the reconnects for
+    /// 30 s is no longer sharing (it quit, crashed or shut down), and the session ends saying so.
+    public convenience init(peer: Peer, code: String, hello: Hello, currentPeer: (@Sendable () -> Peer)? = nil,
+                            isListed: (@Sendable () -> Bool)? = nil) {
         self.init(peer: peer, code: code, hello: hello, connectTimeout: Link.defaultConnectTimeout, waitingTimeout: 5,
-                  unreachableAfter: Self.unreachableAfter, currentPeer: currentPeer)
+                  unreachableAfter: Self.unreachableAfter, currentPeer: currentPeer, isListed: isListed)
     }
 
     /// To `endpoint` alone.
@@ -78,7 +90,8 @@ public final class LinkSession: @unchecked Sendable {
     /// is dialled before one on none of them, so a desktop sharer whose Ethernet is on another network does not hold up
     /// its Wi-Fi address, and one on none of them is still dialled, before the Bonjour service.
     convenience init(peer: Peer, code: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double,
-                     subnets: @escaping @Sendable () -> [IPv4Subnet] = IPv4Subnet.local, currentPeer: (@Sendable () -> Peer)? = nil) {
+                     subnets: @escaping @Sendable () -> [IPv4Subnet] = IPv4Subnet.local, currentPeer: (@Sendable () -> Peer)? = nil,
+                     isListed: (@Sendable () -> Bool)? = nil, goneAfter: Double = LinkSession.goneAfter) {
         self.init(findRoutes: {
             let networks = subnets()
             let current = currentPeer?() ?? peer
@@ -89,7 +102,7 @@ public final class LinkSession: @unchecked Sendable {
             }
             return current.routes(on: networks)
         }, code: code, sharerName: peer.keyName, hello: hello, connectTimeout: connectTimeout, waitingTimeout: waitingTimeout,
-                  unreachableAfter: unreachableAfter)
+                  unreachableAfter: unreachableAfter, isListed: isListed ?? { true }, goneAfter: goneAfter)
     }
 
     convenience init(endpoint: NWEndpoint, code: String, sharerName: String, hello: Hello, connectTimeout: Double, waitingTimeout: Double) {
@@ -106,8 +119,10 @@ public final class LinkSession: @unchecked Sendable {
 
     /// `findRoutes` never gives an empty list: the Bonjour service, or the one endpoint, is always the last route.
     private init(findRoutes: @escaping @Sendable () -> [NWEndpoint], code: String, sharerName: String, hello: Hello,
-                 connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double) {
+                 connectTimeout: Double, waitingTimeout: Double, unreachableAfter: Double,
+                 isListed: @escaping @Sendable () -> Bool = { true }, goneAfter: Double = LinkSession.goneAfter) {
         self.findRoutes = findRoutes; self.code = code; self.sharerName = sharerName; self.hello = hello
+        self.isListed = isListed; self.goneAfter = goneAfter
         self.connectTimeout = connectTimeout; self.waitingTimeout = waitingTimeout; self.unreachableAfter = unreachableAfter
         (messages, messageOut) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
@@ -170,7 +185,7 @@ public final class LinkSession: @unchecked Sendable {
             for await s in link.states {
                 switch s {
                 case .ready:
-                    lock.withLock { everReady = true; attempt = 0 }
+                    lock.withLock { everReady = true; attempt = 0; refusedSince = nil }
                     stateOut.yield(.ready)
                 case .failed(let reason):
                     if link.incompatible {
@@ -185,12 +200,25 @@ public final class LinkSession: @unchecked Sendable {
                         // is gone. The Bonjour service would make three or four failed handshakes there per attempt
                         // between two Macs, which rotates its code again under whoever is typing it: the next attempt
                         // dials what discovery says by then instead (`currentPeer`), and fails no handshake meanwhile.
-                        log.info("every published address of \(self.sharerName, privacy: .public) refused the reconnect: its listener moved (a new code) or is gone; waiting for discovery instead of trying the Bonjour service")
-                        scheduleRetry(after: reason, codeRejected: false)
+                        let now = CACurrentMediaTime()
+                        let since = lock.withLock { () -> Double in
+                            if refusedSince == nil { refusedSince = now }
+                            return refusedSince!
+                        }
+                        if now - since >= goneAfter, !isListed() {
+                            // Nothing has listened there for that long and discovery no longer lists it: the sharer quit,
+                            // crashed or shut down. A relaunched one has a new code, so no reconnect can pass by itself.
+                            log.info("every published address of \(self.sharerName, privacy: .public) has refused the reconnects for \(Int(now - since), privacy: .public) s and discovery no longer lists it; ending the session")
+                            end(.closed("\(sharerName) is no longer sharing."))
+                        } else {
+                            log.info("every published address of \(self.sharerName, privacy: .public) refused the reconnect: its listener moved (a new code) or is gone; waiting for discovery instead of trying the Bonjour service")
+                            scheduleRetry(after: reason, codeRejected: false)
+                        }
                     } else if link.unreachable, index + 1 < routes.count, let next = nextRoute(routes, after: index, deadline: deadline) {
                         log.info("\(String(describing: routes[index]), privacy: .public) did not reach \(self.sharerName, privacy: .public) (\(reason, privacy: .public)); trying the next route")
                         follow(next, routes, route: index + 1, deadline: deadline, refusedSoFar: refusedSoFar && link.refused)
                     } else {
+                        lock.withLock { refusedSince = nil }
                         scheduleRetry(after: reason, codeRejected: link.keyMismatch)
                     }
                 case .cancelled:

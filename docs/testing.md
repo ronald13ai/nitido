@@ -84,10 +84,10 @@ Items 29 and 30 need two Macs: two copies on one Mac may keep their link when th
     On the sharer the stroke stops growing and fades about seven seconds after the Wi-Fi goes off (three to notice the drop, four before the fade), instead of staying until ⌘⌫.
 31. With a viewer connected, quit the sharer with ⌘Q and choose Stop; then relaunch it, share, pair again, click the sharer's close button and choose Stop.\
     Each time the sharer asks "Stop sharing?" first, and the viewer says "The sharer ended the session."
-32. With a viewer connected, kill the sharer with `kill -9`.\
-    The viewer shows "Reconnecting…", and its log ("link failed (...); retry n in ...s") shows growing gaps between attempts.
-33. Relaunch the sharer and share again.\
-    Within a few seconds the viewer says "The code on <Mac> has changed. Enter the new code to connect again.", and the sharer's new code does not change by itself.
+32. With a viewer connected, kill the sharer with `kill -9`, and leave it killed.\
+    The viewer shows "Reconnecting…", its log ("link failed (...); retry n in ...s") shows growing gaps between attempts, and about 30 s after the kill it says "<Mac> is no longer sharing." with Try again and Back.
+33. Pair again, kill the sharer with `kill -9`, then within 20 s relaunch it and share again.\
+    Within a few seconds of the share the viewer says "The code on <Mac> has changed. Enter the new code to connect again.", and the sharer's new code does not change by itself.
 34. With a viewer connected, choose Stop Sharing in the menu bar's screen-sharing menu, then press Retry on the sharer.\
     The Share window says "Sharing was stopped from the menu bar." over the dimmed last picture and hides the code, the Codec loop switch and the strip, the viewer says "<Mac> stopped sharing." over its own last frame, and after Retry the viewer pairs again with the same code.
 
