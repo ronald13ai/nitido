@@ -229,9 +229,11 @@ public final class ViewModel {
         // the address it published first on this Mac's networks (`Peer.routes(on:)`), as discovery says at each attempt:
         // a sharer that relaunched or rotated its code listens on a new port, and publishes it.
         let listed = listed
-        let session = LinkSession(peer: Self.latest(peer, in: peers), code: code, hello: hello,
-                                  currentPeer: { Self.latest(peer, in: listed.withLock { $0 }) },
-                                  isListed: { Self.listing(of: peer, in: listed.withLock { $0 }) != nil })
+        // What discovery last said about this sharer: each attempt looks for it from there (`follow`).
+        let seen = OSAllocatedUnfairLock(initialState: peer)
+        let session = LinkSession(peer: Self.follow(seen, in: peers) ?? peer, code: code, hello: hello,
+                                  currentPeer: { Self.follow(seen, in: listed.withLock { $0 }) ?? seen.withLock { $0 } },
+                                  isListed: { Self.follow(seen, in: listed.withLock { $0 }) != nil })
         link?.close()
         link = session
         currentPeer = peer
@@ -261,16 +263,35 @@ public final class ViewModel {
     /// list no longer has it.
     nonisolated static func latest(_ peer: Peer, in list: [Peer]) -> Peer { listing(of: peer, in: list) ?? peer }
 
-    /// `peer`'s entry in `list`: the one with its id (a sharer whose code rotated listens on a new port, and publishes
-    /// it), or else the one entry with its key name. Bonjour may rename a service that comes back: two Macs left at the
-    /// default name list as "MacBook Pro" and "MacBook Pro (2)", and the one being viewed, relaunched after the other
-    /// left, comes back as "MacBook Pro" under another id. It still publishes the name its key is derived from, so the
-    /// reconnect finds its new port (and says its code changed) instead of dialling the old one for ever. Nil when the
-    /// list has neither, or more than one entry with that key name.
+    /// `seen`, what discovery last said about a session's sharer, looked for in `list` (`listing`) and brought up to date
+    /// when found: a sharer renamed, on a new port or with a new address since it was chosen is still recognised by what
+    /// it published last. Nil when `list` no longer has it.
+    nonisolated static func follow(_ seen: OSAllocatedUnfairLock<Peer>, in list: [Peer]) -> Peer? {
+        seen.withLock { last in
+            guard let found = listing(of: last, in: list) else { return nil }
+            last = found
+            return found
+        }
+    }
+
+    /// `peer`'s entry in `list`, by what it published: the one with its id (a sharer whose code rotated listens on a new
+    /// port, and publishes it); else, under its key name, the one on its port at an address it published (the same
+    /// listener, its service renamed); else the one at an address it published (the same Mac relaunched, on a new port
+    /// with a new code, which the reconnect then asks for). Bonjour renames a service that comes back: two Macs left at
+    /// the default name list as "MacBook Pro" and "MacBook Pro (2)", and the one viewed, relaunched after the other left,
+    /// comes back as "MacBook Pro" under another id. Another Mac of that name publishes other addresses and is never
+    /// taken for it: dialled with this code, it would count a wrong code, and the viewer would say its code changed
+    /// instead of, once the Mac viewed has left discovery for 30 s, that it is no longer sharing. Only when the addresses
+    /// cannot tell them apart (one side published none) is the one entry with that key name taken; a code that no longer
+    /// pairs there says the code changed. Nil when the list has none of these, or more than one.
     nonisolated static func listing(of peer: Peer, in list: [Peer]) -> Peer? {
         if let same = list.first(where: { $0.id == peer.id }) { return same }
         let named = list.filter { $0.keyName == peer.keyName }
-        return named.count == 1 ? named[0] : nil
+        let atItsAddress = named.filter { $0.addresses.contains(where: peer.addresses.contains) }
+        if let port = peer.port, let renamed = atItsAddress.first(where: { $0.port == port }) { return renamed }
+        if !atItsAddress.isEmpty { return atItsAddress.count == 1 ? atItsAddress[0] : nil }
+        let untold = named.filter { $0.addresses.isEmpty || peer.addresses.isEmpty }
+        return untold.count == 1 ? untold[0] : nil
     }
 
     public func retry() {

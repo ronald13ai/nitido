@@ -1061,6 +1061,61 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(ViewModel.latest(chosen, in: [renamed, chosen]).port, 50_001, "its own id first")
     }
 
+    /// Two Macs of the same name: the one viewed lists as "MacBook Pro (2)" beside the other "MacBook Pro". Killed, and
+    /// gone from discovery, it is not taken for the other one, which publishes other addresses: dialled with this code,
+    /// that Mac counted a wrong code (one of three towards a new code), and the viewer said "The code on MacBook Pro has
+    /// changed" instead of, 30 s on, that the Mac viewed is no longer sharing. Relaunched (a new port, and Bonjour's first
+    /// name once the other left), the Mac viewed is found by an address it published, and the reconnect asks for its new
+    /// code; beside the other one too. The same listener renamed is found by its address and port.
+    func testAnotherMacOfTheSameNameIsNeverTakenForTheOneViewed() {
+        let service = { (name: String) in NWEndpoint.service(name: name, type: "_nitido._tcp", domain: "local.", interface: nil) }
+        let wifi = IPv4Address("192.168.1.20")!, ethernet = IPv4Address("10.0.0.20")!, elsewhere = IPv4Address("192.168.1.31")!
+        let chosen = Peer(id: "MacBook Pro (2)", name: "MacBook Pro (2)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (2)"),
+                          addresses: [ethernet, wifi], port: 50_001)
+        let other = Peer(id: "MacBook Pro", name: "MacBook Pro", keyName: "MacBook Pro", endpoint: service("MacBook Pro"),
+                         addresses: [elsewhere], port: 50_002)
+        XCTAssertNil(ViewModel.listing(of: chosen, in: [other]), "the other Mac of that name is not the one viewed")
+        XCTAssertEqual(ViewModel.latest(chosen, in: [other]), chosen, "the reconnect keeps dialling the Mac viewed")
+
+        let relaunched = Peer(id: "MacBook Pro", name: "MacBook Pro", keyName: "MacBook Pro", endpoint: service("MacBook Pro"),
+                              addresses: [wifi], port: 50_007)
+        XCTAssertEqual(ViewModel.listing(of: chosen, in: [relaunched]), relaunched, "relaunched: an address it published, a new port")
+        let beside = Peer(id: "MacBook Pro (3)", name: "MacBook Pro (3)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (3)"),
+                          addresses: [ethernet, wifi], port: 50_008)
+        XCTAssertEqual(ViewModel.listing(of: chosen, in: [other, beside]), beside, "told apart from the other by its addresses")
+        let renamed = Peer(id: "MacBook Pro (4)", name: "MacBook Pro (4)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (4)"),
+                           addresses: [wifi], port: 50_001)
+        XCTAssertEqual(ViewModel.listing(of: chosen, in: [beside, renamed]), renamed, "the same listener renamed: its address and port first")
+        let copy = Peer(id: "MacBook Pro (5)", name: "MacBook Pro (5)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (5)"),
+                        addresses: [wifi], port: 50_009)
+        XCTAssertNil(ViewModel.listing(of: chosen, in: [relaunched, copy]), "two copies on the Mac viewed: it cannot tell which")
+        let silent = Peer(id: "MacBook Pro (6)", name: "MacBook Pro (6)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (6)"), port: 50_010)
+        XCTAssertEqual(ViewModel.listing(of: chosen, in: [other, silent]), silent,
+                       "one that publishes no address cannot be told apart: found by its key name, and a code that no longer pairs says so")
+    }
+
+    /// A session looks for its sharer by what discovery said about it last: one whose address changed under the same
+    /// service (a new DHCP lease) and that then relaunched under another name is found by the address it published last,
+    /// which the one it was chosen with no longer is; gone again, what it published last stays.
+    func testASessionFollowsWhatItsSharerPublishedLast() {
+        let service = { (name: String) in NWEndpoint.service(name: name, type: "_nitido._tcp", domain: "local.", interface: nil) }
+        let first = IPv4Address("192.168.1.20")!, renewed = IPv4Address("192.168.1.44")!
+        let chosen = Peer(id: "MacBook Pro (2)", name: "MacBook Pro (2)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (2)"),
+                          addresses: [first], port: 50_001)
+        let seen = OSAllocatedUnfairLock(initialState: chosen)
+        let moved = Peer(id: "MacBook Pro (2)", name: "MacBook Pro (2)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (2)"),
+                         addresses: [renewed], port: 50_001)
+        XCTAssertEqual(ViewModel.follow(seen, in: [moved]), moved)
+        let relaunched = Peer(id: "MacBook Pro", name: "MacBook Pro", keyName: "MacBook Pro", endpoint: service("MacBook Pro"),
+                              addresses: [renewed], port: 50_007)
+        let other = Peer(id: "MacBook Pro (3)", name: "MacBook Pro (3)", keyName: "MacBook Pro", endpoint: service("MacBook Pro (3)"),
+                         addresses: [IPv4Address("192.168.1.31")!], port: 50_002)
+        XCTAssertNil(ViewModel.listing(of: chosen, in: [other, relaunched]), "not by the address it was chosen with")
+        XCTAssertEqual(ViewModel.follow(seen, in: [other, relaunched]), relaunched, "by the address it published last")
+        XCTAssertNil(ViewModel.follow(seen, in: [other]))
+        XCTAssertEqual(seen.withLock { $0 }, relaunched, "gone again: what it published last stays")
+    }
+
     /// A sharer that drops without saying bye (a cable pull, a process that died) puts the viewer in Reconnecting, and
     /// the viewer pairs again by itself as soon as the sharer answers, asking for a keyframe.
     @MainActor
