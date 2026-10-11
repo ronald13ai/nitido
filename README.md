@@ -29,7 +29,7 @@ Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon
 
 ```bash
 git clone https://github.com/ronald13ai/nitido && cd nitido
-swift test                            # 395 tests (and 6 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
+swift test                            # 403 tests (and 6 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
 swift scripts/make-icon.swift build   # optional: the app icon
 scripts/bundle.sh                     # release build: build/Nítido.app, signed, and its zip
 open build/Nítido.app
@@ -134,13 +134,13 @@ So the 4-digit code is for a network you trust (home, office), not public Wi-Fi.
 
 ## Testing
 
-`swift test` runs 395 XCTest tests, with no failures at the current commit (about three minutes on an M5 once built); 6 more, the render gallery and the soak tests, run only with NITIDO_RENDER=1 or NITIDO_SOAK=1.
+`swift test` runs 403 XCTest tests, with no failures at the current commit (about three minutes on an M5 once built); 6 more, the render gallery and the soak tests, run only with NITIDO_RENDER=1 or NITIDO_SOAK=1.
 
 - `NitidoCore` (59): wire round-trips and decoding fed byte by byte or a megabyte at a time, telemetry percentiles, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
 - `NitidoCodec` (23): encode and decode loops on real VideoToolbox sessions, odd sizes kept 1:1, H.264's size limit, keyframe requests, the decoder's skip rule, colour tags, failure reporting and the rate cap on a dense scrolling page.
 - `NitidoLink` (56): real TLS connections on this Mac (frames both ways, a wrong code, the negotiated ciphersuite, reconnects, a sharer gone for good), connections from outside the local network turned away before their handshake, the TXT record, the order of routes and discovery with and without peer-to-peer Wi-Fi.
 - `NitidoCapture` (16): restarts after a resize or a display mode change, the serial start and stop, and the capture clock.
-- `NitidoUI` (241): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink (a hostile peer's included), window sizes, menus, quitting and the sleep a live session holds off.
+- `NitidoUI` (249): the frame pacer against a fake display, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink (a hostile peer's included, and a long stroke's cost per point), window sizes, menus, quitting and the sleep a live session holds off.
 
 The picker and the Screen Recording grant, what reaches a real screen, and two real Macs are checked by hand: [docs/testing.md](docs/testing.md) is the checklist, one action and one expected result per item.
 
