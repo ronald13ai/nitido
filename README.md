@@ -35,7 +35,7 @@ scripts/bundle.sh                     # release build: build/Nítido.app, signed
 open build/Nítido.app
 ```
 
-macOS keeps a Screen Recording grant only for a signed bundle, so share from the bundle; `swift run nitido` is fine for a look at the windows.
+macOS keeps a Screen Recording grant only for a signed bundle, so share from the bundle; `swift run nitido` is fine for a look at the windows. If Nítido says Screen Recording is off while its switch in System Settings is on, another copy of Nítido signed by someone else (the zip, then a build of your own, or the other way round) holds the grant: remove Nítido from the list with the minus button and add it again, or run `tccutil reset ScreenCapture ai.ronar.nitido`, then quit and reopen Nítido.
 
 **On one Mac.** Click Share and pick a window. macOS asks for Screen Recording the first time; allow it, and choose Quit & Reopen if it offers that. Turn on the Codec loop switch (or press ⌘L) and drag the slider and the divider. For the network path, start a second copy with `open -n build/Nítido.app` (or `open -n Nítido.app` from the zip), click View in it (⌘⇧V), pick this Mac and type the code the first copy shows. The two copies talk over the same TLS link two Macs use.
 

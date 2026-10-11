@@ -10,8 +10,8 @@ The log lines quoted below are info or error lines. Read them with `log stream -
    While the system picker is up, the Share window says macOS may ask for Screen Recording after the pick, and why.
 2. Pick a window, and deny Screen Recording when macOS asks.\
    The Share window says "Nítido is not allowed to record the screen." with the fix, offers Open System Settings and Retry, and shows no system wording such as "TCC".
-3. Turn on Screen Recording for Nítido in System Settings (choose Quit & Reopen if macOS offers it), then press Retry (or Share, if macOS relaunched Nítido) and pick the window again.\
-   The picture appears at 1:1 with the strip under it.
+3. Turn on Screen Recording for Nítido in System Settings, choose Later if macOS offers Quit & Reopen, then press Quit and Reopen on Nítido's card, click Share in the copy that opens and pick the window again.\
+   The card said to quit and reopen (not Retry) and that a switch already on belongs to another copy; Quit and Reopen opened Nítido again on Welcome, and the picture appears at 1:1 with the strip under it.
 4. Open each menu on Welcome, then again over a live share.\
    Nítido appears once, as the app menu; File holds Share… (⌘N) and View… (⌘⇧V), Edit holds Undo Stroke and Clear Ink, View holds Toggle Telemetry and Codec Loop; every shortcut works from its menu, all of these but Share… and View… are dimmed on Welcome, and Codec Loop is dimmed away from a live share.
 5. Press Esc on Welcome, in the picker, on the code screen of a Mac in the list, and on the list of Macs.\
@@ -115,6 +115,12 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
     A says "Another Mac is now viewing <Mac>." over its last frame and B keeps the picture; pressing Try again on A and typing the code makes A the viewer, and B then says it.
 42. With both Macs on the same Wi-Fi and nothing else using AirDrop, Handoff or Sidecar, run `ping -i 0.1 -c 300 <router>` on the viewer, then on the sharer, three times each: with Nítido closed, while paired, and while the viewer shows the list of Macs; note `ifconfig awdl0 | grep status` each time, and the strip's RTT and the latency sparkline while paired.\
     While paired the viewer's ping has no more spikes than with Nítido closed (its round-trip maximum and the spread of the 300 replies about the same), while the list shows them as before; note what the sharer's ping and `awdl0` status do while paired, since the sharer still advertises over AWDL.
+43. Share a small window (Calculator, or a palette 200 by 100 px), turn the Codec loop on, then pair a viewer and quit the sharer.\
+    The Share window is at least 480 by 260 pt with the picture centred on the background, the loop panel and the pairing panel side by side with all four digits readable; the viewer's window is as large, and its "The session ended" card shows whole, buttons included.
+44. With VoiceOver on (⌘F5) on the viewer, type a wrong code, then the right one, then turn the sharer's Wi-Fi off for 10 s; then move the VoiceOver cursor to the picture.\
+    VoiceOver says "Wrong code", "Connected to <Mac>" and "Reconnecting to <Mac>", and names the picture "Screen shared by <Mac>", an image.
+45. Run seven or more copies sharing (`open -n build/Nítido.app` on two Macs), and open View on another.\
+    The list scrolls inside the window, and every Mac can be reached and picked.
 
 ## Before publishing
 

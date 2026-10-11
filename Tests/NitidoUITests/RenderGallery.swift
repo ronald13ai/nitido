@@ -64,10 +64,17 @@ final class RenderGallery: XCTestCase {
             HStack(spacing: 12) { QuietButton("Back") {}; GoldButton("Connect") {}.disabled(true) }
         }.padding(24))
 
-        let browsing = ViewModel(startingDiscovery: false)
-        try offscreen("view-browsing-empty", ViewView(model: browsing))
-        browsing.peers = Self.twoPeers
-        try offscreen("view-browsing-two-peers", ViewView(model: browsing))
+        // The list of Macs scrolls inside the canvas, and ImageRenderer draws nothing inside a scroll view: the list is in
+        // the window gallery only (`view-browsing-*`).
+
+        // A 200 by 100 px window shared at 2x: the picture sits centred in the minimum area, and the pairing panel and
+        // the codec loop panel keep to it, side by side, the code whole.
+        let tiny = stillShare()
+        tiny.state = .capturing
+        tiny.pixelSize = CGSize(width: 200, height: 100)
+        try offscreen("share-tiny-window", ShareView(model: tiny))
+        tiny.loopback = true
+        try offscreen("share-tiny-window-loop-on", ShareView(model: tiny))
     }
 
     // MARK: Windows
@@ -123,6 +130,9 @@ final class RenderGallery: XCTestCase {
         try await viewStage.capture("view-browsing-empty")
         let sharer = Peer(id: "loopback", name: share.advertisedName ?? share.name, keyName: share.name,
                           endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: share.listeningPort!)!))
+        // Eight Macs: the rows scroll inside the canvas, the last ones out of sight until scrolled to.
+        viewer.peers = [sharer] + (2...8).map { Peer(id: "\($0)", name: "Mac \($0)", keyName: "Mac \($0)", endpoint: .hostPort(host: "127.0.0.1", port: 9)) }
+        try await viewStage.capture("view-browsing-eight-peers")
         viewer.peers = [sharer, Self.twoPeers[1]]
         try await viewStage.capture("view-browsing-two-peers")
         viewer.select(sharer)

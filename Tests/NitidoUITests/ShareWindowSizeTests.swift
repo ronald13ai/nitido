@@ -58,15 +58,16 @@ final class ShareWindowSizeTests: XCTestCase {
         model.start(excludingWindowIDs: [])
         await settle(controller.view)
         XCTAssertEqual(model.state, .picking)
-        assertWidth(SizeRange(controller), equals: model.fittedPointSize.width.rounded(.up), "picking placeholder")
+        assertWidth(SizeRange(controller), equals: Fit.area(for: model.fittedPointSize).width, "picking placeholder")
 
-        // Wide, then narrower and narrower, including a pick narrower than the strip's one-row width.
-        for (w, h) in [(2400, 1600), (1001, 801), (2400, 1600), (700, 500), (300, 200)] {
+        // Wide, then narrower and narrower, including a pick narrower than the strip's one-row width, and one smaller
+        // than the minimum picture area (a 200 by 100 px utility), which sits centred on the background.
+        for (w, h) in [(2400, 1600), (1001, 801), (2400, 1600), (700, 500), (300, 200), (200, 100)] {
             source?.pick(w, h)
             await settle(controller.view)
             XCTAssertEqual(model.pixelSize, CGSize(width: w, height: h))
             let range = SizeRange(controller)
-            assertWidth(range, equals: model.fittedPointSize.width.rounded(.up), "pick \(w)x\(h)")
+            assertWidth(range, equals: Fit.area(for: model.fittedPointSize).width, "pick \(w)x\(h)")
             XCTAssertEqual(range.min.height, range.max.height, accuracy: 0.001, "pick \(w)x\(h): the height is fixed too")
             try assertPictureFillsTheTop(of: window, model: model, label: "pick \(w)x\(h)")
         }
@@ -74,13 +75,14 @@ final class ShareWindowSizeTests: XCTestCase {
         // Hiding the strip keeps the same width.
         model.showTelemetry = false
         await settle(controller.view)
-        assertWidth(SizeRange(controller), equals: model.fittedPointSize.width.rounded(.up), "strip hidden")
+        assertWidth(SizeRange(controller), equals: Fit.area(for: model.fittedPointSize).width, "strip hidden")
         await model.stop()
     }
 
     /// With the window at the content's size, the picture sits exactly at the content's top-left corner with
-    /// the fitted size: an overlay larger than a tiny picture (the pairing panel) must not push it, and a
-    /// half-point picture must not be centered off the pixel grid or have a column cut off.
+    /// the fitted size: an overlay (the pairing panel) must not push it, and a half-point picture must not be
+    /// centered off the pixel grid or have a column cut off. A picture smaller than the minimum area sits centred in it,
+    /// at whole points.
     @MainActor
     private func assertPictureFillsTheTop(of window: NSWindow, model: ShareModel, label: String,
                                           file: StaticString = #filePath, line: UInt = #line) throws {
@@ -93,8 +95,10 @@ final class ShareWindowSizeTests: XCTestCase {
         let video = try XCTUnwrap(model.sink.view, "\(label): the video view exists", file: file, line: line)
         let frame = video.convert(video.bounds, to: content)
         let top = content.isFlipped ? frame.minY : content.bounds.height - frame.maxY
-        XCTAssertEqual(frame.minX, 0, accuracy: 0.001, "\(label): picture x", file: file, line: line)
-        XCTAssertEqual(top, 0, accuracy: 0.001, "\(label): picture top", file: file, line: line)
+        let origin = Fit.origin(of: model.fittedPointSize, in: Fit.area(for: model.fittedPointSize))
+        XCTAssertEqual(frame.minX, origin.x, accuracy: 0.001, "\(label): picture x", file: file, line: line)
+        XCTAssertEqual(top, origin.y, accuracy: 0.001, "\(label): picture top", file: file, line: line)
+        XCTAssertEqual(origin.x, origin.x.rounded(), "\(label): on whole points", file: file, line: line)
         XCTAssertEqual(frame.size.width, model.fittedPointSize.width, accuracy: 0.001, "\(label): picture width", file: file, line: line)
         XCTAssertEqual(frame.size.height, model.fittedPointSize.height, accuracy: 0.001, "\(label): picture height", file: file, line: line)
     }

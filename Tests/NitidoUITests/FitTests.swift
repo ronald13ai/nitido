@@ -63,6 +63,18 @@ final class FitTests: XCTestCase {
         XCTAssertEqual(fitted.minX, 0)
         XCTAssertEqual(fitted.maxY, visible.maxY)
     }
+
+    /// The Share and View windows' picture area: the picture to the whole point, at least 480 by 260 pt, so the pairing
+    /// and loop panels and a failure card fit beside a tiny picture; a picture smaller than that sits centred, at whole
+    /// points, and one at least that large sits at the top left, a half-point one included.
+    func testThePictureAreaHasAMinimumAndCentresASmallPicture() {
+        XCTAssertEqual(Fit.area(for: CGSize(width: 100, height: 50)), CGSize(width: 480, height: 260))
+        XCTAssertEqual(Fit.origin(of: CGSize(width: 100, height: 50), in: CGSize(width: 480, height: 260)), CGPoint(x: 190, y: 105))
+        XCTAssertEqual(Fit.area(for: CGSize(width: 500.5, height: 400.5)), CGSize(width: 501, height: 401))
+        XCTAssertEqual(Fit.origin(of: CGSize(width: 500.5, height: 400.5), in: CGSize(width: 501, height: 401)), .zero)
+        XCTAssertEqual(Fit.origin(of: CGSize(width: 100.5, height: 50.5), in: CGSize(width: 480, height: 260)), CGPoint(x: 189, y: 104))
+        XCTAssertEqual(Fit.area(for: CGSize(width: 1000, height: 100)), CGSize(width: 1000, height: 260), "each side on its own")
+    }
 }
 
 final class KeepWindowOnScreenTests: XCTestCase {

@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 import NitidoCore
 import NitidoLink
 
@@ -13,10 +14,12 @@ public struct ShareView: View {
     /// 1:1 when the content fits the screen, scaled down otherwise, never up.
     private var pointSize: CGSize { model.fittedPointSize }
 
-    /// The picture area in whole points. A 1:1 picture with an odd pixel size is a half point wide or tall; a
-    /// window cannot be, and rounding it down would cut the picture's last pixel column. So the window gets the
-    /// next whole point and the picture keeps its exact size at the top left (1 px of background at most).
-    private var areaSize: CGSize { CGSize(width: pointSize.width.rounded(.up), height: pointSize.height.rounded(.up)) }
+    /// The picture area in whole points, at least `Fit.minimumArea`. A 1:1 picture with an odd pixel size is a half
+    /// point wide or tall; a window cannot be, and rounding it down would cut the picture's last pixel column. So the
+    /// window gets the next whole point and the picture keeps its exact size at the top left (1 px of background at
+    /// most). A picture smaller than the minimum sits centred on the background, and the panels keep to the area.
+    private var areaSize: CGSize { Fit.area(for: pointSize) }
+    private var pictureOrigin: CGPoint { Fit.origin(of: pointSize, in: areaSize) }
 
     /// The panels and notices sit 16 pt in from the picture's edges.
     private static let inset: CGFloat = 16
@@ -24,28 +27,38 @@ public struct ShareView: View {
     /// The body reads no figure: the strip is its own view (`ShareStrip`), so the snapshot four times a second
     /// re-evaluates the strip alone, not the panels, the notices and the picture.
     public var body: some View {
+        let area = areaSize
         VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .topTrailing) {
-                VideoSurface(sink: model.sink).frame(width: pointSize.width, height: pointSize.height)
-                // Above the video, below the divider handle: while the codec loop is on the handle takes the drags, so
-                // the ink is drawn with the loop off.
-                InkOverlay(controller: model.ink).frame(width: pointSize.width, height: pointSize.height)
-                // Covers the whole picture, so it sits below everything that takes a click: the failure's buttons
-                // and both panels.
-                if model.loopback {
-                    DividerHandle(position: $model.dividerPosition, decoded: "\(model.codecLabel == "raw" ? "HEVC" : model.codecLabel) · \(Int(model.qualityMbps)) Mbps")
-                        .frame(width: pointSize.width, height: pointSize.height)
+            ZStack(alignment: .topLeading) {
+                // The picture, and what lies exactly over it: the ink, and the divider handle, whose drags map to it.
+                ZStack(alignment: .topLeading) {
+                    VideoSurface(sink: model.sink).frame(width: pointSize.width, height: pointSize.height)
+                        .accessibilityElement()
+                        .accessibilityLabel("The picture you are sharing")
+                        .accessibilityAddTraits(.isImage)
+                    // Above the video, below the divider handle: while the codec loop is on the handle takes the drags,
+                    // so the ink is drawn with the loop off.
+                    InkOverlay(controller: model.ink).frame(width: pointSize.width, height: pointSize.height)
+                    // Covers the whole picture, so it sits below everything that takes a click: the failure's buttons
+                    // and both panels.
+                    if model.loopback {
+                        DividerHandle(position: $model.dividerPosition, decoded: "\(model.codecLabel == "raw" ? "HEVC" : model.codecLabel) · \(Int(model.qualityMbps)) Mbps")
+                            .frame(width: pointSize.width, height: pointSize.height)
+                    }
                 }
+                .frame(width: pointSize.width, height: pointSize.height, alignment: .topLeading)
+                .padding(.leading, pictureOrigin.x).padding(.top, pictureOrigin.y)
+                // The rest keeps to the picture area, which a small picture leaves larger than itself.
                 if model.state == .picking {
                     MessageCard(symbol: "rectangle.dashed", title: "Choose what to share",
                                 message: "Pick a window or a display in the system picker.", note: screenRecordingNote,
                                 overPicture: model.pixelSize != .zero)
-                        .frame(width: pointSize.width, height: pointSize.height)
+                        .frame(width: area.width, height: area.height)
                 }
                 if case .failed(let message) = model.state {
                     // The last picture stays, dimmed, so it does not read as still live (as the viewer's reconnect).
-                    Theme.Colors.background.opacity(0.55).frame(width: pointSize.width, height: pointSize.height)
-                    failure(message).frame(width: pointSize.width, height: pointSize.height)
+                    Theme.Colors.background.opacity(0.55).frame(width: area.width, height: area.height)
+                    failure(message).frame(width: area.width, height: area.height)
                 }
                 if model.state == .capturing,
                    model.renderFailure != nil || model.codecNotice != nil || model.networkNotice != nil || model.viewerNotice != nil {
@@ -56,7 +69,7 @@ public struct ShareView: View {
                         if let text = model.viewerNotice { Notice(text: text) }
                     }
                     .padding(Self.inset)
-                    .frame(width: pointSize.width, height: pointSize.height, alignment: .bottomLeading)
+                    .frame(width: area.width, height: area.height, alignment: .bottomLeading)
                 }
                 // Only over a live share: while picking, or after a failure (the listener is stopped until Retry), the
                 // code would send a viewer looking for a Mac it cannot find, and the switch would do nothing.
@@ -64,21 +77,21 @@ public struct ShareView: View {
                     // The name viewers see in their list ("Mac (2)" when another Mac has this one); the key stays derived
                     // from `name`, which the TXT record publishes.
                     PairingPanel(name: model.advertisedName ?? model.name, code: model.code, viewer: model.viewerName, reconnecting: model.viewerReconnecting,
-                                 connectionCount: model.connectionCount, ringShownFor: $model.ringShownFor).padding(Self.inset)
-                    LoopbackPanel(model: model).padding(Self.inset).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                 connectionCount: model.connectionCount, ringShownFor: $model.ringShownFor)
+                        .padding(Self.inset)
+                        .frame(width: area.width, height: area.height, alignment: .topTrailing)
+                    LoopbackPanel(model: model).padding(Self.inset).frame(width: area.width, height: area.height, alignment: .topLeading)
                 }
             }
-            // The picture area is the picture, whatever an overlay asks for. Top trailing, so an overlay larger than
-            // a tiny picture spills left and down and never moves the picture off the window's top left corner.
-            .frame(width: pointSize.width, height: pointSize.height, alignment: .topTrailing)
-            .frame(width: areaSize.width, height: areaSize.height, alignment: .topLeading)
+            // The picture area, whatever an overlay asks for.
+            .frame(width: area.width, height: area.height, alignment: .topLeading)
             // Only while capturing: while picking, or after a failure, it would show a row of "·" or stale figures.
             if model.showTelemetry && model.state == .capturing { ShareStrip(model: model) }
         }
-        // As wide as the picture (to the whole point), so `.windowResizability(.contentSize)` fixes the window's
-        // width to every pick, narrower ones included, the way it fixes the height; the strip wraps instead of
-        // widening it.
-        .frame(width: areaSize.width)
+        // As wide as the picture area (the picture to the whole point, or the minimum), so
+        // `.windowResizability(.contentSize)` fixes the window's width to every pick, narrower ones included, the way it
+        // fixes the height; the strip wraps instead of widening it.
+        .frame(width: area.width)
         .background(Theme.Colors.background)
     }
 
@@ -89,12 +102,20 @@ public struct ShareView: View {
             : nil
     }
 
-    /// Retry always; System Settings first when the missing Screen Recording grant is the likely cause.
+    /// The Screen Recording card's sentence after `message`. A grant reaches a running app only once it relaunches (macOS
+    /// offers Quit & Reopen, and Later keeps the old process denied), so the way forward is to quit and reopen, not Retry,
+    /// which met the same refusal. And when the switch is on already, the grant belongs to another copy of Nítido signed
+    /// by someone else (the zip, then a build of one's own): only removing Nítido from the list and adding it again
+    /// gives it to this one.
+    nonisolated static let screenRecordingFix = "Turn on Screen Recording for Nítido in System Settings, then quit and reopen Nítido. If it is on already, another copy of Nítido holds it: remove Nítido from the list with the minus button and add it again."
+
+    /// Retry always; System Settings and Quit and Reopen instead when the missing Screen Recording grant is the likely
+    /// cause.
     private func failure(_ message: String) -> some View {
         if model.failureNeedsPermission {
             return MessageCard(symbol: "lock.shield", title: "Screen Recording is off",
-                               message: "\(message) Turn on Screen Recording for Nítido in System Settings, then press Retry.",
-                               actions: [.init("Open System Settings", run: openScreenRecordingSettings), .init("Retry", run: model.retry)],
+                               message: "\(message) \(Self.screenRecordingFix)",
+                               actions: [.init("Open System Settings", run: openScreenRecordingSettings), .init("Quit and Reopen", run: Relaunch.now)],
                                overPicture: model.pixelSize != .zero)
         }
         return MessageCard(symbol: model.failureStoppedFromMenuBar ? "pause.circle" : "exclamationmark.triangle",
@@ -131,10 +152,15 @@ struct Notice: View {
                 Text(text).font(.system(size: 12)).foregroundStyle(Theme.Colors.text)
                     .fixedSize(horizontal: false, vertical: true)
                 if fixable {
-                    Button("Open System Settings") { NSWorkspace.shared.open(LocalNetwork.settingsURL) }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.Colors.gold)
-                        .pointerStyle(.link)
+                    Button {
+                        NSWorkspace.shared.open(LocalNetwork.settingsURL)
+                    } label: {
+                        Text("Open System Settings").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.Colors.gold)
+                            .contentShape(Rectangle())
+                    }
+                    // Spec 11: press feedback on every button, as the gold and quiet ones have.
+                    .buttonStyle(PressFeedback())
+                    .pointerStyle(.link)
                 }
             }
         }
@@ -207,7 +233,9 @@ struct LoopbackPanel: View {
                                           set: { let v = $0.rounded(); if v != model.qualityMbps { model.qualityMbps = v } }),
                            in: ShareModel.qualityRange)
                         .tint(Theme.Colors.gold).controlSize(.small)
-                    Text("Raw left, decoded right. Drag the line.").font(.system(size: 11)).foregroundStyle(Theme.Colors.secondaryText)
+                    // Two lines on purpose: one sentence of 199 pt in a 188 pt column left "the line." alone on the second.
+                    Text("Raw left, decoded right.\nDrag the line to compare.").font(.system(size: 11)).foregroundStyle(Theme.Colors.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(width: model.loopback ? Self.width - 32 : nil, alignment: .leading)
@@ -261,3 +289,25 @@ struct DividerHandle: View {
             .glass(in: Capsule(style: .continuous))
     }
 }
+
+/// Quit and Reopen on the Screen Recording card: a Screen Recording grant reaches a running app only once it relaunches,
+/// as macOS's own Quit & Reopen says. Opens a new copy of this app, then quits this one once that copy is on its way;
+/// if it cannot be opened (a build run outside its bundle), this one stays and the log says why.
+@MainActor
+enum Relaunch {
+    static func now() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+            Task { @MainActor in
+                if let error {
+                    relaunchLog.error("could not reopen Nítido: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
+                NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+}
+
+private let relaunchLog = Logger(subsystem: "ai.ronar.nitido", category: "app")

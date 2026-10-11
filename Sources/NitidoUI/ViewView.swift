@@ -64,13 +64,47 @@ public struct ViewView: View {
         }
         .animation(Theme.Motion.enter, value: screen)
         .background(Theme.Colors.background)
+        // VoiceOver hears what the screen says, not only what it shows: the shake of a wrong code and the chip's dot are
+        // visual alone.
+        .onChange(of: Self.announcement(for: model.state, failureTitle: failureTitle)) { _, text in
+            if let text { AccessibilityNotification.Announcement(text).post() }
+        }
+        .onChange(of: model.wrongCodeCount) { _, count in
+            if count > 0 { AccessibilityNotification.Announcement("Wrong code").post() }
+        }
+        .onChange(of: model.connectionCount) { _, count in
+            if count > 0 { AccessibilityNotification.Announcement("Connected to \(model.peerName)").post() }
+        }
+    }
+
+    /// What VoiceOver announces when the View screen's state changes: reconnecting, and each failure with its card's
+    /// title (a connection is announced as it is counted, `connectionCount`, since each reconnect that succeeds is one);
+    /// nothing for the list and the code, which the person is on already.
+    nonisolated static func announcement(for state: ViewModel.State, failureTitle: String) -> String? {
+        switch state {
+        case .connected: nil
+        case .reconnecting(let peer, _): "Reconnecting to \(peer.name)"
+        case .failed(let text, _): "\(failureTitle). \(text)"
+        case .browsing, .enteringCode, .connecting: nil
+        }
+    }
+
+    /// The failure card's title for the current failure (`failureCard`).
+    private var failureTitle: String {
+        if model.failureIsFinal { return "Different versions of Nítido" }
+        if model.failureOffersReconnect { return "The picture stopped" }
+        if model.failedOverPicture { return "The session ended" }
+        return "Could not connect"
     }
 
     // MARK: The list
 
+    /// The rows scroll inside the canvas: six fill it, and a seventh sharer (an office where several people run Nítido)
+    /// was cut off by the window and could not be picked.
     private var browsing: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("MACS SHARING ON THIS NETWORK").font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.2)
+            ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(model.peers.enumerated()), id: \.element.id) { index, peer in
                     PeerRow(name: peer.name) { model.select(peer) }
@@ -98,8 +132,11 @@ public struct ViewView: View {
                     .padding(.top, 8)
                 }
             }
-            .padding(.top, 16)
+            .padding(.bottom, 8)
             .animation(Theme.Motion.enter, value: model.peers.map(\.id))
+            }
+            .scrollIndicators(.automatic)
+            .padding(.top, 16)
         }
         .padding(32)
         .frame(width: Self.canvas.width, height: Self.canvas.height, alignment: .topLeading)
@@ -158,13 +195,24 @@ public struct ViewView: View {
     /// A reconnect and a failure both show over the last frame, dimmed.
     private var picture: some View {
         let size = model.fittedPointSize
-        let area = CGSize(width: size.width.rounded(.up), height: size.height.rounded(.up))
+        // At least `Fit.minimumArea`: a small shared window (a palette, a calculator) sits centred on the background, so
+        // the failure card's buttons, the reconnect pill and the sharer chip stay inside the window.
+        let area = Fit.area(for: size)
+        let origin = Fit.origin(of: size, in: area)
         let reconnecting: Bool = if case .reconnecting = model.state { true } else { false }
         let failure: String? = if case .failed(let text, _) = model.state { text } else { nil }
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topTrailing) {
-                VideoSurface(sink: model.sink).frame(width: size.width, height: size.height)
-                InkOverlay(controller: model.ink).frame(width: size.width, height: size.height)
+                ZStack(alignment: .topLeading) {
+                    VideoSurface(sink: model.sink).frame(width: size.width, height: size.height)
+                        .accessibilityElement()
+                        .accessibilityLabel(model.sharerName.isEmpty ? "Shared screen" : "Screen shared by \(model.sharerName)")
+                        .accessibilityAddTraits(.isImage)
+                    InkOverlay(controller: model.ink).frame(width: size.width, height: size.height).accessibilityHidden(true)
+                }
+                .frame(width: size.width, height: size.height, alignment: .topLeading)
+                .padding(.leading, origin.x).padding(.top, origin.y)
+                .frame(width: area.width, height: area.height, alignment: .topLeading)
                 if reconnecting || failure != nil {
                     // One group, flattened, so a sheet over it never leaves the window under it unpainted.
                     ZStack {
@@ -179,7 +227,7 @@ public struct ViewView: View {
                         }
                         if let failure { failureCard(failure, overPicture: true) }
                     }
-                    .frame(width: size.width, height: size.height)
+                    .frame(width: area.width, height: area.height)
                     .compositingGroup()
                     .transition(.opacity.animation(Theme.Motion.enter))
                 }
@@ -189,7 +237,7 @@ public struct ViewView: View {
                         if let text = model.codecNotice { Notice(text: text) }
                     }
                     .padding(16)
-                    .frame(width: size.width, height: size.height, alignment: .bottomLeading)
+                    .frame(width: area.width, height: area.height, alignment: .bottomLeading)
                 }
                 if failure == nil {
                     HStack(spacing: 6) {
@@ -200,10 +248,11 @@ public struct ViewView: View {
                     .glass(in: Capsule(style: .continuous))
                     .overlay(ConnectRing(trigger: model.connectionCount, shownFor: $model.ringShownFor, reconnecting: reconnecting))
                     .padding(16)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(reconnecting ? "Reconnecting to \(model.sharerName)" : "Connected to \(model.sharerName)")
                 }
             }
-            .frame(width: size.width, height: size.height, alignment: .topTrailing)
-            .frame(width: area.width, height: area.height, alignment: .topLeading)
+            .frame(width: area.width, height: area.height, alignment: .topTrailing)
             // Through a reconnect the strip shows the gap (spec 12); after a failure its figures would only be stale.
             if model.showTelemetry && failure == nil { ViewStrip(model: model) }
         }

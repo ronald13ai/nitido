@@ -111,7 +111,7 @@ public struct GoldButton: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
         Button(action: action) {
-            Text(title).font(.system(size: 13, weight: .semibold))
+            Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1).fixedSize()
                 .foregroundStyle(isEnabled ? Theme.Colors.background : Theme.Colors.gold.opacity(0.45))
                 .padding(.horizontal, 20).padding(.vertical, 8)
                 .frame(minWidth: buttonMinWidth)
@@ -144,7 +144,7 @@ public struct QuietButton: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
         Button(action: action) {
-            Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.Colors.text)
+            Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.Colors.text).lineLimit(1).fixedSize()
                 .padding(.horizontal, 20).padding(.vertical, 8)
                 .frame(minWidth: buttonMinWidth)
                 // A border, not a stroke: the 1 pt line stays inside the button's bounds instead of straddling them.
@@ -297,14 +297,16 @@ public struct MessageCard: View {
                     .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
             }
             if !actions.isEmpty {
-                HStack(spacing: 12) {
-                    // Quiet ones first, the way forward last, where ⏎ lands (macOS: the default button on the right).
-                    ForEach(Array(actions.enumerated().reversed()), id: \.offset) { index, action in
-                        if index == 0 {
-                            GoldButton(action.title, isDefault: true, action: action.run)
-                        } else {
-                            QuietButton(action.title, action: action.run)
-                        }
+                // Side by side when they fit on one line each; stacked otherwise ("Open System Settings" beside "Quit and
+                // Reopen" is wider than the card), rather than a label wrapped onto two lines inside its button.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        // Quiet ones first, the way forward last, where ⏎ lands (macOS: the default button on the right).
+                        ForEach(Array(actions.enumerated().reversed()), id: \.offset) { index, action in button(index, action) }
+                    }
+                    // Stacked, the way forward on top, as a macOS alert stacks its buttons.
+                    VStack(spacing: 8) {
+                        ForEach(Array(actions.enumerated()), id: \.offset) { index, action in button(index, action) }
                     }
                 }
                 .padding(.top, 24)
@@ -312,5 +314,14 @@ public struct MessageCard: View {
         }
         .padding(.horizontal, 32).padding(.vertical, 28)
         .frame(maxWidth: 380)
+    }
+
+    /// The first action is the way forward, gold, and ⏎ presses it; the rest are quiet.
+    @ViewBuilder private func button(_ index: Int, _ action: Action) -> some View {
+        if index == 0 {
+            GoldButton(action.title, isDefault: true, action: action.run)
+        } else {
+            QuietButton(action.title, action: action.run)
+        }
     }
 }

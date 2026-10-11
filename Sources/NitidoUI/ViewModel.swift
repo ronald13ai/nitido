@@ -73,6 +73,9 @@ public final class ViewModel {
     public let ink = InkController(role: .view)
     public let name = Host.current().localizedName ?? "Mac"
 
+    /// The Mac of the current session as the list named it, or the name its hello gave (VoiceOver's "Connected to").
+    public var peerName: String { currentPeer?.name ?? sharerName }
+
     /// Internal, not private, so a test can drive discovery's states.
     let browser = Browser()
     private var link: LinkSession?

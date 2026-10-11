@@ -21,6 +21,25 @@ enum Fit {
         return CGSize(width: (natural.width * f).rounded(.down), height: (natural.height * f).rounded(.down))
     }
 
+    /// The smallest picture area the Share and View windows take, in points. A small shared window (a palette, a
+    /// calculator, a 200 by 100 px utility) made a window as small as its picture: the pairing panel and the codec loop
+    /// panel then overlapped and spilled past its edges, hiding the code, and a failure card's buttons were cut off.
+    /// 480 pt holds the loop panel (220 pt) beside a pairing panel with a name of thirty characters, 16 pt from the edges
+    /// and 8 pt apart; 260 pt holds a failure card with a few lines.
+    static let minimumArea = CGSize(width: 480, height: 260)
+
+    /// The picture area for a picture of `picture` points: its size to the whole point, at least `minimumArea`.
+    static func area(for picture: CGSize) -> CGSize {
+        CGSize(width: max(picture.width.rounded(.up), minimumArea.width), height: max(picture.height.rounded(.up), minimumArea.height))
+    }
+
+    /// Where a picture of `picture` points sits in `area`: centred on the background, at whole points, so a 1:1 picture
+    /// stays on the pixel grid; at the top left when the area is the picture's own (a half-point picture keeps its exact
+    /// size there, with at most a point of background).
+    static func origin(of picture: CGSize, in area: CGSize) -> CGPoint {
+        CGPoint(x: max(0, ((area.width - picture.width) / 2).rounded(.down)), y: max(0, ((area.height - picture.height) / 2).rounded(.down)))
+    }
+
     /// The strip's size figure: pixels and display scale, and the scale the picture is shown at when it is fitted
     /// below 1:1 (spec 17), as a whole percentage. "·" before the first frame.
     static func resolutionLabel(pixelSize: CGSize, scale: CGFloat, factor: CGFloat) -> String {
