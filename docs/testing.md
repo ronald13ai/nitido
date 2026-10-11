@@ -98,6 +98,13 @@ Items 29 and 30 need two Macs: two copies on one Mac may keep their link when th
 36. Press ⌘H on the Share and View screens.\
     The strip hides and shows at once, with no animation.
 
+## Long sessions and edges
+
+Added on 2026-10-11 for what the journey review found; on the two Macs unless an item says otherwise.
+
+37. On battery on both Macs, with `caffeinate` not running (`pgrep caffeinate` prints nothing), pair them and leave both untouched for 10 minutes, longer than the display-off time in System Settings, Battery. Run `pmset -g assertions | grep -i nitido` on each Mac during the session and again after Esc ends it.\
+    Both displays stay on and the session stays connected; during it each Mac lists Nítido preventing idle display sleep and idle system sleep ("Viewing <Mac>" on the viewer, "Sharing the screen" on the sharer), and after it neither does.
+
 ## Before publishing
 
 Steps 1 and 2 on the build that will ship, during the two-Mac session; its commit goes in the Build column of the README's Measured table.

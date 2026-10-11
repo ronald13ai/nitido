@@ -20,7 +20,18 @@ public final class ViewModel {
         case failed(String, Peer?)
     }
 
-    public private(set) var state: State = .browsing
+    /// Display and idle sleep stay off from the moment the link is ready until the session ends: through a reconnect,
+    /// and never on the list, the code or a failure (`SessionActivity`).
+    public private(set) var state: State = .browsing {
+        didSet {
+            switch state {
+            case .connected, .reconnecting: activity.begin("Viewing \(currentPeer?.keyName ?? "a shared screen")")
+            case .browsing, .enteringCode, .connecting, .failed: activity.end()
+            }
+        }
+    }
+    /// Internal, not private, so a test can see whether it is held.
+    @ObservationIgnored let activity = SessionActivity()
     /// The sharers discovery lists now. Internal to set, so a test can say what discovery says.
     public internal(set) var peers: [Peer] = [] { didSet { listed.withLock { [peers] in $0 = peers } } }
     /// `peers`, for a session's reconnects off the main actor (`LinkSession`'s `currentPeer`).

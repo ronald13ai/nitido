@@ -18,7 +18,13 @@ import NitidoLink
 public final class ShareModel {
     public enum State: Equatable { case idle, picking, capturing, failed(String) }
 
-    public internal(set) var state: State = .idle
+    /// Display and idle sleep stay off while the share captures, and only then: the viewer's picture freezes when this
+    /// Mac's display sleeps, and a sharer watching the viewer's ink touches nothing (`SessionActivity`).
+    public internal(set) var state: State = .idle {
+        didSet { if state == .capturing { activity.begin("Sharing the screen") } else { activity.end() } }
+    }
+    /// Internal, not private, so a test can see whether it is held.
+    @ObservationIgnored let activity = SessionActivity()
     public internal(set) var snapshot: Snapshot = .empty
     public internal(set) var pixelSize: CGSize = .zero
     public internal(set) var scale: CGFloat = 2

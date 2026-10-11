@@ -825,6 +825,88 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// A viewer watches without touching anything: display and idle sleep stay off from the moment it is connected,
+    /// and every way out lets them go (Back or Esc, a decoder failure, the sharer ending the session, a quit). The share
+    /// holds them while it captures, and lets go when the capture fails, while the picker is up, and when it stops.
+    @MainActor
+    func testDisplaySleepIsHeldOffWhileConnectedOrCapturingAndAllowedOnEveryExit() async throws {
+        let sources = SourceFactory()
+        let share = ShareModel(makeSource: sources.make, screenRecordingGranted: { true })
+        share.start(excludingWindowIDs: [])
+        await drain()
+        XCTAssertFalse(share.activity.isHeld, "the picker is up")
+        let source = try XCTUnwrap(sources.made.first)
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the sharer listens") { share.listeningPort != nil }
+        XCTAssertTrue(share.activity.isHeld, "the share captures")
+        let viewer = ViewModel()
+        let sharer = peer(for: share)
+        func pair() async throws {
+            viewer.select(sharer); viewer.code = share.code; viewer.connect()
+            XCTAssertFalse(viewer.activity.isHeld, "nothing is held while the code is tried")
+            try await waitUntil("the viewer is connected") { viewer.state == .connected && share.isSending }
+            XCTAssertTrue(viewer.activity.isHeld, "connected")
+        }
+        try await pair()
+        viewer.disconnect()
+        XCTAssertFalse(viewer.activity.isHeld, "Back or Esc")
+        try await waitUntil("the sharer lets the viewer go") { !share.isSending }
+
+        try await pair()
+        viewer.handleIncoming(.videoConfig(VideoConfig(codec: .hevc, width: 320, height: 180, parameterSets: [Data([0, 1, 2])])))
+        XCTAssertFalse(viewer.activity.isHeld, "a decoder failure")
+        try await waitUntil("the sharer lets the viewer go") { !share.isSending }
+
+        try await pair()
+        await viewer.disconnectAndWait()
+        XCTAssertFalse(viewer.activity.isHeld, "a quit")
+        try await waitUntil("the sharer lets the viewer go") { !share.isSending }
+
+        try await pair()
+        source.emit(.failed(CaptureFailure(reason: .stoppedFromMenuBar, detail: "The user stopped the stream")))
+        try await waitUntil("the viewer hears the share stopped") { if case .failed = viewer.state { true } else { false } }
+        XCTAssertFalse(viewer.activity.isHeld, "the sharer ended the session")
+        XCTAssertFalse(share.activity.isHeld, "the capture failed")
+        XCTAssertEqual(viewer.activity.begun, 4, "one activity per connection")
+
+        // A new pick from the session's picker resumes the share (spec 12).
+        source.emit(.started(pixelWidth: 320, pixelHeight: 180, scale: 2))
+        try await waitUntil("the share captures again") { share.state == .capturing }
+        XCTAssertTrue(share.activity.isHeld)
+        source.emit(.started(pixelWidth: 640, pixelHeight: 360, scale: 2))
+        await drain()
+        XCTAssertEqual(share.activity.begun, 2, "a resize while capturing begins no second activity")
+        await share.stop()
+        XCTAssertFalse(share.activity.isHeld, "the share stopped")
+        viewer.disconnect()
+    }
+
+    /// A reconnect keeps the activity it had: one, not one per attempt, and the session that ends lets it go.
+    @MainActor
+    func testAReconnectKeepsTheOneActivityItHad() async throws {
+        let advertiser = try Advertiser(name: "Sharer", code: "1234",
+                                        hello: Hello(protocolVersion: protocolVersion, role: .share, name: "Sharer", pixelWidth: 320, pixelHeight: 180, scale: 2))
+        let port = try await advertiser.start()
+        defer { advertiser.stop() }
+        let sharer = Peer(id: "loopback", name: "Sharer", keyName: "Sharer", endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+        let viewer = ViewModel()
+        viewer.select(sharer)
+        viewer.code = "1234"
+        viewer.connect()
+        var incoming = advertiser.incoming.makeAsyncIterator()
+        guard let first = await incoming.next() else { return XCTFail("no connection") }
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        first.abort()
+        try await waitUntil("the viewer reconnects") { if case .reconnecting = viewer.state { true } else { false } }
+        XCTAssertTrue(viewer.activity.isHeld, "the display stays on through a reconnect")
+        guard let second = await incoming.next() else { return XCTFail("no reconnect") }
+        try await waitUntil("the viewer is connected again") { viewer.state == .connected }
+        XCTAssertEqual(viewer.activity.begun, 1, "a reconnect begins no second activity")
+        second.close()
+        try await waitUntil("the sharer ended the session") { if case .failed = viewer.state { true } else { false } }
+        XCTAssertFalse(viewer.activity.isHeld)
+    }
+
     /// A sharer that drops without saying bye (a cable pull, a process that died) puts the viewer in Reconnecting, and
     /// the viewer pairs again by itself as soon as the sharer answers, asking for a keyframe.
     @MainActor
