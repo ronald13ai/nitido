@@ -375,6 +375,38 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(frame.size.width, fitted.width, accuracy: 0.001, "picture width")
         XCTAssertEqual(frame.size.height, fitted.height, accuracy: 0.001, "picture height")
 
+        // The decoded pixels, not only the geometry: 1001 × 801 is coded at 1002 × 802 and cut back, so the picture is the
+        // source's size and matches it across the whole width, middle included (VideoToolbox used to scale it to
+        // 1000 × 800, half a pixel off by the middle of the picture, with a dark line along the left and bottom edges).
+        let striped = try stripedFrame(index: 1, width: 1001, height: 801)
+        let before = video.pacer.held?.captureHostTimeNs
+        source.emit(frame: striped)
+        try await waitUntil("the new picture reaches the viewer's view") {
+            video.pacer.held.map { $0.captureHostTimeNs != before && $0.pictureSize != nil } ?? false
+        }
+        let held = try XCTUnwrap(video.pacer.held)
+        XCTAssertEqual(held.pictureSize, CGSize(width: 1001, height: 801))
+        let picture = VideoView.picture(of: held)
+        XCTAssertEqual(picture.extent.size, CGSize(width: 1001, height: 801))
+        let context = CIContext(options: [.workingColorSpace: VideoView.colorSpace])
+        func drawn(_ image: CIImage) -> [UInt8] {
+            var out = [UInt8](repeating: 0, count: 1001 * 801 * 4)
+            context.render(image, toBitmap: &out, rowBytes: 1001 * 4, bounds: CGRect(x: 0, y: 0, width: 1001, height: 801),
+                           format: .BGRA8, colorSpace: VideoView.colorSpace)
+            return out
+        }
+        let got = drawn(picture), want = drawn(VideoView.image(of: striped.pixelBuffer))
+        func meanError(columns: Range<Int>) -> Double {
+            var total = 0, count = 0
+            for y in stride(from: 0, to: 801, by: 4) {
+                for x in columns { for c in 0..<3 { total += abs(Int(got[(y * 1001 + x) * 4 + c]) - Int(want[(y * 1001 + x) * 4 + c])); count += 1 } }
+            }
+            return Double(total) / Double(count)
+        }
+        for band in [0..<16, 492..<508, 985..<1001] {
+            XCTAssertLessThan(meanError(columns: band), 12, "columns \(band) match the source")
+        }
+
         viewer.disconnect()
         await share.stop()
     }

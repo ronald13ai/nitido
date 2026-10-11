@@ -62,6 +62,9 @@ final class FramePacer {
         /// buffer alone. The held frame keeps it too, so a redraw shows the same comparison.
         var compareWith: CVPixelBuffer? = nil
         var divider: CGFloat = 0.5
+        /// The picture's size when the buffer is larger: a decoded picture of an odd size, whose buffer carries the
+        /// column or row its encoder added (`DecodedFrame`). Nil draws the whole buffer.
+        var pictureSize: CGSize? = nil
     }
 
     enum Kind: Sendable, Equatable {

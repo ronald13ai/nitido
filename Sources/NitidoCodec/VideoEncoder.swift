@@ -21,6 +21,9 @@ public enum CodecError: Error, Equatable {
     case frameDropped
     /// VideoToolbox emitted an encoded frame with no data.
     case missingData
+    /// No hardware encoder takes a picture this large: HEVC could not start, and H.264 encodes up to 4096 × 2304
+    /// (`VideoEncoder.h264Limit`).
+    case tooLarge(width: Int, height: Int)
 
     /// One sentence for the person using the app (spec 9: errors in plain language), with VideoToolbox's status at the
     /// end. Logs keep `String(describing:)`, which names the case.
@@ -34,6 +37,8 @@ public enum CodecError: Error, Equatable {
         case .prepare(let status): "The hardware encoder could not get ready (error \(status))."
         case .frameDropped: "The hardware encoder dropped a frame."
         case .missingData: "The hardware encoder produced an empty frame."
+        case .tooLarge(let width, let height):
+            "The picture (\(width) × \(height) pixels) is too large for this Mac's hardware video encoder, which takes up to \(VideoEncoder.h264Limit.width) × \(VideoEncoder.h264Limit.height)."
         }
     }
 
@@ -44,7 +49,7 @@ public enum CodecError: Error, Equatable {
         case .sessionCreate(let status), .encode(let status), .decode(let status), .formatDescription(let status),
              .property(_, let status), .prepare(let status):
             " (error \(status))"
-        case .frameDropped, .missingData:
+        case .frameDropped, .missingData, .tooLarge:
             ""
         }
     }
@@ -77,6 +82,8 @@ public struct EncodedFrame: Sendable {
     /// VPS/SPS/PPS (HEVC) or SPS/PPS (H.264); present on keyframes only.
     public let parameterSets: [Data]
     public let codec: Codec
+    /// The picture's size: the source's, which the stream's own size exceeds by a column or a row when it is odd
+    /// (`VideoEncoder`), and which `videoConfig` carries so the decoder side cuts the picture back to it.
     public let width: Int
     public let height: Int
 
@@ -92,8 +99,17 @@ public struct EncodedFrame: Sendable {
 /// calling thread for a failure inside `encode` or `setBitrate`.
 public final class VideoEncoder: @unchecked Sendable {
     public let codec: Codec
+    /// The size of the frames `encode` takes, and of the picture: a pixel buffer of another size is the caller's cue to
+    /// make a new encoder.
     public let width: Int
     public let height: Int
+    /// The size the stream is coded at: `width` and `height` rounded up to even. HEVC and H.264 in 4:2:0 code no odd
+    /// size, and VideoToolbox given one scales the frame to the even size below it (1347 × 879 came out 1346 × 878),
+    /// which blurs every column of text in the middle of the picture and misaligns the codec loop's two halves by up to
+    /// half a pixel. An odd frame is copied into an even buffer instead, its last column and row repeated, and the
+    /// decoder side cuts the picture back to `width` × `height` (`VideoConfig`), so the picture stays 1:1.
+    public let codedWidth: Int
+    public let codedHeight: Int
     public var onFrame: (@Sendable (EncodedFrame) -> Void)? {
         get { lock.withLock { frameHandler } }
         set { lock.withLock { frameHandler = newValue } }
@@ -120,13 +136,24 @@ public final class VideoEncoder: @unchecked Sendable {
     private var forceKey = true
     private var inFlight = 0
     private var drops = DropLog()
+    /// Even buffers an odd frame is copied into (`padded`); nil when the size is even.
+    private let padPool: CVPixelBufferPool?
+    /// A frame that could not be padded (not BGRA, or no buffer free) was logged once already.
+    private var reportedUnpadded = false
+
+    /// The largest picture the hardware H.264 encoder takes on Apple silicon (measured on an M5: 4096 × 2304 encodes,
+    /// 4097 × 2305 and every 5K and 6K size fail with -12903, while HEVC takes them all).
+    public static let h264Limit = (width: 4096, height: 2304)
 
     public init(width: Int, height: Int, preferred: Codec = .hevc, bitsPerSecond: Int) throws(CodecError) {
         self.width = width; self.height = height
+        let coded = (width: (width + 1) & ~1, height: (height + 1) & ~1)
+        codedWidth = coded.width; codedHeight = coded.height
+        padPool = coded.width == width && coded.height == height ? nil : Self.makePadPool(width: coded.width, height: coded.height)
         let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
         func create(_ type: CMVideoCodecType) -> (OSStatus, VTCompressionSession?) {
             var s: VTCompressionSession?
-            let st = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height), codecType: type,
+            let st = VTCompressionSessionCreate(allocator: nil, width: Int32(coded.width), height: Int32(coded.height), codecType: type,
                                                 encoderSpecification: spec, imageBufferAttributes: nil, compressedDataAllocator: nil,
                                                 outputCallback: nil, refcon: nil, compressionSessionOut: &s)
             return (st, s)
@@ -134,10 +161,19 @@ public final class VideoEncoder: @unchecked Sendable {
         var (status, created) = create(preferred == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264)
         var chosen = preferred
         if status != noErr, preferred == .hevc {
-            log.warning("no hardware HEVC encoder (\(status)), falling back to H.264")
+            let hevcStatus = status
+            log.warning("no hardware HEVC encoder (\(hevcStatus)), falling back to H.264")
             (status, created) = create(kCMVideoCodecType_H264); chosen = .h264
+            // Both statuses go to the log; the one thrown says why the fallback could not take over.
+            if status != noErr { log.error("the H.264 fallback could not start either (\(status)) at \(width) × \(height); HEVC said \(hevcStatus)") }
         }
-        guard status == noErr, let s = created else { throw CodecError.sessionCreate(status) }
+        guard status == noErr, let s = created else {
+            // H.264 refuses a size over its limit, and Retry at that size would fail the same way: say so instead.
+            if chosen == .h264, width > Self.h264Limit.width || height > Self.h264Limit.height {
+                throw CodecError.tooLarge(width: width, height: height)
+            }
+            throw CodecError.sessionCreate(status)
+        }
         codec = chosen
         session = s
         do throws(CodecError) {
@@ -233,13 +269,14 @@ public final class VideoEncoder: @unchecked Sendable {
     /// Returns false when the frame was dropped because two frames are already being encoded, and
     /// also when the encoder was invalidated or VideoToolbox refused the frame (reported to `onError`).
     @discardableResult
-    public func encode(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) -> Bool {
+    public func encode(_ source: CVPixelBuffer, captureHostTimeNs: UInt64) -> Bool {
         lock.lock()
         guard let session, inFlight < 2 else { lock.unlock(); return false }
         inFlight += 1
         let key = forceKey; forceKey = false
         let n = seq; seq &+= 1
         lock.unlock()
+        let pixelBuffer = padPool == nil ? source : padded(source) ?? source
 
         let pts = CMTime(value: CMTimeValue(captureHostTimeNs / 1000), timescale: 1_000_000)
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
@@ -331,6 +368,53 @@ public final class VideoEncoder: @unchecked Sendable {
             }
         }
         return sets
+    }
+
+    /// Even BGRA buffers of `width` × `height`, for an odd source (`padded`): IOSurface backed, as the capture's are.
+    private static func makePadPool(width: Int, height: Int) -> CVPixelBufferPool? {
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: width, kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary, kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        var pool: CVPixelBufferPool?
+        let status = CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary,
+                                             attributes as CFDictionary, &pool)
+        if status != kCVReturnSuccess { log.error("could not make the buffers for an odd size: \(status)") }
+        return pool
+    }
+
+    /// `source`, an odd-sized BGRA frame, copied into an even buffer with its last column and row repeated, so the
+    /// codec sees no dark edge to smear into the picture; nil when it cannot be (not BGRA, another size, no buffer). Its
+    /// colour attachments go with it. Row by row: under 1 ms for a 2692 × 1756 frame.
+    private func padded(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        guard let padPool, CVPixelBufferGetPixelFormatType(source) == kCVPixelFormatType_32BGRA,
+              CVPixelBufferGetWidth(source) == width, CVPixelBufferGetHeight(source) == height else { return unpadded(source) }
+        var made: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, padPool, &made) == kCVReturnSuccess, let out = made else { return unpadded(source) }
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(out, [])
+        defer { CVPixelBufferUnlockBaseAddress(out, []); CVPixelBufferUnlockBaseAddress(source, .readOnly) }
+        guard let from = CVPixelBufferGetBaseAddress(source), let to = CVPixelBufferGetBaseAddress(out) else { return unpadded(source) }
+        let fromStride = CVPixelBufferGetBytesPerRow(source), toStride = CVPixelBufferGetBytesPerRow(out)
+        let rowBytes = width * 4
+        for y in 0..<height {
+            let row = to + y * toStride, sourceRow = from + y * fromStride
+            memcpy(row, sourceRow, rowBytes)
+            if codedWidth > width { memcpy(row + rowBytes, sourceRow + rowBytes - 4, 4) }
+        }
+        if codedHeight > height { memcpy(to + height * toStride, to + (height - 1) * toStride, codedWidth * 4) }
+        CVBufferPropagateAttachments(source, out)
+        return out
+    }
+
+    /// Says once that an odd frame goes to VideoToolbox as it is, which scales it; nil, so the caller sends it as it is.
+    private func unpadded(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        let first = lock.withLock { defer { reportedUnpadded = true }; return !reportedUnpadded }
+        if first {
+            log.error("could not copy a \(CVPixelBufferGetWidth(source)) × \(CVPixelBufferGetHeight(source)) frame (format \(CVPixelBufferGetPixelFormatType(source))) to an even size; VideoToolbox scales it")
+        }
+        return nil
     }
 
     /// Flushes the frames in flight to `onFrame`, then releases the session. Safe to call while

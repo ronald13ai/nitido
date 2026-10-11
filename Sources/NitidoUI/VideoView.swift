@@ -65,8 +65,20 @@ public final class VideoView: NSView {
 
     /// A frame as Core Image draws it, its colours read from the buffer's colour attachments: a captured frame is sRGB
     /// BGRA, a decoded one 4:2:0 YCbCr that Core Image turns into RGB on the GPU with the matrix and transfer function
-    /// the stream was tagged with (`VideoEncoder`).
-    nonisolated static func image(of pixelBuffer: CVPixelBuffer) -> CIImage { CIImage(cvPixelBuffer: pixelBuffer) }
+    /// the stream was tagged with (`VideoEncoder`). With `size`, only the buffer's top left `size` is the picture: a
+    /// decoded picture of an odd size carries the column and row its encoder added (`DecodedFrame`), cut off here so
+    /// the picture stays 1:1 and no repeated edge shows.
+    nonisolated static func image(of pixelBuffer: CVPixelBuffer, size: CGSize? = nil) -> CIImage {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let size else { return image }
+        let width = min(size.width, image.extent.width), height = min(size.height, image.extent.height)
+        guard width < image.extent.width || height < image.extent.height else { return image }
+        // Core Image's origin is the bottom left: the buffer's top rows are the extent's top, and its extra row the
+        // bottom one. Moved back to the origin, as every picture here starts there.
+        let dropped = image.extent.height - height
+        return image.cropped(to: CGRect(x: 0, y: dropped, width: width, height: height))
+            .transformed(by: CGAffineTransform(translationX: 0, y: -dropped))
+    }
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
@@ -127,9 +139,12 @@ public final class VideoView: NSView {
     }
 
     /// `compareWith` is the raw frame shown left of `dividerAt` (0...1); the main buffer is shown on the right.
-    public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
-        contentPixelSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-        pacer.present(FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw, divider: divider))
+    /// `pictureSize`: the picture's size when the buffer is larger (a decoded picture of an odd size, `DecodedFrame`).
+    public func present(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil,
+                        dividerAt divider: CGFloat = 0.5, pictureSize: CGSize? = nil) {
+        contentPixelSize = pictureSize ?? CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+        pacer.present(FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw,
+                                       divider: divider, pictureSize: pictureSize))
         flushDropLog(force: false)
     }
 
@@ -213,6 +228,27 @@ public final class VideoView: NSView {
     }
 }
 
+extension VideoView {
+    /// What `frame` shows before it is fitted to the drawable, with its origin at zero: the picture (`image(of:size:)`),
+    /// or with `compareWith` the codec loop's comparison, the raw frame left of the divider, the decoded one right of it,
+    /// and the 2 px gold line between them.
+    nonisolated static func picture(of frame: FramePacer.Frame) -> CIImage {
+        let image = Self.image(of: frame.pixelBuffer, size: frame.pictureSize)
+        guard let raw = frame.compareWith else { return image }
+        let content = image.extent.size
+        let rawImage = Self.image(of: raw)
+        let cut = (rawImage.extent.width * frame.divider).rounded()
+        let left = rawImage.cropped(to: CGRect(x: 0, y: 0, width: cut, height: rawImage.extent.height))
+        // The line stays inside the picture: at either edge it widened the composite by a pixel, and the centring in
+        // `render` then shifted the whole comparison a pixel left, leaving a dark column at the right.
+        let lineX = min(max(cut - 1, 0), max(0, content.width - 2))
+        let line = CIImage(color: CIColor(red: 201 / 255, green: 168 / 255, blue: 106 / 255))
+            .cropped(to: CGRect(x: lineX, y: 0, width: 2, height: rawImage.extent.height))
+        // Cut to the picture: a composite takes the union of its inputs' extents.
+        return line.composited(over: left.composited(over: image)).cropped(to: CGRect(origin: .zero, size: content))
+    }
+}
+
 extension VideoView: FrameDrawing {
     /// True while the window can actually show the picture. A minimized or fully covered window gets no
     /// drawables back from the compositor, and `nextDrawable()` would then stall the main thread.
@@ -243,16 +279,8 @@ extension VideoView: FrameDrawing {
         guard let drawable = next else { return .noDrawable }
         guard let command = commandQueue.makeCommandBuffer() else { return .failed("Metal could not create a command buffer.") }
 
-        let content = CGSize(width: CVPixelBufferGetWidth(frame.pixelBuffer), height: CVPixelBufferGetHeight(frame.pixelBuffer))
-        var image = Self.image(of: frame.pixelBuffer)
-        if let raw = frame.compareWith {
-            let rawImage = Self.image(of: raw)
-            let cut = (rawImage.extent.width * frame.divider).rounded()
-            let left = rawImage.cropped(to: CGRect(x: 0, y: 0, width: cut, height: rawImage.extent.height))
-            let line = CIImage(color: CIColor(red: 201 / 255, green: 168 / 255, blue: 106 / 255))
-                .cropped(to: CGRect(x: cut - 1, y: 0, width: 2, height: rawImage.extent.height))
-            image = line.composited(over: left.composited(over: image))
-        }
+        var image = Self.picture(of: frame)
+        let content = image.extent.size
         let fit = min(target.width / content.width, target.height / content.height)
         if fit < 1, let lanczos = CIFilter(name: "CILanczosScaleTransform") {
             lanczos.setValue(image, forKey: kCIInputImageKey)
@@ -321,11 +349,13 @@ public final class FrameSink {
         if self.visibleFrame != visibleFrame { self.visibleFrame = visibleFrame }
     }
 
-    public func push(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil, dividerAt divider: CGFloat = 0.5) {
+    /// `pictureSize`: the picture's size when the buffer is larger (a decoded picture of an odd size, `DecodedFrame`).
+    public func push(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil,
+                     dividerAt divider: CGFloat = 0.5, pictureSize: CGSize? = nil) {
         guard let view else { onDropped?(.hidden); return }
         view.onPresented = onPresented
         view.onDropped = onDropped
-        view.present(pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw, dividerAt: divider)
+        view.present(pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw, dividerAt: divider, pictureSize: pictureSize)
     }
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }

@@ -112,7 +112,8 @@ extension ShareModel {
         guard loopback, state == .capturing else { return }
         if let start = encodeStarts.removeValue(forKey: d.seq) { codecWindow.add((CACurrentMediaTime() - start) * 1000, at: CACurrentMediaTime()) }
         if encodeStarts.count > 120 { encodeStarts.removeAll() }
-        sink.push(d.pixelBuffer, captureHostTimeNs: d.captureHostTimeNs, compareWith: latestRaw?.pixelBuffer, dividerAt: dividerPosition)
+        sink.push(d.pixelBuffer, captureHostTimeNs: d.captureHostTimeNs, compareWith: latestRaw?.pixelBuffer, dividerAt: dividerPosition,
+                  pictureSize: CGSize(width: d.width, height: d.height))
     }
 
     func loopbackDidChange() {

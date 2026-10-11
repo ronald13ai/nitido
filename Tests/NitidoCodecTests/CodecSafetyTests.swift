@@ -177,6 +177,7 @@ final class CodecSafetyTests: XCTestCase {
             .property(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String, -12900),
             .property(kVTCompressionPropertyKey_AllowFrameReordering as String, -12900),
             .property(kVTDecompressionPropertyKey_RealTime as String, -12900),
+            .tooLarge(width: 6016, height: 3384),
         ]
         let identifiers = ["sessionCreate", "formatDescription", "frameDropped", "missingData", "DataRateLimits", "AverageBitRate",
                            "ProfileLevel", "MaxKeyFrameInterval", "ExpectedFrameRate", "PrioritizeEncodingSpeedOverQuality",
@@ -192,7 +193,7 @@ final class CodecSafetyTests: XCTestCase {
                  .prepare(let status), .property(_, let status):
                 XCTAssertTrue(text.hasSuffix("(error \(status))."), text)
                 XCTAssertEqual(error.statusNote, " (error \(status))", "the status inside a sentence the app writes")
-            case .frameDropped, .missingData:
+            case .frameDropped, .missingData, .tooLarge:
                 XCTAssertFalse(text.contains("error"), text)
                 XCTAssertEqual(error.statusNote, "", "no status to give")
             }

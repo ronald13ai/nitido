@@ -109,6 +109,8 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
     Each time the viewer asks "Disconnect?" and Cancel keeps the picture live and the sharer's panel unchanged; after Disconnect the viewer quits and the sharer shows no viewer.
 39. Connected as a viewer, press ⌘N, cancel the system picker; then ⌘N again, pick a window, choose Stop Sharing in the menu bar's screen-sharing menu, press Retry and cancel that picker.\
     Each cancel goes back to the View screen with the picture still live and no question asked, and the sharer's panel keeps this Mac as its viewer.
+40. On a 1x display (or with the display at a scaled mode that gives 1 px per point), share a TextEdit window and drag it to an odd width and height (the strip's size figure ends in odd numbers, such as 1347×879), turn on the Codec loop at 60 Mbps and drag the divider across, then pair a viewer.\
+    The text right of the divider is as sharp as left of it across the whole picture, middle included, with no step at the divider; the viewer's picture is the same size as in the sharer's strip, with no dark line along its left or bottom edge.
 
 ## Before publishing
 

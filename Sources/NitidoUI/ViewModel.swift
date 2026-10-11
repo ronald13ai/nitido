@@ -437,7 +437,8 @@ public final class ViewModel {
     private func decoded(_ frame: DecodedFrame, by d: VideoDecoder) {
         guard d === decoder else { return }
         decodeFailures = 0
-        sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs)
+        sink.push(frame.pixelBuffer, captureHostTimeNs: frame.captureHostTimeNs,
+                  pictureSize: CGSize(width: frame.width, height: frame.height))
     }
 
     /// A picture a newer one replaced before the main actor took it (`DecoderOutbox`): it was decoded, so the failure

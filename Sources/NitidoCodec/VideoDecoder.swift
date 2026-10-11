@@ -11,6 +11,11 @@ public struct DecodedFrame: @unchecked Sendable {
     public let pixelBuffer: CVPixelBuffer
     public let captureHostTimeNs: UInt64
     public let seq: UInt32
+    /// The picture's size, from the stream's `VideoConfig`. The buffer can be a column wider or a row taller: the
+    /// encoder codes an odd size at the even one above it (`VideoEncoder.codedWidth`), and the picture is the buffer's
+    /// top left `width` × `height`.
+    public let width: Int
+    public let height: Int
 }
 
 /// Hardware decoder built from a `VideoConfig`. Rebuild it whenever a new config arrives.
@@ -98,11 +103,14 @@ public final class VideoDecoder: @unchecked Sendable {
     private var keyEpoch: UInt64 = 0
     private let clock: @Sendable () -> Double
     private let format: CMVideoFormatDescription
+    /// The picture's size, which every `DecodedFrame` carries (`config.width` × `config.height`).
+    private let pictureWidth: Int, pictureHeight: Int
     private let queue = DispatchQueue(label: "ai.ronar.nitido.decoder", qos: .userInteractive)
 
     /// `clock` says how long a frame has waited (`submit`), in seconds; a test can give its own.
     public init(config: VideoConfig, clock: @escaping @Sendable () -> Double = VideoDecoder.uptime) throws(CodecError) {
         self.clock = clock
+        pictureWidth = Int(config.width); pictureHeight = Int(config.height)
         let sets = config.parameterSets
         let pointers = sets.map { set -> UnsafeMutablePointer<UInt8> in
             let p = UnsafeMutablePointer<UInt8>.allocate(capacity: max(set.count, 1))
@@ -203,12 +211,12 @@ public final class VideoDecoder: @unchecked Sendable {
                                            sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1,
                                            sampleSizeArray: &size, sampleBufferOut: &sample)
         guard status == noErr, let sample else { throw CodecError.decode(status) }
-        let seq = frame.seq, t = frame.captureHostTimeNs
+        let seq = frame.seq, t = frame.captureHostTimeNs, width = pictureWidth, height = pictureHeight
         let callbackStatus = StatusBox()
         status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { [weak self] st, _, image, _, _ in
             callbackStatus.value = st
             guard st == noErr, let image, let self else { return }
-            self.onFrame?(DecodedFrame(pixelBuffer: image, captureHostTimeNs: t, seq: seq))
+            self.onFrame?(DecodedFrame(pixelBuffer: image, captureHostTimeNs: t, seq: seq, width: width, height: height))
         }
         let failure = status != noErr ? status : callbackStatus.value
         guard failure == noErr else {

@@ -68,7 +68,7 @@ final class DecoderOutboxTests: XCTestCase {
         let delivered = Delivered()
         let outbox = DecoderOutbox(hop: { hops.add($0) }, deliver: { delivered.outputs.append($0) })
         func picture(_ seq: UInt32) -> DecoderOutbox.Output {
-            .frame(DecodedFrame(pixelBuffer: buffers.make(), captureHostTimeNs: UInt64(seq), seq: seq))
+            .frame(DecodedFrame(pixelBuffer: buffers.make(), captureHostTimeNs: UInt64(seq), seq: seq, width: 8, height: 6))
         }
         let decoderQueue = DispatchQueue(label: "test.decoder")
         decoderQueue.sync {

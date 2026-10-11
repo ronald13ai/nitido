@@ -40,6 +40,83 @@ final class CodecLoopTests: XCTestCase {
         return box.value.sorted { $0.seq < $1.seq }
     }
 
+    /// One-pixel columns, black and white, at `width` × `height`: the finest detail a picture of text has.
+    private func columns(width: Int, height: Int) -> CVPixelBuffer {
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferMetalCompatibilityKey: true, kCVPixelBufferIOSurfacePropertiesKey: [:]]
+        XCTAssertEqual(CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb), kCVReturnSuccess)
+        let buffer = pb!
+        CVPixelBufferLockBaseAddress(buffer, [])
+        let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        for y in 0..<height {
+            for x in 0..<width { let v: UInt8 = x % 2 == 0 ? 0 : 255; let p = base + y * stride + x * 4; p[0] = v; p[1] = v; p[2] = v; p[3] = 0xff }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        return buffer
+    }
+
+    /// The first frame `codec` encodes from `source` at `bitsPerSecond`, decoded.
+    private func roundTrip(_ source: CVPixelBuffer, codec: Codec, bitsPerSecond: Int = 60_000_000) throws -> DecodedFrame {
+        let encoder = try VideoEncoder(width: CVPixelBufferGetWidth(source), height: CVPixelBufferGetHeight(source),
+                                       preferred: codec, bitsPerSecond: bitsPerSecond)
+        defer { encoder.invalidate() }
+        let encoded = expectation(description: "encoded")
+        let box = Box<[EncodedFrame]>([])
+        encoder.onFrame = { f in box.append(f); encoded.fulfill() }
+        XCTAssertTrue(encoder.encode(source, captureHostTimeNs: 0))
+        wait(for: [encoded], timeout: 5)
+        let frame = try XCTUnwrap(box.value.first)
+        let decoder = try VideoDecoder(config: try XCTUnwrap(frame.videoConfig))
+        defer { decoder.invalidate() }
+        let decoded = Box<[DecodedFrame]>([])
+        decoder.onFrame = { decoded.append($0) }
+        try decoder.decode(frame.videoFrame)
+        return try XCTUnwrap(decoded.value.first)
+    }
+
+    /// An odd size (a window of odd point size on a 1x display) is the normal case. HEVC and H.264 in 4:2:0 code no odd
+    /// size, and VideoToolbox scaled 1347 × 879 to 1346 × 878, which blurred the one-pixel columns in the middle of the
+    /// picture to grey. The encoder codes the even size above it from a copy with the edge repeated: the picture comes
+    /// back at the source's size, and every pair of neighbouring columns keeps its contrast, across the whole width.
+    func testAnOddSizeComesBackAtItsSizeWithEveryColumnSharp() throws {
+        for codec in [Codec.hevc, .h264] {
+            for (width, height) in [(1347, 879), (201, 101), (31, 17)] {
+                let decoded = try roundTrip(columns(width: width, height: height), codec: codec)
+                XCTAssertEqual(decoded.width, width, "\(codec) \(width)×\(height)")
+                XCTAssertEqual(decoded.height, height)
+                XCTAssertEqual(CVPixelBufferGetWidth(decoded.pixelBuffer), (width + 1) & ~1, "coded at the even size above")
+                XCTAssertEqual(CVPixelBufferGetHeight(decoded.pixelBuffer), (height + 1) & ~1)
+                guard width == 1347 else { continue }
+                // The decoder's luma, one row in the middle and the last row of the picture.
+                let buffer = decoded.pixelBuffer
+                CVPixelBufferLockBaseAddress(buffer, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+                let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!.assumingMemoryBound(to: UInt8.self)
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+                for y in [height / 2, height - 1] {
+                    let row = luma + y * stride
+                    let contrasts = (0..<(width - 1)).map { abs(Int(row[$0]) - Int(row[$0 + 1])) }
+                    let weakest = contrasts.enumerated().min { $0.element < $1.element }!
+                    XCTAssertGreaterThan(weakest.element, 100, "\(codec): columns \(weakest.offset) and \(weakest.offset + 1) of row \(y) blend")
+                    let middle = contrasts[(width / 2 - 8)..<(width / 2 + 8)].min()!
+                    XCTAssertGreaterThan(middle, 100, "\(codec): the middle of the picture keeps its columns")
+                }
+            }
+        }
+    }
+
+    /// The hardware H.264 encoder takes up to 4096 × 2304. Over it, the failure says the picture is too large rather
+    /// than a status a Retry at the same size would meet again.
+    func testH264OverItsLimitSaysThePictureIsTooLarge() throws {
+        XCTAssertNoThrow(try VideoEncoder(width: 4096, height: 2304, preferred: .h264, bitsPerSecond: 20_000_000).invalidate())
+        XCTAssertThrowsError(try VideoEncoder(width: 4097, height: 2305, preferred: .h264, bitsPerSecond: 20_000_000)) { error in
+            XCTAssertEqual(error as? CodecError, .tooLarge(width: 4097, height: 2305))
+        }
+        XCTAssertNoThrow(try VideoEncoder(width: 5120, height: 2880, preferred: .hevc, bitsPerSecond: 20_000_000).invalidate(),
+                         "HEVC takes it")
+    }
+
     func testEncodeThenDecodeThirtyFrames() throws {
         let frames = try encodeFrames(30)
         XCTAssertEqual(frames.count, 30)

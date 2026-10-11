@@ -76,7 +76,12 @@ extension ShareModel {
             // invalidated encoder turns every frame away (`encode` would count each as a drop and wait for a slot
             // that never frees).
             dropCodec()
-            state = .failed("This Mac's hardware video encoder could not start\(error.statusNote); press Retry to try again.")
+            if case .tooLarge = error {
+                // Retry at the same size would fail the same way: the way forward is a smaller picture.
+                state = .failed("\(error.plainDescription) Press Retry and pick a smaller window, or choose a scaled mode for the display in System Settings.")
+            } else {
+                state = .failed("This Mac's hardware video encoder could not start\(error.statusNote); press Retry to try again.")
+            }
             endViewers()
         }
     }
@@ -119,7 +124,7 @@ extension ShareModel {
             if encoder.isKeyframeRequested { sendKeyframe() }
         case .property(let key, let status):
             codecNotice = "The video \(part) rejected its \(CodecError.settingName(key)) setting (error \(status)); the picture goes on without it."
-        case .sessionCreate, .decode, .formatDescription, .prepare:
+        case .sessionCreate, .decode, .formatDescription, .prepare, .tooLarge:
             codecNotice = error.plainDescription   // Task 9 throws these instead; shown all the same if one ever arrives
         }
     }
