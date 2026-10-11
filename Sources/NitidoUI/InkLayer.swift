@@ -35,19 +35,67 @@ public final class InkController {
     }
     func cursorMoved(_ c: Cursor) { onOutgoing?(.cursor(c)) }
 
-    // Remote input (wired in Task 13)
+    // Remote input. Everything here comes from the other Mac, which holds the code but is not trusted further: its
+    // floats can be any bit pattern (a NaN position made Core Animation raise `CALayerInvalidGeometry` and abort the
+    // app), its ids any number, its strokes any length. The limits below keep a hostile peer from crashing this side,
+    // freezing it or taking over this side's strokes.
+
+    /// At most this many of the peer's strokes are being drawn at once (begun, not ended); a `.begin` beyond it is
+    /// dropped. Ended strokes fade and go on their own.
+    static let maxRemoteStrokesInFlight = 64
+    /// At most this many points in one of the peer's strokes; points beyond it are dropped (the stroke stops growing).
+    static let maxPointsPerStroke = 10_000
+    /// The peer's stroke widths are kept within this range, in points; a width that is not a number takes the default.
+    static let remoteWidths: ClosedRange<Float> = 1...32
+
+    /// The peer's ids have the peer's parity (`InkDocument.allocateId`: the sharer's even, the viewer's odd). One with
+    /// this side's parity names, or would take over, one of this side's own strokes: it is ignored.
+    private func isPeers(_ id: UInt32) -> Bool { id % 2 == (role == .share ? 1 : 0) }
+
     public func applyRemote(_ m: StrokeMessage) {
-        document.apply(m, isRemote: true, now: CACurrentMediaTime())
+        guard isPeers(m.strokeId) else { return }
+        let existing = document.strokes.first { $0.id == m.strokeId }
+        var points = m.points.compactMap(Self.sanitized)
+        switch m.phase {
+        case .begin:
+            let inFlight = document.strokes.filter { $0.isRemote && $0.endedAt == nil && $0.id != m.strokeId }.count
+            guard inFlight < Self.maxRemoteStrokesInFlight else { return }
+            points = Array(points.prefix(Self.maxPointsPerStroke))
+        case .append:
+            guard let existing, existing.isRemote else { return }
+            points = Array(points.prefix(max(0, Self.maxPointsPerStroke - existing.points.count)))
+            guard !points.isEmpty else { return }
+        case .end:
+            guard existing?.isRemote ?? false else { return }
+        }
+        let width = m.baseWidth.isFinite ? min(max(m.baseWidth, Self.remoteWidths.lowerBound), Self.remoteWidths.upperBound) : 4
+        document.apply(StrokeMessage(strokeId: m.strokeId, phase: m.phase, color: m.color, baseWidth: width, points: points),
+                       isRemote: true, now: CACurrentMediaTime())
         if let s = document.strokes.first(where: { $0.id == m.strokeId }) { canvas?.update(s) }
     }
-    public func undoRemote(id: UInt32) { document.remove(id: id); canvas?.remove(id: id, duration: 0.15) }
+
+    /// A point of the peer's within the picture: x and y clamped to 0...1, pressure to 0...1; nil for one with a value
+    /// that is not a number.
+    nonisolated static func sanitized(_ p: StrokePoint) -> StrokePoint? {
+        guard p.x.isFinite, p.y.isFinite, p.pressure.isFinite else { return nil }
+        return StrokePoint(x: min(max(p.x, 0), 1), y: min(max(p.y, 0), 1), pressure: min(max(p.pressure, 0), 1), tMs: p.tMs)
+    }
+
+    public func undoRemote(id: UInt32) {
+        guard isPeers(id), document.strokes.contains(where: { $0.id == id && $0.isRemote }) else { return }
+        document.remove(id: id); canvas?.remove(id: id, duration: 0.15)
+    }
     public func clearRemote() { document.clear(); canvas?.removeAll() }
     /// The peer's link dropped: its strokes still being drawn will get no `.end`, so they end now and fade in four seconds,
     /// and its cursor, which will not move again, goes.
     public func endRemoteStrokes() { document.endRemoteStrokes(now: CACurrentMediaTime()); hideRemoteCursor() }
     /// The peer's cursor goes (its link dropped or closed).
     public func hideRemoteCursor() { canvas?.hideRemoteCursor() }
-    public func remoteCursor(_ c: Cursor, name: String) { canvas?.showRemoteCursor(c, name: name) }
+    /// The peer's cursor, inside the picture. A position that is not a number is dropped, and the dot stays where it was.
+    public func remoteCursor(_ c: Cursor, name: String) {
+        guard c.x.isFinite, c.y.isFinite else { return }
+        canvas?.showRemoteCursor(Cursor(x: min(max(c.x, 0), 1), y: min(max(c.y, 0), 1), visible: c.visible), name: name)
+    }
 
     // Commands
     public func undoLocal() {
@@ -308,6 +356,9 @@ public final class InkCanvasView: NSView {
     }
 
     func hideRemoteCursor() { cursorDot.opacity = 0; cursorPill.opacity = 0 }
+
+    /// Test only: where the peer's dot is, and whether it shows.
+    var remoteCursorForTesting: (position: CGPoint, visible: Bool) { (cursorDot.position, cursorDot.opacity > 0) }
 
     /// The peer's cursor: the gold dot, and 12 pt to its right the peer's name on a pill (6 by 3 pt of padding).
     func showRemoteCursor(_ c: Cursor, name: String) {

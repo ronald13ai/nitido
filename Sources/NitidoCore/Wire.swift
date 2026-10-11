@@ -45,6 +45,10 @@ public enum Wire {
     }
 
     /// Accumulates chunks from a byte stream and yields whole messages. Unknown types are skipped.
+    ///
+    /// Reads through the buffer with an offset and drops what it has read once per `feed`: copying the rest of the buffer
+    /// after every message made one receive of many small messages (a peer sending 200,000 five-byte `clear`s in one
+    /// megabyte) cost time quadratic in its size, and stalled the link's queue for seconds.
     public struct Decoder: Sendable {
         private var buffer = Data()
         public init() {}
@@ -52,15 +56,17 @@ public enum Wire {
         public mutating func feed(_ chunk: Data) throws -> [Message] {
             buffer.append(chunk)
             var out: [Message] = []
-            while buffer.count >= Wire.headerSize {
-                var r = ByteReader(buffer)
+            var offset = buffer.startIndex
+            defer { buffer = offset == buffer.endIndex ? Data() : Data(buffer[offset...]) }
+            while buffer.endIndex - offset >= Wire.headerSize {
+                var r = ByteReader(buffer[offset..<(offset + Wire.headerSize)])
                 let length = Int(try r.u32())
                 let type = try r.u8()
                 guard length <= Wire.maxPayload else { throw WireError.oversized(length) }
                 let total = Wire.headerSize + length
-                guard buffer.count >= total else { break }
-                let payload = buffer.subdata(in: Wire.headerSize..<total)
-                buffer = buffer.subdata(in: total..<buffer.count)
+                guard buffer.endIndex - offset >= total else { break }
+                let payload = buffer.subdata(in: (offset + Wire.headerSize)..<(offset + total))
+                offset += total
                 if let m = try Wire.decodePayload(type: type, payload) { out.append(m) }
             }
             return out

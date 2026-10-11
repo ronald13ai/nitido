@@ -907,6 +907,35 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertFalse(viewer.activity.isHeld)
     }
 
+    /// The sharer's side of a hostile viewer: a cursor that is not a number, sent over the real link, leaves the sharer
+    /// running and its dot where it was (it aborted the app through Core Animation before).
+    @MainActor
+    func testAViewersCursorThatIsNotANumberLeavesTheSharerRunning() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: 320, height: 180), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.contentView = nil }
+        let canvas = InkCanvasView(controller: share.ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        window.contentView?.addSubview(canvas)
+        let (viewer, _, reader) = try await rawViewer(of: share)
+        defer { reader.cancel(); viewer.close() }
+        viewer.send(.cursor(Cursor(x: 0.25, y: 0.5, visible: true)))
+        try await waitUntil("the cursor shows on the sharer") { canvas.remoteCursorForTesting.position == CGPoint(x: 80, y: 90) }
+        viewer.send(.cursor(Cursor(x: .nan, y: .nan, visible: true)))
+        viewer.send(.cursor(Cursor(x: .infinity, y: 0.5, visible: true)))
+        // Messages arrive in order: once this stroke is on the sharer, both cursors before it have been handled.
+        viewer.send(.stroke(StrokeMessage(strokeId: 9, phase: .begin, color: .cream, baseWidth: 4,
+                                          points: [StrokePoint(x: 0.5, y: 0.5, pressure: 1, tMs: 0)])))
+        try await waitUntil("the stroke after them arrives") { share.ink.document.strokes.contains { $0.id == 9 } }
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 80, y: 90))
+        XCTAssertEqual(share.state, .capturing)
+        await share.stop()
+    }
+
     /// A sharer that drops without saying bye (a cable pull, a process that died) puts the viewer in Reconnecting, and
     /// the viewer pairs again by itself as soon as the sharer answers, asking for a keyframe.
     @MainActor

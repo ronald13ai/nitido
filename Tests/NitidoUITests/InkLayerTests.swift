@@ -82,6 +82,55 @@ final class InkControllerTests: XCTestCase {
         XCTAssertTrue(ink.document.strokes.isEmpty)
     }
 
+    /// The peer's ids carry the peer's parity (the sharer's even, the viewer's odd): one with this side's parity would
+    /// erase or take over this side's own strokes, and is ignored, as an undo of a stroke that is not the peer's is.
+    @MainActor
+    func testThePeersIdsMustHaveThePeersParity() {
+        let ink = InkController(role: .share)
+        let own = drawLocal(ink)
+        ink.applyRemote(StrokeMessage(strokeId: own, phase: .begin, color: .cream, baseWidth: 4, points: [b]))
+        ink.applyRemote(StrokeMessage(strokeId: own, phase: .append, color: .cream, baseWidth: 4, points: [b]))
+        ink.undoRemote(id: own)
+        XCTAssertEqual(ink.document.strokes.map(\.id), [own])
+        XCTAssertEqual(ink.document.strokes.first?.points, [a, b], "this side's stroke is untouched")
+        XCTAssertEqual(ink.document.strokes.first?.isRemote, false)
+        let viewerInk = InkController(role: .view)
+        viewerInk.applyRemote(StrokeMessage(strokeId: 3, phase: .begin, color: .cream, baseWidth: 4, points: [a]))
+        XCTAssertTrue(viewerInk.document.strokes.isEmpty, "an odd id is the viewer's own")
+        viewerInk.applyRemote(StrokeMessage(strokeId: 4, phase: .begin, color: .cream, baseWidth: 4, points: [a]))
+        XCTAssertEqual(viewerInk.document.strokes.map(\.id), [4])
+    }
+
+    /// A peer cannot grow this side's ink without bound: at most 64 of its strokes are being drawn at once, at most
+    /// 10,000 points each, and its values are kept inside the picture (a point that is not a number is dropped, the
+    /// width kept within 1 to 32 points).
+    @MainActor
+    func testThePeersInkIsBounded() {
+        let ink = InkController(role: .share)
+        for i in 0..<70 {
+            ink.applyRemote(StrokeMessage(strokeId: UInt32(2 * i + 1), phase: .begin, color: .cream, baseWidth: 4, points: [a]))
+        }
+        XCTAssertEqual(ink.document.strokes.count, InkController.maxRemoteStrokesInFlight)
+        ink.applyRemote(StrokeMessage(strokeId: 1, phase: .end, color: .cream, baseWidth: 4, points: []))
+        ink.applyRemote(StrokeMessage(strokeId: 201, phase: .begin, color: .cream, baseWidth: 4, points: [a]))
+        XCTAssertTrue(ink.document.strokes.contains { $0.id == 201 }, "an ended stroke frees its place")
+
+        let many = Array(repeating: b, count: 6_000)
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .append, color: .cream, baseWidth: 4, points: many))
+        ink.applyRemote(StrokeMessage(strokeId: 3, phase: .append, color: .cream, baseWidth: 4, points: many))
+        XCTAssertEqual(ink.document.strokes.first { $0.id == 3 }?.points.count, InkController.maxPointsPerStroke)
+
+        let odd = [StrokePoint(x: .nan, y: 0.5, pressure: 1, tMs: 1), StrokePoint(x: 2, y: -1, pressure: 9, tMs: 2),
+                   StrokePoint(x: 0.5, y: .infinity, pressure: 1, tMs: 3), StrokePoint(x: 0.5, y: 0.5, pressure: .nan, tMs: 4)]
+        let fresh = InkController(role: .share)
+        fresh.applyRemote(StrokeMessage(strokeId: 301, phase: .begin, color: .cream, baseWidth: .nan, points: odd))
+        let stroke = fresh.document.strokes.first { $0.id == 301 }
+        XCTAssertEqual(stroke?.points, [StrokePoint(x: 1, y: 0, pressure: 1, tMs: 2)])
+        XCTAssertEqual(stroke?.baseWidth, 4)
+        fresh.applyRemote(StrokeMessage(strokeId: 303, phase: .begin, color: .cream, baseWidth: 1e30, points: [a]))
+        XCTAssertEqual(fresh.document.strokes.first { $0.id == 303 }?.baseWidth, 32)
+    }
+
     /// What the peer sends is applied and never sent back.
     @MainActor
     func testRemoteChangesAreAppliedAndNeverEchoed() {
@@ -412,6 +461,29 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertEqual(ribbons(on: canvas).count, 1, "the old fade left the new share's stroke")
         XCTAssertTrue(ribbons(on: canvas).first === stroke)
         XCTAssertEqual(stroke.opacity, 1)
+    }
+
+    /// A peer's cursor with a coordinate that is not a number (one 14-byte message from a Mac holding the code) made Core
+    /// Animation raise `CALayerInvalidGeometry` and abort the app. It is dropped, and the dot stays where it was; an
+    /// infinite or out-of-range one is dropped or kept inside the picture. Through the viewer's own handler too.
+    @MainActor
+    func testAPeersCursorThatIsNotANumberLeavesTheDotWhereItWas() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let viewer = ViewModel(startingDiscovery: false)
+        let canvas = InkCanvasView(controller: viewer.ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        viewer.handleIncoming(.cursor(Cursor(x: 0.5, y: 0.5, visible: true)))
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 160, y: 100))
+        for bad in [Cursor(x: .nan, y: .nan, visible: true), Cursor(x: .infinity, y: 0.5, visible: true),
+                    Cursor(x: 0.5, y: -.infinity, visible: true), Cursor(x: .nan, y: 0.5, visible: false)] {
+            viewer.handleIncoming(.cursor(bad))
+            XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 160, y: 100), "\(bad)")
+            XCTAssertTrue(canvas.remoteCursorForTesting.visible)
+        }
+        viewer.handleIncoming(.cursor(Cursor(x: 7, y: -3, visible: true)))
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 320, y: 0), "kept inside the picture")
     }
 
     /// The canvas draws with the theme's palette (spec 11), defined once for SwiftUI and the layers: this side's strokes

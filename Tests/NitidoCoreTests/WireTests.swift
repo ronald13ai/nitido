@@ -31,6 +31,22 @@ final class WireTests: XCTestCase {
         XCTAssertThrowsError(try r.u8())
     }
 
+    /// A peer that sends a megabyte of five-byte messages in one go (200,000 `clear`s) must not stall the link's queue:
+    /// the decoder reads through the buffer instead of copying the rest of it after every message, which made one such
+    /// receive take time quadratic in its size (seconds, at a megabyte). Partial messages still wait for their bytes.
+    func testAMegabyteOfTinyMessagesDecodesInLinearTime() throws {
+        let one = Wire.encode(.clear)
+        var chunk = Data(capacity: one.count * 209_715)
+        for _ in 0..<209_715 { chunk.append(one) }
+        var d = Wire.Decoder()
+        let start = Date()
+        let out = try d.feed(chunk + Wire.encode(.undo(strokeId: 5)).prefix(6))
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(out.count, 209_715)
+        XCTAssertLessThan(elapsed, 3, "decoding took \(elapsed) s")
+        XCTAssertEqual(try d.feed(Wire.encode(.undo(strokeId: 5)).dropFirst(6)), [.undo(strokeId: 5)], "the partial message waited")
+    }
+
     func testEveryMessageRoundTrips() throws {
         for m in samples {
             var d = Wire.Decoder()
