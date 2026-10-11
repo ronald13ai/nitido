@@ -329,7 +329,13 @@ public final class ViewModel {
         link = nil   // so `disconnect` leaves this session alone: it is closed here, and waited for
         disconnect()
         await session?.closeAndWait()
+        if let slow = slowGoodbyeForTesting { try? await Task.sleep(for: slow) }
     }
+
+    /// Test only: how much longer `disconnectAndWait` takes once the bye is out, as over a link whose send does not
+    /// complete and waits for its one-second fallback (`Link.close`), so a test can tell goodbyes said together from
+    /// goodbyes said one after the other (`AppModel.stop`).
+    @ObservationIgnored var slowGoodbyeForTesting: Duration?
 
     deinit { browser.stop() }
 

@@ -336,7 +336,10 @@ final class AppModelTests: XCTestCase {
         window.orderOut(nil)
     }
 
-    /// Quitting with a share and a view both live: both goodbyes go out together, and each other side hears its own.
+    /// Quitting with a share and a view both live: both goodbyes go out together, and each other side hears its own. The
+    /// viewer's goodbye is slow here, as over a link that waits for its one-second fallback: the share's viewer still
+    /// hears the share end at once, long before that goodbye is done. Said one after the other, the share's bye would wait
+    /// behind it (on loopback each bye takes milliseconds, so without the slow one the order could not be told).
     @MainActor
     func testStopEndsAShareAndAViewTogetherAndBothSidesHearBye() async throws {
         let (other, peer) = try await otherMac()
@@ -357,12 +360,15 @@ final class AppModelTests: XCTestCase {
         watcher.code = share.code; watcher.connect()
         try await waitUntil("the app's share has a viewer") { watcher.state == .connected && share.isSending }
 
+        viewer.slowGoodbyeForTesting = .milliseconds(1500)
         let started = Date()
-        await app.stop()
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
-        try await waitUntil("the app's viewer heard the share end") {
+        let stopping = Task { await app.stop(); return Date().timeIntervalSince(started) }
+        try await waitUntil("the app's viewer heard the share end while the viewer's goodbye is still under way", timeout: 1) {
             if case .failed("The sharer ended the session.", _) = watcher.state { true } else { false }
         }
+        let took = await stopping.value
+        XCTAssertGreaterThanOrEqual(took, 1.5, "the viewer's goodbye was slow")
+        XCTAssertLessThan(took, 2.5, "the stop took as long as the slower goodbye, not the two added")
         try await waitUntil("the other Mac heard the viewer leave") { !other.isSending && other.viewerName == nil }
         watcher.disconnect()
         await other.stop()
