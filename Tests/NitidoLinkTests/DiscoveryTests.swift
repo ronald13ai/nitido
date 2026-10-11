@@ -20,6 +20,28 @@ final class DiscoveryTests: XCTestCase {
         }
     }
 
+    /// A browser can run without peer-to-peer Wi-Fi, and switch: a new browser replaces the running one (an `NWBrowser`'s
+    /// parameters cannot change), and the list goes on with what it finds.
+    func testABrowserSwitchesPeerToPeerWiFiOffAndOnAndKeepsFinding() async throws {
+        let browser = Browser(peerToPeer: false)
+        XCTAssertFalse(browser.includesPeerToPeerForTesting)
+        browser.start()
+        defer { browser.stop() }
+        browser.usePeerToPeer(true)
+        XCTAssertTrue(browser.includesPeerToPeerForTesting)
+        browser.usePeerToPeer(false)
+        XCTAssertFalse(browser.includesPeerToPeerForTesting)
+        let name = "Switch \(UInt32.random(in: 0..<1_000_000))"
+        let advertiser = try Advertiser(name: name, code: "1234", hello: hello(.share, name: name))
+        _ = try await advertiser.start()
+        defer { advertiser.stop() }
+        let found = await firstList(from: browser, within: 10) { $0.contains { $0.name == name } }
+        XCTAssertNotNil(found, "the browser that replaced the first one finds a sharer")
+        let unstarted = Browser()
+        unstarted.usePeerToPeer(false)
+        XCTAssertTrue(unstarted.includesPeerToPeerForTesting, "nothing switches before start")
+    }
+
     /// Two Macs left at the default Computer Name share one name, and Bonjour registers the second as "Name (2)". Each
     /// advertiser says the name it was registered under, so the sharer can show the name its viewers see in the list.
     func testTwoSharersOfTheSameNameSayTheNameBonjourGaveThem() async throws {

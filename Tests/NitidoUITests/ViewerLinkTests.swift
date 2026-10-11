@@ -1017,6 +1017,33 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// Connected through an address the sharer published, the viewer browses without peer-to-peer Wi-Fi (AWDL), which
+    /// would otherwise keep the radio hopping between channels and add jitter to the link; back on the list it browses
+    /// with it again. Connected through the Bonjour service, which may reach the sharer over AWDL alone, it keeps it.
+    @MainActor
+    func testDiscoveryLeavesPeerToPeerWiFiWhileConnectedThroughAPublishedAddress() async throws {
+        let (share, source) = try await listeningShare()
+        source.emit(frame: try stripedFrame())
+        await drain()
+        let viewer = ViewModel()
+        XCTAssertTrue(viewer.browser.includesPeerToPeerForTesting)
+        let published = Peer(id: "published", name: share.name, keyName: share.name,
+                             endpoint: .service(name: "Absent \(UInt32.random(in: 0..<1_000_000))", type: "_nitido._tcp", domain: "local.", interface: nil),
+                             addresses: [IPv4Address("127.0.0.1")!], port: share.listeningPort!)
+        viewer.select(published); viewer.code = share.code; viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        try await waitUntil("discovery leaves AWDL") { !viewer.browser.includesPeerToPeerForTesting }
+        viewer.disconnect()
+        try await waitUntil("back on the list, discovery uses AWDL again") { viewer.browser.includesPeerToPeerForTesting }
+
+        viewer.select(peer(for: share)); viewer.code = share.code; viewer.connect()   // the endpoint alone: the last route
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(viewer.browser.includesPeerToPeerForTesting, "through the Bonjour route, AWDL stays")
+        viewer.disconnect()
+        await share.stop()
+    }
+
     /// Bonjour may rename a sharer that comes back: viewed as "MacBook Pro (2)", relaunched after the other "MacBook Pro"
     /// left, it lists as "MacBook Pro" under another id. The viewer finds it by the name its key is derived from, which it
     /// publishes, when exactly one listed Mac has that name; with two, it cannot tell them apart and keeps what it chose.

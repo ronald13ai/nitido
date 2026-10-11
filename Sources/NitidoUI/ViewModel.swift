@@ -25,8 +25,14 @@ public final class ViewModel {
     public private(set) var state: State = .browsing {
         didSet {
             switch state {
-            case .connected, .reconnecting: activity.begin("Viewing \(currentPeer?.keyName ?? "a shared screen")")
-            case .browsing, .enteringCode, .connecting, .failed: activity.end()
+            case .connected: activity.begin("Viewing \(currentPeer?.keyName ?? "a shared screen")")
+            case .reconnecting:
+                activity.begin("Viewing \(currentPeer?.keyName ?? "a shared screen")")
+                // The sharer may come back where only AWDL reaches it: discovery looks there too while reconnecting.
+                browser.usePeerToPeer(true)
+            case .browsing, .enteringCode, .connecting, .failed:
+                activity.end()
+                browser.usePeerToPeer(true)
             }
         }
     }
@@ -318,7 +324,12 @@ public final class ViewModel {
         switch s {
         case .connecting(let attempt): if attempt > 1 { state = .reconnecting(peer, attempt: attempt) }
         case .ready:
+            // Through an address the sharer published, the link is off AWDL, and so is discovery from now on: a peer-to-peer
+            // browse keeps the Wi-Fi radio hopping to AWDL's channels, which costs the link latency. Through the Bonjour
+            // service the sharer may be reachable over AWDL alone, so discovery keeps it.
+            let throughAddress = link?.readyThroughPublishedAddress ?? false
             state = .connected; connectionCount += 1; decodeFailures = 0; lastSeq = nil; reportedClockMismatch = false
+            browser.usePeerToPeer(!throughAddress)
             awaitingKeyframe = true
             askForKeyframe()
         case .reconnecting(let attempt, _):

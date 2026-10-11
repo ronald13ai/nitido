@@ -50,6 +50,11 @@ public struct Peer: Identifiable, Hashable, Sendable {
 }
 
 /// Finds sharers on the local network; emits the full list on every change.
+///
+/// Peer-to-peer Wi-Fi (AWDL) is on while it browses with `includePeerToPeer`, and the Wi-Fi radio then time-slices
+/// between the network's channel and AWDL's, which costs the network throughput and latency: jitter in the very figures
+/// the strip measures. A viewer connected through an address the sharer published needs no AWDL, so it browses without
+/// it then (`usePeerToPeer`), and with it again once the link drops or the session ends.
 public final class Browser: @unchecked Sendable {
     /// What discovery is doing, so the viewer UI can say why the list is empty (Local Network denied, DNS-SD
     /// error) instead of waiting in silence. `.failed` and `.stopped` are final: `states` and `peers` end after them.
@@ -59,24 +64,60 @@ public final class Browser: @unchecked Sendable {
     public let states: AsyncStream<State>
     private let out: AsyncStream<[Peer]>.Continuation
     private let stateOut: AsyncStream<State>.Continuation
-    private let browser: NWBrowser
     private let queue = DispatchQueue(label: "ai.ronar.nitido.browser")
+    // Only touched on `queue`, apart from `init`.
+    /// The browser running now; `usePeerToPeer` replaces it with one that browses the other way.
+    private var browser: NWBrowser
+    private var started = false, stopped = false
 
-    public init() {
-        let params = NWParameters(); params.includePeerToPeer = true
-        // With the TXT record: Bonjour renames a service whose name is taken, but the key stays derived from the name
-        // the sharer asked for, which `Advertiser` publishes there.
-        browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_nitido._tcp", domain: nil), using: params)
+    /// `peerToPeer` false browses without AWDL.
+    public init(peerToPeer: Bool = true) {
         (peers, out) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         (states, stateOut) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(16))
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
-            let list = results.compactMap { Self.peer(endpoint: $0.endpoint, metadata: $0.metadata) }.sorted { $0.name < $1.name }
-            self?.out.yield(list)
-        }
-        browser.stateUpdateHandler = { [weak self] s in self?.browserStateChanged(s) }
+        browser = Self.makeBrowser(peerToPeer: peerToPeer)
+        follow(browser)
     }
 
-    public func start() { browser.start(queue: queue) }
+    private static func makeBrowser(peerToPeer: Bool) -> NWBrowser {
+        let params = NWParameters(); params.includePeerToPeer = peerToPeer
+        // With the TXT record: Bonjour renames a service whose name is taken, but the key stays derived from the name
+        // the sharer asked for, which `Advertiser` publishes there.
+        return NWBrowser(for: .bonjourWithTXTRecord(type: "_nitido._tcp", domain: nil), using: params)
+    }
+
+    /// Hears `b`'s results and states for as long as it is the browser running; a browser replaced since says nothing.
+    private func follow(_ b: NWBrowser) {
+        b.browseResultsChangedHandler = { [weak self, weak b] results, _ in
+            guard let self, let b, b === browser else { return }
+            let list = results.compactMap { Self.peer(endpoint: $0.endpoint, metadata: $0.metadata) }.sorted { $0.name < $1.name }
+            out.yield(list)
+        }
+        b.stateUpdateHandler = { [weak self, weak b] s in
+            guard let self, let b, b === browser else { return }
+            browserStateChanged(s)
+        }
+    }
+
+    public func start() { queue.sync { started = true; browser.start(queue: queue) } }
+
+    /// Browses with AWDL (`true`) or without it from now on, if it does not already, by replacing the browser: an
+    /// `NWBrowser`'s parameters cannot change once it runs. The list starts again from what the new browser finds,
+    /// within about a second, so a list the old one saw never outlives it. Nothing before `start` or after `stop`.
+    public func usePeerToPeer(_ on: Bool) {
+        queue.async { [self] in
+            guard started, !stopped, browser.parameters.includePeerToPeer != on else { return }
+            log.info("\(on ? "browsing with peer-to-peer Wi-Fi again" : "connected through a published address; browsing without peer-to-peer Wi-Fi", privacy: .public)")
+            let old = browser
+            browser = Self.makeBrowser(peerToPeer: on)
+            follow(browser)
+            out.yield([])
+            browser.start(queue: queue)
+            old.cancel()
+        }
+    }
+
+    /// Test only: whether the browser running now browses with AWDL.
+    var includesPeerToPeerForTesting: Bool { queue.sync { browser.parameters.includePeerToPeer } }
 
     /// The peer a browse result describes, or nil for one that is not a Bonjour service. Its TXT record
     /// (`Advertiser.txtRecord`) comes from the network: only plain dotted IPv4 unicast addresses and a port above 0 are
@@ -107,7 +148,7 @@ public final class Browser: @unchecked Sendable {
     }
 
     public func stop() {
-        browser.cancel()
+        queue.sync { stopped = true; browser.cancel() }
         out.finish()
         stateOut.yield(.stopped); stateOut.finish()
     }

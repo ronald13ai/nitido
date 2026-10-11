@@ -113,6 +113,8 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
     The text right of the divider is as sharp as left of it across the whole picture, middle included, with no step at the divider; the viewer's picture is the same size as in the sharer's strip, with no dark line along its left or bottom edge.
 41. With viewer A connected, close A's lid (or turn its Wi-Fi off) for a minute; meanwhile pair viewer B, a third Mac or a second copy on another Mac, with the same code; then open A again.\
     A says "Another Mac is now viewing <Mac>." over its last frame and B keeps the picture; pressing Try again on A and typing the code makes A the viewer, and B then says it.
+42. With both Macs on the same Wi-Fi and nothing else using AirDrop, Handoff or Sidecar, run `ping -i 0.1 -c 300 <router>` on the viewer, then on the sharer, three times each: with Nítido closed, while paired, and while the viewer shows the list of Macs; note `ifconfig awdl0 | grep status` each time, and the strip's RTT and the latency sparkline while paired.\
+    While paired the viewer's ping has no more spikes than with Nítido closed (its round-trip maximum and the spread of the 300 replies about the same), while the list shows them as before; note what the sharer's ping and `awdl0` status do while paired, since the sharer still advertises over AWDL.
 
 ## Before publishing
 

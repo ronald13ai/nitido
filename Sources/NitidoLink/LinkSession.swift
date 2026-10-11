@@ -38,6 +38,9 @@ public final class LinkSession: @unchecked Sendable {
     public var lastRTTSample: RTTSample? { current?.lastRTTSample }
     public var clockOffsetNs: Int64? { current?.clockOffsetNs }
     public var backlogBytes: Int { current?.backlogBytes ?? 0 }
+    /// The link ready now came through an address the sharer published, not the Bonjour service: off AWDL, so the
+    /// viewer's discovery can browse without it (`Browser.usePeerToPeer`). Set before `.ready` is reported.
+    public var readyThroughPublishedAddress: Bool { lock.withLock { throughPublishedAddress } }
 
     /// Where the sharer may be reached, in the order they are tried; the last one is the Bonjour service
     /// (`Peer.routes(on:)`). Asked again for every attempt: this Mac's networks, and what discovery says about the
@@ -54,6 +57,7 @@ public final class LinkSession: @unchecked Sendable {
     private var open = true
     private var attempt = 0
     private var everReady = false
+    private var throughPublishedAddress = false
     /// When the reconnects began to find every published address refusing (`follow`); nil once one does not.
     private var refusedSince: Double?
     /// Whether discovery still lists the sharer; asked when every published address refuses a reconnect.
@@ -189,7 +193,7 @@ public final class LinkSession: @unchecked Sendable {
             for await s in link.states {
                 switch s {
                 case .ready:
-                    lock.withLock { everReady = true; attempt = 0; refusedSince = nil }
+                    lock.withLock { everReady = true; attempt = 0; refusedSince = nil; throughPublishedAddress = index < routes.count - 1 }
                     stateOut.yield(.ready)
                 case .failed(let reason):
                     if link.incompatible {
