@@ -51,7 +51,7 @@ Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple 
 |---|---|---|
 | Raw capture to display, window 1346×878 pt @2x (2692×1756 px) | 21 ms at 58 fps | 168b191 |
 | Raw capture to display, full display 3024×1964 px | (fill in) ms | |
-| Codec loop, HEVC at 2 Mbps, same window, text scrolling | codec 10 ms, capture to display 34 ms, real rate 1.5 Mbps, still text sharp | 168b191 |
+| Codec loop, HEVC at 2 Mbps, same window, text scrolling | codec 10 ms, capture to display 34 ms, real rate 1.5 Mbps, still text sharp (under the earlier cap of 1.5 times the rate per second; to be re-measured) | 168b191 |
 | Codec loop, HEVC at 20 Mbps, same window | codec (fill in) ms, capture to display (fill in) ms | |
 | Two Macs, glass to glass (estimated) | 30 to 40 ms | cae00eb |
 | Two Macs, RTT | 9 to 10 ms | 168b191 |
@@ -59,7 +59,7 @@ Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple 
 - Capture to display is exact on one Mac: the capture time and the presentation time come from the same host clock.
 - Glass to glass across two Macs is an estimate: it uses an NTP-style clock offset from the fastest pong of the last 10 s, and the strip labels it "(est.)".
 - The spec aimed for capture to display under 20 ms through the codec loop. I measured 34 ms there at 2 Mbps, and 21 ms without the codec. Glass to glass met its target of under 100 ms.
-- At 2 Mbps the encoder kept to the limit (1.5 Mbps real), and still text stayed sharp. Whether it stays sharp while it scrolls is still to be checked.
+- At 2 Mbps the encoder kept under the rate (1.5 Mbps real), and still text stayed sharp. That was measured on build 168b191, under the earlier hard cap of 1.5 times the rate per second; the cap is now twice the rate over 2 s (spec 7), so the 2 Mbps row is to be measured again. Whether text stays sharp while it scrolls is still to be checked.
 - Both two-Mac runs came before the fixes made after the evening run (the backlog rule, the keyframe limit, the pacer's cadence check) and are to be re-measured. The first run (168b191) read 46 ms while the Air showed 33 of 58 fps (bug 2 below).
 
 ![The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it](docs/screenshots/02-share-loopback.png)
