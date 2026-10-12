@@ -1001,7 +1001,9 @@ private final class ReelWindow {
 
     /// A window of this process holding `root`.
     init(visual root: some View, corner: CGPoint) {
-        let host = NSHostingView(rootView: AnyView(root))
+        // It takes the first click, as a window of the active app does, for the README's reel (`testReadmeReel`), whose
+        // presses, strokes and drags are events sent to it: this process is never the active app.
+        let host: NSHostingView<AnyView> = ReelFirstMouseView(rootView: AnyView(root))
         // Its ideal size as an intrinsic size, nothing pinning the window to it: the reel sets the frame itself.
         host.sizingOptions = [.intrinsicContentSize]
         self.host = host
@@ -1074,6 +1076,61 @@ private final class ReelWindow {
     func close() {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         window.orderOut(nil)
+    }
+
+    /// A point of the content (top left origin, points) on screen (bottom left origin, points).
+    func screenPoint(_ point: CGPoint) -> CGPoint {
+        guard let host else { return .zero }
+        return window.convertPoint(toScreen: host.convert(point, to: nil))
+    }
+
+    /// The view a press went to straight, and its drags and release after it (`send`).
+    private var pressed: NSView?
+
+    /// A mouse event at a point of the content (top left origin, points), delivered as the window server delivers it to
+    /// the active app. This process never is, so the window would keep a first click from a view that does not take
+    /// one (the ink's canvas): a press on such a view, and its drags and release, go to it straight.
+    func send(_ type: NSEvent.EventType, at point: CGPoint) {
+        guard let host, let content = window.contentView else { return }
+        let location = host.convert(point, to: nil)
+        guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                             context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        else { return }
+        switch type {
+        case .leftMouseDown:
+            if let hit = content.hitTest(location), !hit.acceptsFirstMouse(for: event) {
+                pressed = hit
+                hit.mouseDown(with: event)
+            } else {
+                pressed = nil
+                window.sendEvent(event)
+            }
+        case .leftMouseDragged:
+            if let pressed { pressed.mouseDragged(with: event) } else { window.sendEvent(event) }
+        case .leftMouseUp:
+            if let pressed { pressed.mouseUp(with: event) } else { window.sendEvent(event) }
+            pressed = nil
+        default:
+            window.sendEvent(event)
+        }
+    }
+
+    /// The frame (content points, top left origin) of the content's first accessibility element with `role` whose label
+    /// is `label` (any label when nil): where a person would point at a control, read as VoiceOver reads it.
+    func elementFrame(role: NSAccessibility.Role, label: String? = nil) -> CGRect? {
+        guard let host else { return nil }
+        func find(_ element: Any, depth: Int) -> CGRect? {
+            guard depth < 64, let node = element as? NSAccessibilityProtocol else { return nil }
+            if node.accessibilityRole() == role, label == nil || node.accessibilityLabel() == label {
+                return host.convert(window.convertFromScreen(node.accessibilityFrame()), from: nil)
+            }
+            for child in node.accessibilityChildren() ?? [] {
+                if let frame = find(child, depth: depth + 1) { return frame }
+            }
+            return nil
+        }
+        return find(host, depth: 0)
     }
 }
 
@@ -1291,20 +1348,22 @@ private final class ReelDirector {
         return ReelCrop(name: name, x: cx, y: cy, width: width, height: height)
     }
 
+    /// A plain backdrop behind the reel's windows over `rect` (top left origin, points), so the recordings hold nothing
+    /// but Nítido.
+    func raiseBackdrop(_ rect: CGRect) {
+        let ground = NSWindow(contentRect: CGRect(x: rect.minX, y: NSScreen.main!.frame.height - rect.maxY, width: rect.width, height: rect.height),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        ground.backgroundColor = NSColor(srgbRed: 0.105, green: 0.11, blue: 0.125, alpha: 1)
+        ground.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+        ground.isReleasedWhenClosed = false
+        ground.ignoresMouseEvents = true
+        ground.orderFrontRegardless()
+        backdrop = ground
+    }
+
     /// The moments, in order.
     func play() async throws {
-        if mode == .visual {
-            // A plain backdrop behind the reel's windows, so the recordings hold nothing but Nítido.
-            let ground = NSWindow(contentRect: CGRect(x: backdropRect.minX, y: NSScreen.main!.frame.height - backdropRect.maxY,
-                                                      width: backdropRect.width, height: backdropRect.height),
-                                  styleMask: [.borderless], backing: .buffered, defer: false)
-            ground.backgroundColor = NSColor(srgbRed: 0.105, green: 0.11, blue: 0.125, alpha: 1)
-            ground.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
-            ground.isReleasedWhenClosed = false
-            ground.ignoresMouseEvents = true
-            ground.orderFrontRegardless()
-            backdrop = ground
-        }
+        if mode == .visual { raiseBackdrop(backdropRect) }
         let shareWindow = try await openWindow("share")
         share = shareWindow
         try await pause(1.5)
@@ -1577,4 +1636,322 @@ private final class ReelDirector {
 @MainActor
 private struct ReelMark {
     let flash: @MainActor () -> Void
+}
+
+// MARK: - The README's reel (NITIDO_README=1)
+
+/// The README's GIF (`docs/screenshots/loop.gif`): one take of the share window through its moments, played by the real
+/// models in the real screens. The launch; a press on Share; the picture's entrance with the code; a viewer pairing over
+/// the loopback link, the ring; a gold stroke drawn here and a cream one from the viewer; the codec loop switched on, its
+/// divider dragged; both strokes fading; the quality lowered; the loop off; Stop, back to Welcome. The press, the stroke
+/// and the drag are mouse events sent to the window, and a stand-in arrow is drawn where they land (screencapture leaves
+/// the real pointer out); the switch and the slider take the values their bindings would. The system picker never
+/// opens, nothing waits on a person, and the recording covers only Nítido's window on a plain backdrop. Skipped unless
+/// NITIDO_RENDER=1 and NITIDO_README=1:
+///
+///     NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=/some/dir swift test --filter RenderGallery/testReadmeReel
+///
+/// It writes `clips/readme.mov` and `clips/loop.gif`: 20 s from the window's first frame, cropped to the window and its
+/// margin, 900 px wide, 15 fps.
+extension RenderGallery {
+    @MainActor
+    func testReadmeReel() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["NITIDO_README"] == "1", "set NITIDO_README=1 to record the README's reel")
+        try? FileManager.default.removeItem(at: MotionReel.clips)
+        try FileManager.default.createDirectory(at: MotionReel.clips, withIntermediateDirectories: true)
+        FontLoader.registerBundledFonts()
+        NSApplication.shared.setActivationPolicy(.accessory)
+        NSApplication.shared.finishLaunching()
+        try await pump(0.3)
+        let director = ReelDirector(mode: .visual)
+        let take: ReadmeTake
+        do {
+            take = try await director.playReadme()
+        } catch {
+            director.tearDown()
+            throw error
+        }
+        director.tearDown()
+        try ReadmeTake.gif(take)
+        let gif = MotionReel.clips.appendingPathComponent("loop.gif")
+        let size = (try FileManager.default.attributesOfItem(atPath: gif.path)[.size] as? Int) ?? 0
+        print("README reel: \(gif.path), \(size) bytes")
+        XCTAssertLessThan(size, 4_000_000, "the README's GIF should stay under 4 MB")
+    }
+}
+
+/// What the README's take recorded: the movie, the rect it covers and, inside it, the rect the GIF keeps (both top left
+/// origin, points).
+private struct ReadmeTake {
+    let movie: URL
+    let recorded: CGRect
+    let kept: CGRect
+    static let seconds: Double = 20
+    static let width = 900
+    static let fps = 15
+
+    /// The GIF: from the frame before the window's first change, `seconds` long, the marker's strip above the kept rect
+    /// left out, one palette for the whole take, ordered dithering (it stays put from frame to frame, so a still stretch
+    /// costs nothing) and only the changed rectangle written per frame.
+    static func gif(_ take: ReadmeTake) throws {
+        guard let marker = try MotionReel.markerTimes(take.movie).first else { throw ReelError.noMarker("readme") }
+        let start = try MotionReel.contentStart(take.movie, near: marker)
+        let top = Int((take.kept.minY - take.recorded.minY) * 2), height = Int(take.kept.height * 2) / 2 * 2
+        let chain = "tpad=stop_mode=clone:stop_duration=8,fps=60,trim=start=\(String(format: "%.4f", start)):duration=\(seconds),"
+            + "setpts=PTS-STARTPTS,crop=\(Int(take.kept.width * 2)):\(height):0:\(top),fps=\(fps),scale=\(width):-2:flags=lanczos,"
+            + "split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle"
+        try MotionReel.run(MotionReel.ffmpeg, ["-y", "-loglevel", "error", "-i", take.movie.path, "-filter_complex", chain, "-loop", "0",
+                                               MotionReel.clips.appendingPathComponent("loop.gif").path])
+    }
+}
+
+/// A stand-in for the pointer, which screencapture leaves out of a recording: the system's arrow with its tip where the
+/// reel's events land, in a window of its own above the reel's windows, taking no click.
+@MainActor
+private final class ReelPointer {
+    private let window: NSWindow
+    private let hotSpot: CGPoint
+    init() {
+        let cursor = NSCursor.arrow
+        hotSpot = cursor.hotSpot
+        let size = cursor.image.size
+        window = NSWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        window.isReleasedWhenClosed = false
+        let image = NSImageView(frame: CGRect(origin: .zero, size: size))
+        image.image = cursor.image
+        image.imageScaling = .scaleNone
+        window.contentView = image
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+    }
+    /// The arrow's tip at `point` (screen, bottom left origin, points).
+    func move(to point: CGPoint) {
+        window.setFrameOrigin(CGPoint(x: point.x - hotSpot.x, y: point.y + hotSpot.y - window.frame.height))
+    }
+    /// Fades the arrow in or out over 120 ms.
+    func show(_ shown: Bool) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            window.animator().alphaValue = shown ? 1 : 0
+        }
+    }
+    func close() { window.orderOut(nil) }
+}
+
+extension ReelDirector {
+    /// The README's take: the window at `corner`, the GIF's rect around the window's largest frame (the picture with the
+    /// strip), the marker's strip above it. Times are from the window's first frame on screen.
+    func playReadme() async throws -> ReadmeTake {
+        // The picture: 1440×900 px at 2x, so 720×450 pt and the window 720×527 with its title bar and strip.
+        let width = 1440, height = 900
+        let corner = CGPoint(x: 40, y: 82)
+        let kept = CGRect(x: corner.x - 40, y: corner.y - 26, width: 720 + 80, height: 527 + 26 + 44)
+        let recorded = CGRect(x: kept.minX, y: kept.minY - 26, width: kept.width, height: kept.height + 26)
+        raiseBackdrop(CGRect(x: 0, y: recorded.minY, width: recorded.maxX + 40, height: recorded.height + 40))
+
+        let window = ReelWindow(visual: ReelRoot(app: shareApp, policy: policy), corner: corner)
+        self.share = window
+        try await pause(1.2)
+        // The launch plays from the moment the window is on screen: Welcome built anew while the window is away.
+        window.window.orderOut(nil)
+        Instantly.run { shareApp.screen = .share }
+        try await pause(0.2)
+        shareApp.launchPlayed = false
+        Instantly.run { shareApp.screen = .welcome }
+        try prepare(width: width, height: height)
+        try await pause(0.4)
+
+        let movie = MotionReel.clips.appendingPathComponent("readme.mov")
+        let clip = ReelClip(name: "readme", rect: recorded, markers: ["launch"], sheets: 0)
+        let marker = ReelMarker(rect: recorded)
+        defer { marker.close() }
+        let pointer = ReelPointer()
+        defer { pointer.close() }
+        // screencapture records the pointer: one resting over the take is moved aside for it, and put back after.
+        let screen = NSScreen.main!.frame
+        let resting = CGPoint(x: NSEvent.mouseLocation.x, y: screen.height - NSEvent.mouseLocation.y)
+        let parked = recorded.insetBy(dx: -24, dy: -24).contains(resting)
+        if parked { CGWarpMouseCursorPosition(CGPoint(x: min(screen.width - 80, recorded.maxX + 200), y: min(screen.height - 80, recorded.maxY + 100))) }
+        defer { if parked { CGWarpMouseCursorPosition(resting) } }
+        let recorder = try ReelRecorder(clip, seconds: ReadmeTake.seconds + 2.6)
+        try await pause(0.9)
+
+        marker.flash()
+        window.window.orderFrontRegardless()
+        let t0 = CACurrentMediaTime()
+        func at(_ t: Double) async throws {
+            let wait = t0 + t - CACurrentMediaTime()
+            if wait > 0 { try await pause(wait) }
+        }
+        var tip = CGPoint(x: 470, y: 330)
+        /// The arrow from where it is to `to` over `seconds`, as a hand moves (the system ease-in-out), the window told of
+        /// every step: moves, or drags while the button is down.
+        func glide(to target: CGPoint, over seconds: Double, dragging: Bool = false) async throws {
+            let from = tip, curve = Theme.Motion.Curve(Theme.Motion.systemEaseInOut, seconds)
+            let start = CACurrentMediaTime()
+            while true {
+                let k = curve.progress(at: CACurrentMediaTime() - start)
+                tip = CGPoint(x: from.x + (target.x - from.x) * k, y: from.y + (target.y - from.y) * k)
+                pointer.move(to: window.screenPoint(tip))
+                window.send(dragging ? .leftMouseDragged : .mouseMoved, at: tip)
+                if k >= 1 { break }
+                try await pause(0.016)
+            }
+        }
+        /// The arrow along `path` (0 to 1) over `seconds`, the button down: a stroke or a drag.
+        func trace(over seconds: Double, _ path: (Double) -> CGPoint) async throws {
+            let start = CACurrentMediaTime()
+            while true {
+                let u = min(1, (CACurrentMediaTime() - start) / seconds)
+                tip = path(u)
+                pointer.move(to: window.screenPoint(tip))
+                window.send(.leftMouseDragged, at: tip)
+                if u >= 1 { break }
+                try await pause(0.016)
+            }
+        }
+
+        // 0 s: the launch. 2.1 s: the arrow comes to Share and presses it; the picker's card.
+        try await at(2.1)
+        let shareButton = window.elementFrame(role: .button, label: "Share") ?? CGRect(x: 206, y: 216, width: 96, height: 40)
+        pointer.move(to: window.screenPoint(tip))
+        pointer.show(true)
+        let sessions = sources.count
+        try await glide(to: CGPoint(x: shareButton.midX + 6, y: shareButton.midY + 4), over: 0.6)
+        try await at(2.95)
+        window.send(.leftMouseDown, at: tip)
+        try await at(3.13)
+        window.send(.leftMouseUp, at: tip)
+        try await waitUntil("Share opens a session") { self.sources.count > sessions }
+        try await at(3.4)
+        pointer.show(false)
+
+        // 4.3 s: the pick. The window grows to the picture; the strip, the panels and the code follow.
+        try await at(4.3)
+        try pick(width: width, height: height)
+        let model = try XCTUnwrap(shareApp.share)
+        try await waitUntil("the sharer listens") { model.listeningPort != nil }
+
+        // 6 s: a viewer pairs over the loopback link; the sharer's panel takes it in, and the ring draws.
+        try await at(6.0)
+        let sharer = Peer(id: "loopback", name: model.advertisedName ?? model.name, keyName: model.name,
+                          endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: model.listeningPort!)!))
+        let viewer = ViewModel(startingDiscovery: false)
+        defer { viewer.disconnect() }
+        viewer.peers = [sharer]
+        viewer.select(sharer)
+        viewer.code = model.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected && model.viewerName != nil }
+
+        // 7.5 s: a gold ring drawn round "Monday" in the document, by the pointer.
+        let doc = CGPoint(x: Double(width) * 0.30 + 56, y: Double(height) * 0.04 + 96 + 70)   // px, the first line's top left
+        let body = NSFont.systemFont(ofSize: 24)
+        let before = NSAttributedString(string: "The first public build goes out on ", attributes: [.font: body]).size().width
+        let word = NSAttributedString(string: "Monday", attributes: [.font: body]).size().width
+        let ring = CGPoint(x: (doc.x + before + word / 2) / 2, y: (doc.y + 15) / 2)
+        let rx = word / 4 + 9, ry = 11.5
+        func loop(_ u: Double) -> CGPoint {
+            // A little over a turn, clockwise from the left, a hand's ellipse: wider on its way back.
+            let a = Double.pi + u * 2.2 * Double.pi
+            let grow = 1 + 0.12 * u
+            return CGPoint(x: ring.x + rx * grow * cos(a), y: ring.y + ry * grow * sin(a) + 2 * u)
+        }
+        try await at(7.4)
+        tip = CGPoint(x: ring.x - 60, y: ring.y + 70)
+        pointer.move(to: window.screenPoint(tip))
+        pointer.show(true)
+        try await glide(to: loop(0), over: 0.45)
+        window.send(.leftMouseDown, at: tip)
+        try await trace(over: 0.8, loop)
+        window.send(.leftMouseUp, at: tip)
+
+        // 8.3 s: the viewer underlines "Open questions" in cream; its pointer, a gold dot with its name, leads.
+        let heading = NSAttributedString(string: "Open questions", attributes: [.font: NSFont.systemFont(ofSize: 28, weight: .semibold)]).size().width
+        let line = (x0: doc.x - 6, x1: doc.x + heading + 10, y: doc.y + 4 * 40 + 40)
+        func underline(_ u: Double) -> StrokePoint {
+            let x = line.x0 + (line.x1 - line.x0) * u, y = line.y + 3 * sin(u * .pi * 1.5) - 4 * u
+            return StrokePoint(x: Float(x / Double(width)), y: Float(y / Double(height)), pressure: 1, tMs: UInt32(u * 700))
+        }
+        let theirs = Task { @MainActor in
+            for i in 0...20 {
+                let u = Double(i) / 20
+                let p = underline(0)
+                viewer.ink.cursorMoved(Cursor(x: p.x - Float(0.08 * (1 - u)), y: p.y + Float(0.10 * (1 - u)), visible: true))
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            let id = viewer.ink.beginLocal(underline(0))
+            for i in 1...42 {
+                let p = underline(Double(i) / 42)
+                viewer.ink.appendLocal(id, [p])
+                viewer.ink.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            viewer.ink.endLocal(id)
+            try? await Task.sleep(for: .milliseconds(700))
+            viewer.ink.cursorMoved(Cursor(x: 0, y: 0, visible: false))
+        }
+
+        // 8.9 s: the arrow goes to the codec loop's switch and turns it on: the panel unfolds, a light runs up the divider.
+        let toggle = window.elementFrame(role: .checkBox, label: "Codec loop") ?? CGRect(x: 182, y: 26, width: 32, height: 18)
+        try await at(8.8)
+        try await glide(to: CGPoint(x: toggle.midX + 3, y: toggle.midY + 3), over: 0.5)
+        try await at(9.45)
+        model.loopToggledAt = CACurrentMediaTime()
+        withAnimation(Theme.Motion.move.animation) { model.loopback = true }
+
+        // 10.1 s: the divider's dot, held (it grows to 1.3), dragged left, right, and let go in the middle, before the
+        // gold stroke starts to fade.
+        try await at(10.1)
+        let dotY = 450 - DividerHandle.dotInset
+        try await glide(to: CGPoint(x: 360, y: dotY), over: 0.4)
+        window.send(.leftMouseDown, at: tip)
+        try await pause(0.1)
+        let sweep = Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 1)
+        try await trace(over: 0.55) { u in CGPoint(x: 360 - 160 * sweep.progress(at: u), y: dotY) }
+        try await trace(over: 0.85) { u in CGPoint(x: 200 + 330 * sweep.progress(at: u), y: dotY) }
+        try await trace(over: 0.45) { u in CGPoint(x: 530 - 170 * sweep.progress(at: u), y: dotY) }
+        window.send(.leftMouseUp, at: tip)
+        await theirs.value
+
+        // 12.6 s: the strokes fade, 4 s after their last points. 14.6 s: the quality comes down to 4 Mbps by the slider.
+        let slider = window.elementFrame(role: .slider) ?? CGRect(x: 32, y: 74, width: 188, height: 16)
+        func knob(_ mbps: Double) -> CGPoint {
+            let k = (mbps - ShareModel.qualityRange.lowerBound) / (ShareModel.qualityRange.upperBound - ShareModel.qualityRange.lowerBound)
+            return CGPoint(x: slider.minX + 7 + (slider.width - 14) * k, y: slider.midY + 1)
+        }
+        try await at(14.6)
+        try await glide(to: knob(model.qualityMbps), over: 0.45)
+        let from = model.qualityMbps
+        let down = CACurrentMediaTime()
+        while true {
+            let k = Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 0.6).progress(at: CACurrentMediaTime() - down)
+            let mbps = (from + (4 - from) * k).rounded()
+            if mbps != model.qualityMbps { model.qualityMbps = mbps }
+            tip = knob(from + (4 - from) * k)
+            pointer.move(to: window.screenPoint(tip))
+            if k >= 1 { break }
+            try await pause(0.016)
+        }
+
+        // 16 s: the loop off by its switch; the arrow leaves. 17.3 s: Stop, back to Welcome's card.
+        try await at(16.0)
+        try await glide(to: CGPoint(x: toggle.midX + 3, y: toggle.midY + 3), over: 0.5)
+        try await at(16.6)
+        model.loopToggledAt = CACurrentMediaTime()
+        withAnimation(LoopbackPanel.Unfold.fold.animation) { model.loopback = false }
+        try await at(17.0)
+        pointer.show(false)
+        try await at(17.3)
+        shareApp.confirmedStop()
+        try await at(ReadmeTake.seconds + 0.4)
+        try await recorder.finish()
+        feed?.cancel(); feed = nil
+        return ReadmeTake(movie: movie, recorded: recorded, kept: kept)
+    }
 }
