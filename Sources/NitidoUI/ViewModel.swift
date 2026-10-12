@@ -35,16 +35,28 @@ public final class ViewModel {
                 browser.usePeerToPeer(true)
             }
             switch state {
-            case .connected: if pictureSince == nil { pictureSince = CACurrentMediaTime() }
+            case .connected: if pictureSince == nil { pictureSince = CACurrentMediaTime(); awaitingFirstFrame = true }
             case .reconnecting: break
-            case .failed: if !failedOverPicture { pictureSince = nil }
-            case .browsing, .enteringCode, .connecting: pictureSince = nil
+            case .failed: if !failedOverPicture { forgetPicture() }
+            case .browsing, .enteringCode, .connecting: forgetPicture()
             }
         }
     }
     /// When the picture first came on this connection (`CACurrentMediaTime`): the picture's entrance is staged from it
     /// (spec 11, M7). A reconnect keeps it; leaving the picture clears it.
     @ObservationIgnored public private(set) var pictureSince: CFTimeInterval?
+    /// When the first frame of this picture reached the screen (its presented time), nil until then: the link is ready a
+    /// round trip before the first keyframe comes, so the cover over the picture stays opaque until it and fades from it
+    /// (`PictureCover`), rather than fading over an empty surface. Kept and cleared with `pictureSince`. Observed: set
+    /// once a picture.
+    public private(set) var firstFrameAt: CFTimeInterval?
+    /// The picture's stage began and no frame has reached the screen since. Read on every frame, so not observed.
+    @ObservationIgnored private var awaitingFirstFrame = false
+
+    private func forgetPicture() {
+        pictureSince = nil; awaitingFirstFrame = false
+        if firstFrameAt != nil { firstFrameAt = nil }
+    }
     /// When the link last became ready, the first time or after a reconnect (M9, M10).
     @ObservationIgnored public private(set) var connectedSince: CFTimeInterval?
     /// Internal, not private, so a test can see whether it is held.
@@ -131,6 +143,7 @@ public final class ViewModel {
         ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }
+            if awaitingFirstFrame { awaitingFirstFrame = false; firstFrameAt = presentedAt }
             telemetry.recordDisplay(at: presentedAt)
             if let offset = link?.clockOffsetNs {
                 let localCapture = (Double(captureNs) - Double(offset)) / 1e9

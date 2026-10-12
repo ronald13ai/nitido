@@ -23,12 +23,24 @@ public final class ShareModel {
     public internal(set) var state: State = .idle {
         didSet {
             if state == .capturing { activity.begin("Sharing the screen") } else { activity.end() }
-            if state != .capturing { capturingSince = nil } else if capturingSince == nil { capturingSince = CACurrentMediaTime() }
+            if state != .capturing {
+                capturingSince = nil; awaitingFirstFrame = false
+                if firstFrameAt != nil { firstFrameAt = nil }
+            } else if capturingSince == nil {
+                capturingSince = CACurrentMediaTime(); awaitingFirstFrame = true
+            }
         }
     }
     /// When the share last began capturing (`CACurrentMediaTime`), nil while it is not: the picture's entrance is
     /// staged from it (spec 11, M6), and a view built later than its slot shows its part at once.
     @ObservationIgnored public internal(set) var capturingSince: CFTimeInterval?
+    /// When the first frame of this capture reached the screen (its presented time), nil until then and while the share
+    /// is not capturing: the cover over the picture stays opaque until it and fades from it (`PictureCover`), so a late
+    /// first render fades the picture in rather than popping it. Observed: set once a capture.
+    public internal(set) var firstFrameAt: CFTimeInterval?
+    /// Capturing began and no frame has reached the screen since: the next one presented sets `firstFrameAt`. Read on
+    /// every frame, so not observed.
+    @ObservationIgnored var awaitingFirstFrame = false
     /// Internal, not private, so a test can see whether it is held.
     @ObservationIgnored let activity = SessionActivity()
     public internal(set) var snapshot: Snapshot = .empty

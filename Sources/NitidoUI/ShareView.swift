@@ -27,8 +27,9 @@ public struct ShareView: View {
     @ReducedMotion private var reduceMotion
 
     /// The picture's entrance (spec 11, M6), from the moment the share began capturing: the window grows from its top
-    /// left corner over 300 ms while a cover over the picture fades from 40 ms, then the strip (160 ms), the pairing
-    /// panel (200 ms), the codec loop panel (240 ms), the code digit by digit (280 ms) and the notices (320 ms).
+    /// left corner over 300 ms, then the strip (160 ms), the pairing panel (200 ms), the codec loop panel (240 ms), the
+    /// code digit by digit (280 ms) and the notices (320 ms). The cover over the picture fades 40 ms after the first frame
+    /// reaches the screen (`PictureCover`).
     enum Stage {
         static let strip: Double = 0.16
         static let pairing: Double = 0.20
@@ -71,9 +72,10 @@ public struct ShareView: View {
                 }
                 .frame(width: pointSize.width, height: pointSize.height, alignment: .topLeading)
                 .padding(.leading, pictureOrigin.x).padding(.top, pictureOrigin.y)
-                // The picture fades in by a cover of the background colour, never by its own opacity or a scale.
+                // The picture fades in by a cover of the background colour, never by its own opacity or a scale, from
+                // its first frame on screen.
                 if model.pixelSize != .zero {
-                    PictureCover(since: since)
+                    PictureCover(shownAt: model.firstFrameAt, waiting: since != nil && model.firstFrameAt == nil)
                         .frame(width: pointSize.width, height: pointSize.height)
                         .padding(.leading, pictureOrigin.x).padding(.top, pictureOrigin.y)
                         .id(since)

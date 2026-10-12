@@ -514,6 +514,32 @@ final class ViewerLinkTests: XCTestCase {
         await share.stop()
     }
 
+    /// The link is ready a round trip before the stream says its size and sends its first keyframe: until the size, the
+    /// window keeps the canvas (no stand-in size to set off toward); until the first frame is on screen, the cover over
+    /// the picture stays opaque, and it fades from that frame, the first one only (spec 11, M7, amended 2026-10-12).
+    @MainActor
+    func testThePictureWaitsForItsSizeAndItsFirstFrame() async throws {
+        let (share, _) = try await listeningShare()
+        let viewer = ViewModel()
+        viewer.select(peer(for: share))
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected") { viewer.state == .connected }
+        XCTAssertEqual(viewer.pixelSize, .zero, "the still source sent no frame, so no setup either")
+        XCTAssertEqual(ViewView.area(for: viewer), ViewView.canvas, "the window keeps the canvas until the size is known")
+        XCTAssertNotNil(viewer.pictureSince)
+        XCTAssertNil(viewer.firstFrameAt, "nothing on screen yet: the cover stays opaque")
+        let shown = CACurrentMediaTime()
+        viewer.sink.onPresented?(UInt64(shown * 1e9), shown)
+        XCTAssertEqual(viewer.firstFrameAt, shown)
+        viewer.sink.onPresented?(UInt64((shown + 0.016) * 1e9), shown + 0.016)
+        XCTAssertEqual(viewer.firstFrameAt, shown, "only the first frame counts")
+        viewer.disconnect()
+        XCTAssertNil(viewer.firstFrameAt)
+        XCTAssertNil(viewer.pictureSince)
+        await share.stop()
+    }
+
     /// A frame the viewer cannot draw is said over the picture and counted as dropped, until a frame reaches the
     /// screen again, as on the sharing side.
     @MainActor

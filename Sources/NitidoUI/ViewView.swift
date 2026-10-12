@@ -62,10 +62,12 @@ public struct ViewView: View {
 
     /// The picture area the window is sized to for `model` (`RootView`'s `AnimatedArea`): the stream's area while the
     /// picture is up (connected, reconnecting, or failed over it), the canvas for the list, the code and a failure before
-    /// any picture.
+    /// any picture. Connected before the stream has said its size (its setup comes a round trip after the link is ready),
+    /// the canvas still: the window then grows once, from the canvas to the stream, instead of setting off toward a
+    /// stand-in size and turning on the way.
     static func area(for model: ViewModel) -> CGSize {
         switch model.state {
-        case .connected, .reconnecting: return Fit.area(for: model.fittedPointSize)
+        case .connected, .reconnecting: return model.pixelSize == .zero ? canvas : Fit.area(for: model.fittedPointSize)
         case .failed: return model.failedOverPicture ? Fit.area(for: model.fittedPointSize) : canvas
         case .browsing, .enteringCode, .connecting: return canvas
         }
@@ -257,9 +259,10 @@ public struct ViewView: View {
 
     // MARK: The picture
 
-    /// The picture's entrance on the viewer (spec 11, M7), from its first frame on this connection: the window grows
-    /// over 300 ms while the cover fades from 40 ms, the strip rises at 160 ms, the sharer chip comes in at 200 ms, its
-    /// dot fills at 240 ms and its ring draws at 260 ms. A reconnect (M10) dims the frozen frame by 20 % and says so in a
+    /// The picture's entrance on the viewer (spec 11, M7), from the link ready on this connection: the window grows over
+    /// 300 ms once the stream has said its size, the cover fades 40 ms after the first frame reaches the screen
+    /// (`PictureCover`), the strip rises at 160 ms, the sharer chip comes in at 200 ms, its dot fills at 240 ms and its
+    /// ring draws at 260 ms. A reconnect (M10) dims the frozen frame by 20 % and says so in a
     /// pill led by a breathing gold dot; coming back, the ring draws again 80 ms after the link is ready.
     enum PictureStage {
         static let strip: Double = 0.16
@@ -276,9 +279,12 @@ public struct ViewView: View {
     /// Laid out like `ShareView` (Task 8 fix round 3): the content is exactly as wide as the picture, to the whole
     /// point, so `.windowResizability(.contentSize)` fits the window to every stream size, smaller ones included,
     /// and the strip wraps instead of widening it. A half-point 1:1 picture keeps its exact size at the top left.
-    /// A reconnect and a failure both show over the last frame, dimmed.
+    /// A reconnect and a failure both show over the last frame, dimmed. Before the stream has said its size, the picture
+    /// keeps the canvas and the strip waits (`area(for:)`), so the window does not change until the size is known, and then
+    /// grows to the picture and the strip together.
     private var picture: some View {
-        let size = model.fittedPointSize
+        let sized = model.pixelSize != .zero
+        let size = sized ? model.fittedPointSize : Self.canvas
         // At least `Fit.minimumArea`: a small shared window (a palette, a calculator) sits centred on the background, so
         // the failure card's buttons, the reconnect pill and the sharer chip stay inside the window.
         let area = Fit.area(for: size)
@@ -297,7 +303,8 @@ public struct ViewView: View {
                         .accessibilityAddTraits(.isImage)
                     InkOverlay(controller: model.ink).frame(width: size.width, height: size.height).accessibilityHidden(true)
                         .transaction { $0.animation = nil }
-                    PictureCover(since: since).frame(width: size.width, height: size.height).id(since)
+                    PictureCover(shownAt: model.firstFrameAt, waiting: since != nil && model.firstFrameAt == nil)
+                        .frame(width: size.width, height: size.height).id(since)
                 }
                 .frame(width: size.width, height: size.height, alignment: .topLeading)
                 .padding(.leading, origin.x).padding(.top, origin.y)
@@ -358,7 +365,7 @@ public struct ViewView: View {
             }
             .frame(width: area.width, height: area.height, alignment: .topTrailing)
             // Through a reconnect the strip shows the gap (spec 12); after a failure its figures would only be stale.
-            if model.showTelemetry && failure == nil {
+            if model.showTelemetry && failure == nil && sized {
                 ViewStrip(model: model).entrance(.rise(ShareView.Stage.stripRise), delay: PictureStage.strip, since: since)
             }
         }

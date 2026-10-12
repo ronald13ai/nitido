@@ -21,8 +21,9 @@ extension ShareModel {
     }
 
     /// A frame reached the screen (`FrameSink.onPresented`): it counts towards the display rate and the
-    /// capture-to-display latency, and clears the last render failure.
+    /// capture-to-display latency, and clears the last render failure; the first of a capture lifts the picture's cover.
     func framePresented(captureNs: UInt64, at presentedAt: Double) {
+        if awaitingFirstFrame { awaitingFirstFrame = false; firstFrameAt = presentedAt }
         let latencyMs = (presentedAt - Double(captureNs) / 1e9) * 1000
         telemetry.recordDisplay(at: presentedAt)
         telemetry.recordLatency(ms: latencyMs, at: presentedAt)

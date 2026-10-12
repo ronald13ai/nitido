@@ -377,20 +377,34 @@ struct RevealLayout: Layout {
 
 // MARK: The picture's entrance
 
-/// The picture's entrance (M6, M7): a rectangle of the background colour over the picture and the ink, fading from 1
-/// to 0 over 220 ms after 40 ms. Against the black window this is the picture fading in, while the Metal layer under it
-/// stays opaque at opacity 1, so its compositing never changes, and the picture is never scaled. Gone once faded; there
-/// from the start only while its stage is under way (`since`), so a picture shown again is simply there.
+/// The picture's entrance (M6, M7): a rectangle of the background colour over the picture and the ink, opaque until the
+/// picture's first frame has reached the screen, then fading from 1 to 0 over 220 ms, 40 ms after that frame. Against the
+/// black window this is the picture fading in, while the Metal layer under it stays opaque at opacity 1, so its
+/// compositing never changes, and the picture is never scaled. Timed from the first frame shown, not from the model's
+/// event (amended 2026-10-12): the share window's first render comes some 86 ms after the capture starts on an M5, more on
+/// a slower Mac, and the viewer's first keyframe a round trip after its link is ready, so a cover timed from the event
+/// faded over an empty surface, or was skipped, and the picture popped in. Gone once faded; built after its fade would
+/// have ended (a picture shown again), it is not there at all.
 struct PictureCover: View {
-    let since: CFTimeInterval?
+    /// When the picture's first frame reached the screen; nil while it has not, or when there is no stage under way.
+    let shownAt: CFTimeInterval?
+    /// The picture's stage is under way and its first frame has not reached the screen yet: opaque.
+    let waiting: Bool
     @State private var faded: Bool
     @State private var removed: Bool
 
-    init(since: CFTimeInterval?) {
-        self.since = since
-        let late = since.map { CACurrentMediaTime() - $0 > Theme.Motion.coverDelay + Entrance.grace } ?? true
+    init(shownAt: CFTimeInterval?, waiting: Bool) {
+        self.shownAt = shownAt; self.waiting = waiting
+        let late = !waiting && Self.isLate(shownAt: shownAt, now: CACurrentMediaTime())
         _faded = State(initialValue: late)
         _removed = State(initialValue: late)
+    }
+
+    /// A cover built `now` for a first frame shown at `shownAt` has nothing left to do: its fade would have ended. Any
+    /// later than that, a slow first render still fades the picture in, with what is left of its 40 ms.
+    nonisolated static func isLate(shownAt: CFTimeInterval?, now: CFTimeInterval) -> Bool {
+        guard let shownAt else { return true }
+        return now - shownAt > Theme.Motion.coverDelay + Theme.Motion.enter.duration
     }
 
     var body: some View {
@@ -399,10 +413,14 @@ struct PictureCover: View {
                 .opacity(faded ? 0 : 1)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
-                .onAppear {
-                    let wait = Entrance.remainingDelay(Theme.Motion.coverDelay, since: since, now: CACurrentMediaTime())
-                    withAnimation(Theme.Motion.enter.animation(after: wait)) { faded = true } completion: { removed = true }
-                }
+                .onAppear { if !waiting { fade() } }
+                .onChange(of: waiting) { _, now in if !now { fade() } }
         }
+    }
+
+    private func fade() {
+        guard !faded else { return }
+        let wait = Entrance.remainingDelay(Theme.Motion.coverDelay, since: shownAt, now: CACurrentMediaTime())
+        withAnimation(Theme.Motion.enter.animation(after: wait)) { faded = true } completion: { removed = true }
     }
 }

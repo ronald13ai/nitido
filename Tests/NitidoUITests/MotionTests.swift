@@ -393,6 +393,37 @@ final class NavigationMotionTests: XCTestCase {
         XCTAssertNil(share.capturingSince)
         share.state = .idle
     }
+
+    /// The cover over the picture waits for the capture's first frame on screen, the first one only, and a new capture
+    /// waits for its own (spec 11, M6, amended 2026-10-12).
+    @MainActor
+    func testTheCoverWaitsForTheFirstFrameShown() {
+        let share = ShareModel(makeSource: { NeverSource() }, screenRecordingGranted: { true })
+        share.sink.onPresented?(UInt64(4.98e9), 5)
+        XCTAssertNil(share.firstFrameAt, "a frame before the capture began stages nothing")
+        share.state = .capturing
+        XCTAssertNil(share.firstFrameAt, "capturing, nothing on screen yet: the cover stays opaque")
+        share.sink.onPresented?(UInt64(9.98e9), 10)
+        XCTAssertEqual(share.firstFrameAt, 10)
+        share.sink.onPresented?(UInt64(9.996e9), 10.016)
+        XCTAssertEqual(share.firstFrameAt, 10, "only the first frame counts")
+        share.state = .capturing
+        XCTAssertEqual(share.firstFrameAt, 10, "a new size from the same capture keeps it")
+        share.state = .failed("stopped")
+        XCTAssertNil(share.firstFrameAt)
+        share.state = .capturing
+        XCTAssertNil(share.firstFrameAt, "a new capture waits for its own first frame")
+        share.state = .idle
+    }
+
+    /// The cover fades 40 ms after the first frame shown; one built later still fades with what is left, and one built
+    /// after its fade would have ended (a picture shown again) is not there at all.
+    func testTheCoverFadesFromTheFirstFrameShown() {
+        XCTAssertTrue(PictureCover.isLate(shownAt: nil, now: 10), "no first frame and nothing waiting: no cover")
+        XCTAssertFalse(PictureCover.isLate(shownAt: 10, now: 10.1), "built 100 ms after the first frame: it still fades")
+        XCTAssertFalse(PictureCover.isLate(shownAt: 10, now: 10.25))
+        XCTAssertTrue(PictureCover.isLate(shownAt: 10, now: 10.27), "after 40 + 220 ms: not there")
+    }
 }
 
 final class ListAndNoticeMotionTests: XCTestCase {
