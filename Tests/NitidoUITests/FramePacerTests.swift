@@ -122,6 +122,8 @@ private final class DisplaySim {
     let pacer = FramePacer()
     private let buffer: CVPixelBuffer
     private let raw: CVPixelBuffer
+    /// Whether the next frame carries a raw frame to compare against: `compare`, until `endComparison`.
+    private lazy var comparing = config.compare
     /// The divider the next frame carries; `drag` moves it.
     private(set) var divider: CGFloat = 0.5
     /// Frames the source has sent, for `arrivalJitter`.
@@ -213,6 +215,15 @@ private final class DisplaySim {
         }
     }
 
+    /// The codec loop is turned off `delay` from now (main-actor work): the newest frame, raw, takes the held
+    /// comparison's place (`FrameSink.endComparison`), and the frames after it come without a raw frame to compare.
+    func endComparison(after delay: Double) {
+        add(at: clock + delay, arrival: false) { [unowned self] in
+            comparing = false
+            pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: delivered.last ?? 0))
+        }
+    }
+
     /// Capture-to-display latency of every frame shown, in refreshes.
     var latencies: [(captureNs: UInt64, refreshes: Double)] {
         zip(host.presented, host.presentedAt).map { ($0, ($1 - Double($0) / 1e9) / config.period) }
@@ -253,7 +264,7 @@ private final class DisplaySim {
             let ns = UInt64((capture * 1e9).rounded()) + UInt64(delivered.count)
             delivered.append(ns)
             pacer.present(FramePacer.Frame(pixelBuffer: buffer, captureHostTimeNs: ns,
-                                           compareWith: config.compare ? raw : nil, divider: divider))
+                                           compareWith: comparing ? raw : nil, divider: divider))
         }
     }
 
@@ -479,35 +490,52 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(host.kinds.count, 2, "drawn once")
     }
 
-    /// The loop turned off: the raw frame takes the held comparison's place and is drawn at once, alone, as a redraw;
-    /// a decoded frame still waiting for a drawable is drawn as the raw frame instead, once, and counted as displayed.
+    /// The loop turned off: the raw frame takes the held comparison's place at once. A still source sends no frame to
+    /// show it, so it is drawn alone, as a redraw, once the next frame is overdue (a moving source's next frame shows it
+    /// first: `testTurningTheLoopOffOverAMovingSourceCostsNoFrame`). A decoded frame still waiting for a drawable is
+    /// drawn as the raw frame instead, once, and counted as displayed, and nothing is scheduled.
     @MainActor
     func testReplacingTheHeldFrameDrawsTheRawFrameAlone() throws {
         let host = FakeDrawing()
         let pacer = FramePacer()
         pacer.host = host
+        var clock = 10.000
+        pacer.now = { clock }
+        let timers = Timers()
+        timers.install(on: pacer)
         pacer.drawableSize = CGSize(width: 1440, height: 900)
         pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 100, compareWith: try makeBuffer(), divider: 0.5))
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 1.0)
+        clock = 10.017
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 100, presentedAt: 10.0167)
+        clock = 10.020
         let newest = try makeBuffer()
         pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: newest, captureHostTimeNs: 150))
+        XCTAssertTrue(pacer.held?.pixelBuffer === newest, "later redraws show the raw frame")
+        XCTAssertEqual(host.kinds, [.live], "nothing drawn while the source's next frame may still show it")
+        XCTAssertEqual(timers.count, 1)
+        clock = 10.025
+        timers.fireAll()
         XCTAssertEqual(host.kinds, [.live, .redraw])
         XCTAssertTrue(host.frames.last?.pixelBuffer === newest)
         XCTAssertNil(host.frames.last?.compareWith)
-        XCTAssertTrue(pacer.held?.pixelBuffer === newest, "later redraws show the raw frame")
-        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 150, presentedAt: 2.0)
+        clock = 10.034
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 150, presentedAt: 10.0333)
         XCTAssertEqual(host.presented, [100])
 
+        clock = 10.100
         pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 300, compareWith: try makeBuffer(), divider: 0.5))
         pacer.present(FramePacer.Frame(pixelBuffer: try makeBuffer(), captureHostTimeNs: 316, compareWith: try makeBuffer(), divider: 0.5))
         XCTAssertEqual(pacer.pending, .live, "the second decoded frame waits for a drawable")
         let raw = try makeBuffer()
         pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: raw, captureHostTimeNs: 316))
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 300, presentedAt: 3.0)
+        XCTAssertEqual(timers.count, 0, "the waiting frame shows the raw picture")
+        clock = 10.110
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 300, presentedAt: 10.0999)
         XCTAssertEqual(host.kinds, [.live, .redraw, .live, .live])
         XCTAssertTrue(host.frames.last?.pixelBuffer === raw)
         XCTAssertNil(host.frames.last?.compareWith)
-        pacer.drawableReturned(kind: .live, captureHostTimeNs: 316, presentedAt: 4.0)
+        clock = 10.120
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 316, presentedAt: 10.1166)
         XCTAssertEqual(host.presented, [100, 300, 316])
         XCTAssertTrue(host.drops.isEmpty, "the waiting frame was shown as the raw frame, not dropped")
     }
@@ -1470,6 +1498,38 @@ final class FramePacerDisplayTests: XCTestCase {
         XCTAssertNil(sim.pacer.pending)
         XCTAssertEqual(sim.pacer.inFlight, 0)
         sim.assertAccounting()
+    }
+
+    /// The codec loop turned off over a source that changes every capture interval: the source's next frame, raw now,
+    /// takes the comparison's place, as it carries a divider move. The raw frame drawn at once took the drawable that
+    /// frame needed, which then waited, was held back as late and was dropped: a frame lost at one loop off in four over
+    /// the README's moving picture (2026-10-13). At any moment of the interval, with two drawables in flight on a 60 Hz
+    /// panel, a deep compositor, a late presented handler, a 120 Hz panel and frames a little late: no frame dropped, no
+    /// redraw, and the raw frame alone on screen with the next frame.
+    @MainActor
+    func testTurningTheLoopOffOverAMovingSourceCostsNoFrame() throws {
+        let sources: [(name: String, config: DisplaySim.Config)] = [
+            ("60 Hz", .init(compare: true, refreshRate: 60)),
+            ("60 Hz, deep compositor", .init(depth: 2, compare: true, refreshRate: 60)),
+            ("60 Hz, late presented handler", .init(handlerDelay: 0.004, compare: true, refreshRate: 60)),
+            ("120 Hz panel", .init(period: 1.0 / 120, sourceEvery: 2, compare: true, refreshRate: 120)),
+            ("frames up to 6 ms late", .init(compare: true, arrivalJitter: [0, 0.006, 0.002], refreshRate: 60)),
+        ]
+        for source in sources {
+            for tenth in 1...9 {
+                let delay = Double(tenth) / 10 / 60
+                let what = "\(source.name), off \(String(format: "%.1f", delay * 1000)) ms after the last main-actor event"
+                let sim = try DisplaySim(source.config)
+                sim.run(refreshes: Int((1 / source.config.period).rounded()))
+                let drops = sim.host.drops.count, redraws = sim.redraws
+                sim.endComparison(after: delay)
+                sim.run(refreshes: Int((0.5 / source.config.period).rounded()))
+                XCTAssertEqual(sim.host.drops.count - drops, 0, "\(what): \(sim.redraws - redraws) redraws")
+                XCTAssertEqual(sim.redraws - redraws, 0, "the next frame shows the raw picture: \(what)")
+                XCTAssertNil(sim.host.frames.last?.compareWith, "the raw frame alone: \(what)")
+                sim.assertAccounting()
+            }
+        }
     }
 
     /// Drag rates and the phase of the first move after the last main-actor event (`DisplaySim.drag`): 120 Hz (a

@@ -158,7 +158,8 @@ public final class VideoView: NSView {
     /// next frame shows it; a still source's held frame is drawn again once that frame is overdue.
     public func moveDivider(to divider: CGFloat) { pacer.moveDivider(to: divider) }
 
-    /// Loopback off: `pixelBuffer` (the newest raw frame) is shown alone in place of the comparison, drawn at once.
+    /// Loopback off: `pixelBuffer` (the newest raw frame) is shown alone in place of the comparison: the source's next
+    /// frame shows it, and a still source's is drawn again once that frame is overdue (`FramePacer.replaceHeld`).
     public func endComparison(showing pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64) {
         contentPixelSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
         pacer.replaceHeld(with: FramePacer.Frame(pixelBuffer: pixelBuffer, captureHostTimeNs: captureHostTimeNs))
@@ -389,7 +390,8 @@ public final class FrameSink {
     /// Moves the divider of the comparison on screen. A still source sends no new frame to carry the move, so the
     /// view draws the frame it keeps again once a frame is overdue; nothing when that frame shows no comparison.
     public func moveDivider(to divider: CGFloat) { view?.moveDivider(to: divider) }
-    /// Ends the comparison on screen: `raw` is shown alone at once, without waiting for the source to change.
+    /// Ends the comparison on screen: `raw` is shown alone, with the source's next frame or, over a still source, within
+    /// a capture interval.
     public func endComparison(showing raw: CVPixelBuffer, captureHostTimeNs: UInt64) {
         guard let view else { return }
         hand(to: view)

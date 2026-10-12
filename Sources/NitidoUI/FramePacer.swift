@@ -149,15 +149,17 @@ final class FramePacer {
     private var loweredAt: CFTimeInterval?
     /// Presented time of the last drawable shown, for the spacing in the debug log.
     private var lastPresentedAt: Double = 0
-    /// When the newest frame reached `present`: a divider move waits for the frame after it (`moveDivider`).
+    /// When the newest frame reached `present`: a change to the held frame waits for the frame after it
+    /// (`redrawWhenOverdue`).
     private var lastArrival: CFTimeInterval = 0
     /// When the two frames before it reached `present`, the later first, 0 for none yet: whether the source changes
-    /// every capture interval (`dividerRedrawDelay`).
+    /// every capture interval (`overdueRedrawDelay`).
     private var earlierArrivals: (CFTimeInterval, CFTimeInterval) = (0, 0)
-    /// A divider move waits for a redraw (`moveDivider`); a new frame, any redraw or a release makes it moot.
-    private var dividerRedrawScheduled = false
-    /// Bumped whenever the scheduled divider redraw becomes moot, so it then does nothing.
-    private var dividerRedrawToken: UInt64 = 0
+    /// A change to the held frame waits for a redraw (`redrawWhenOverdue`); a new frame, any redraw or a release makes
+    /// it moot.
+    private var overdueRedrawScheduled = false
+    /// Bumped whenever the scheduled redraw becomes moot, so it then does nothing.
+    private var overdueRedrawToken: UInt64 = 0
 
     /// The host can draw a frame now: its window can show the picture and the drawable has a size. A frame that arrives
     /// while it cannot is kept and reported as a pause (`.hidden`), not a drop.
@@ -188,13 +190,13 @@ final class FramePacer {
         lastArrival = arrival
         waitingHeldBack = false
         lateDrawToken &+= 1
-        cancelDividerRedraw()   // this frame carries the current divider
+        cancelOverdueRedraw()   // this frame carries the current divider, and the raw picture once the loop is off
         submit(frame, kind: .live)
     }
 
     /// Draws the held frame again, for example when the window shows after being minimized, covered or hidden.
     func redraw() {
-        cancelDividerRedraw()   // the held frame drawn now, or when it can be, carries the newest divider
+        cancelOverdueRedraw()   // the held frame drawn now, or when it can be, carries the newest divider
         guard let held else { return }
         if pending == .live {
             // Not on screen yet: it is still a captured frame, drawn now if a drawable is free (also when it was
@@ -211,31 +213,39 @@ final class FramePacer {
     /// divider), and a frame or redraw already waiting for a drawable is drawn with it, so neither needs a redraw: one
     /// would take the drawable from the next frame, which would wait behind it, be late and be dropped, a frame lost
     /// per move while the divider is dragged. Only a still source needs the held frame drawn again, so the redraw
-    /// waits until the next frame is overdue (`dividerRedrawDelay`) and does nothing if a frame came first. Moves
+    /// waits until the next frame is overdue (`redrawWhenOverdue`) and does nothing if a frame came first. Moves
     /// until then ride on that one redraw.
     func moveDivider(to divider: CGFloat) {
         guard var frame = held, frame.compareWith != nil, frame.divider != divider else { return }
         frame.divider = divider
         held = frame
-        guard pending == nil, !dividerRedrawScheduled else { return }
-        dividerRedrawScheduled = true
-        let token = dividerRedrawToken
-        schedule(dividerRedrawDelay()) { [weak self] in
-            guard let self, token == dividerRedrawToken else { return }
+        redrawWhenOverdue()
+    }
+
+    /// The held frame changed in a way the source's next frame shows too (`moveDivider`, `replaceHeld`): it is drawn
+    /// again only once that frame is overdue (`overdueRedrawDelay`), and not at all if a frame, a redraw or a release
+    /// comes first. Nothing when a frame or a redraw already waits for a drawable: it draws the held frame, the change
+    /// included, when the drawable comes. Changes until the redraw ride on it.
+    private func redrawWhenOverdue() {
+        guard pending == nil, !overdueRedrawScheduled else { return }
+        overdueRedrawScheduled = true
+        let token = overdueRedrawToken
+        schedule(overdueRedrawDelay()) { [weak self] in
+            guard let self, token == overdueRedrawToken else { return }
             redraw()
         }
     }
 
-    /// How long a divider move waits for a frame to carry it: until the middle of a capture interval after the newest
-    /// frame, the second interval at the earliest, or the third for a source that changes every interval (one of its
-    /// last two frames came within an interval and a half of the one before). Such a source sends its next frame within
-    /// the second interval, and one held up on its way, by the main thread that also handles the drag, a little later
-    /// still: it carries the move, and a redraw at the middle of the second interval would take the drawable from a
-    /// frame more than half an interval late, which would then wait behind it, be held back as late and be dropped (the
-    /// README's take, 2026-10-13: a frame 10 ms late). A slower one sends its frames whole intervals apart on a 60 Hz
-    /// display, so the redraw lands half an interval clear of them and never takes the drawable one of them needs. On a
-    /// still source the move is drawn within one interval.
-    private func dividerRedrawDelay() -> CFTimeInterval {
+    /// How long a change to the held frame waits for a frame to carry it: until the middle of a capture interval after
+    /// the newest frame, the second interval at the earliest, or the third for a source that changes every interval (one
+    /// of its last two frames came within an interval and a half of the one before). Such a source sends its next frame
+    /// within the second interval, and one held up on its way, by the main thread that also handles a drag, a little
+    /// later still: it carries the change, and a redraw at the middle of the second interval would take the drawable
+    /// from a frame more than half an interval late, which would then wait behind it, be held back as late and be
+    /// dropped (the README's take, 2026-10-13: a frame 10 ms late while the divider was dragged). A slower one sends its
+    /// frames whole intervals apart on a 60 Hz display, so the redraw lands half an interval clear of them and never
+    /// takes the drawable one of them needs. On a still source the change is drawn within one interval.
+    private func overdueRedrawDelay() -> CFTimeInterval {
         let interval = Self.lateFrameGrace
         let elapsed = now() - lastArrival
         let (before, beforeThat) = earlierArrivals
@@ -245,17 +255,21 @@ final class FramePacer {
         return max(0, (intervals + 0.5) * interval - elapsed)
     }
 
-    private func cancelDividerRedraw() {
-        dividerRedrawScheduled = false
-        dividerRedrawToken &+= 1
+    private func cancelOverdueRedraw() {
+        overdueRedrawScheduled = false
+        overdueRedrawToken &+= 1
     }
 
-    /// Puts `frame` in place of the held one and draws it again, the way a resize does: the codec loop was turned
-    /// off, so the raw frame replaces the comparison at once instead of when the source next changes. A frame still
-    /// waiting for a drawable is drawn as this one and counted as displayed once; otherwise it is a redraw.
+    /// Puts `frame` in place of the held one: the codec loop was turned off, so the raw frame replaces the comparison.
+    /// A frame still waiting for a drawable is drawn as this one, at once if a drawable is free, and counted as
+    /// displayed once. Otherwise a moving source shows the raw picture with its next frame, as it shows a divider move,
+    /// and a still source's held frame is drawn again once that frame is overdue (`redrawWhenOverdue`): drawn at once
+    /// over a moving source, it took the drawable the next frame needed, which then waited, was held back as late and
+    /// was dropped, at one loop off in four over the README's picture (2026-10-13).
     func replaceHeld(with frame: Frame) {
         held = frame
-        redraw()
+        if pending == .live { redraw(); return }
+        redrawWhenOverdue()
     }
 
     /// The presented handler of a committed drawable. `presentedAt` is 0 when the drawable was discarded.
@@ -393,7 +407,7 @@ final class FramePacer {
         pending = nil
         waitingHeldBack = false
         lateDrawToken &+= 1
-        cancelDividerRedraw()
+        cancelOverdueRedraw()
     }
 
     /// The waiting frame waited through a refresh, so the drawable queue is a refresh deeper than it needs to be,

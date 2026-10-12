@@ -133,7 +133,8 @@ extension ShareModel {
         codecLabel = "raw"; codecMs = nil; encodeStarts.removeAll(); codecNotice = nil; encodeFailures = 0; decodeFailures = 0
         // A frame that waited for the loop's encoder is on screen raw now: not a dropped frame.
         newestPending = false
-        // Back to raw at once: a still source sends no new frame to replace the comparison on screen. The view keeps
+        // Back to raw: a moving source's next frame replaces the comparison on screen, and a still source sends none, so
+        // the view takes the raw frame in its place and draws it within an interval (`FramePacer.replaceHeld`). It keeps
         // the raw frame for redraws, the same one `latestRaw` holds, so turning the loop on again can encode it.
         if let raw = latestRaw { sink.endComparison(showing: raw.pixelBuffer, captureHostTimeNs: raw.captureHostTimeNs) }
     }
