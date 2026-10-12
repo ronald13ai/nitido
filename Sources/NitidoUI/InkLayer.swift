@@ -610,11 +610,14 @@ public final class InkCanvasView: NSView {
     /// Test only: where the peer's dot is, and whether it shows.
     var remoteCursorForTesting: (position: CGPoint, visible: Bool) { (cursorDot.position, cursorDot.opacity > 0) }
 
-    /// The peer's cursor: the gold dot, and 12 pt to its right the peer's name on a pill (6 by 3 pt of padding).
+    /// The peer's cursor: the gold dot, and 12 pt to its right the peer's name on a pill (6 by 3 pt of padding). One that
+    /// goes fades where it last was: the peer sends its hidden cursor at (0, 0), and moved there the dot and the name
+    /// faded out in the picture's top left corner, far from where the pointer left.
     func showRemoteCursor(_ c: Cursor, name: String) {
+        guard c.visible else { setCursorShown(false); return }
         lastRemoteCursor = (c, name)
         placeRemoteCursor(c, name: name)
-        setCursorShown(c.visible)
+        setCursorShown(true)
     }
 
     /// The dot and the pill where `c` says, at the canvas's current size.

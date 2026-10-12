@@ -486,6 +486,27 @@ final class InkCanvasLifetimeTests: XCTestCase {
         XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 320, y: 0), "kept inside the picture")
     }
 
+    /// The peer's pointer leaves the picture: its Mac sends the hidden cursor at (0, 0). The dot and the name fade where
+    /// they were; moved to (0, 0) first, they faded out in the picture's top left corner. Back, they show where it says.
+    @MainActor
+    func testAPeersCursorThatGoesFadesWhereItWas() throws {
+        let window = offscreenWindow()
+        defer { window.contentView = nil }
+        let viewer = ViewModel(startingDiscovery: false)
+        let canvas = InkCanvasView(controller: viewer.ink)
+        canvas.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
+        window.contentView?.addSubview(canvas)
+        viewer.handleIncoming(.cursor(Cursor(x: 0.5, y: 0.5, visible: true)))
+        viewer.handleIncoming(.cursor(Cursor(x: 0, y: 0, visible: false)))
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 160, y: 100))
+        XCTAssertFalse(canvas.remoteCursorForTesting.visible)
+        canvas.setFrameSize(NSSize(width: 640, height: 400))
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 320, y: 200), "laid out again where it went")
+        viewer.handleIncoming(.cursor(Cursor(x: 0.25, y: 0.75, visible: true)))
+        XCTAssertEqual(canvas.remoteCursorForTesting.position, CGPoint(x: 160, y: 300))
+        XCTAssertTrue(canvas.remoteCursorForTesting.visible)
+    }
+
     /// The canvas changes size (the window moved to a display of another scale, the capture resized): the strokes and
     /// the peer's cursor, kept in picture units, are laid out again at the new size, rather than staying at the old place
     /// and scale until they fade.
