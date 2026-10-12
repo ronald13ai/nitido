@@ -137,9 +137,10 @@ public final class ViewModel {
     /// `startingDiscovery` false leaves the Bonjour browser unstarted, so a test that hands it states (`browser`) is
     /// not raced by the real browser's own (its `.ready` clearing a notice the test just set).
     init(startingDiscovery: Bool) {
-        // VideoToolbox loads its codecs while the person picks a Mac and types the code, not on the main actor as the
-        // first keyframe comes in.
+        // VideoToolbox loads its codecs, and Core Image compiles its kernels, while the person picks a Mac and types the
+        // code, not on the main actor as the first keyframe comes in.
         CodecWarmUp.start()
+        ImageWarmUp.start()
         ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }

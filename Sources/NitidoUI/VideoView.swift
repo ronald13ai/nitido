@@ -232,6 +232,26 @@ extension VideoView {
     /// What `frame` shows before it is fitted to the drawable, with its origin at zero: the picture (`image(of:size:)`),
     /// or with `compareWith` the codec loop's comparison, the raw frame left of the divider, the decoded one right of it,
     /// and the 2 px gold line between them.
+    /// What a drawable of `target` pixels shows for `frame`: its picture 1:1 when it fits, scaled down with Lanczos when
+    /// it does not, never up, centred at whole pixels on the background colour.
+    nonisolated static func composed(_ frame: FramePacer.Frame, in target: CGSize) -> CIImage {
+        var image = picture(of: frame)
+        let content = image.extent.size
+        let fit = min(target.width / content.width, target.height / content.height)
+        if fit < 1, let lanczos = CIFilter(name: "CILanczosScaleTransform") {
+            lanczos.setValue(image, forKey: kCIInputImageKey)
+            lanczos.setValue(fit, forKey: kCIInputScaleKey)
+            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
+            image = lanczos.outputImage ?? image
+        }
+        let shown = image.extent.size
+        image = image.transformed(by: CGAffineTransform(translationX: ((target.width - shown.width) / 2).rounded(),
+                                                         y: ((target.height - shown.height) / 2).rounded()))
+        let background = CIImage(color: CIColor(red: 8 / 255, green: 9 / 255, blue: 12 / 255))
+            .cropped(to: CGRect(origin: .zero, size: target))
+        return image.composited(over: background)
+    }
+
     nonisolated static func picture(of frame: FramePacer.Frame) -> CIImage {
         let image = Self.image(of: frame.pixelBuffer, size: frame.pictureSize)
         guard let raw = frame.compareWith else { return image }
@@ -279,24 +299,11 @@ extension VideoView: FrameDrawing {
         guard let drawable = next else { return .noDrawable }
         guard let command = commandQueue.makeCommandBuffer() else { return .failed("Metal could not create a command buffer.") }
 
-        var image = Self.picture(of: frame)
-        let content = image.extent.size
-        let fit = min(target.width / content.width, target.height / content.height)
-        if fit < 1, let lanczos = CIFilter(name: "CILanczosScaleTransform") {
-            lanczos.setValue(image, forKey: kCIInputImageKey)
-            lanczos.setValue(fit, forKey: kCIInputScaleKey)
-            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
-            image = lanczos.outputImage ?? image
-        }
-        let shown = image.extent.size
-        image = image.transformed(by: CGAffineTransform(translationX: ((target.width - shown.width) / 2).rounded(),
-                                                         y: ((target.height - shown.height) / 2).rounded()))
         let bounds = CGRect(origin: .zero, size: target)
-        let background = CIImage(color: CIColor(red: 8 / 255, green: 9 / 255, blue: 12 / 255)).cropped(to: bounds)
         let destination = CIRenderDestination(mtlTexture: drawable.texture, commandBuffer: command)
         destination.colorSpace = colorSpace
         do {
-            try ciContext.startTask(toRender: image.composited(over: background), from: bounds, to: destination, at: .zero)
+            try ciContext.startTask(toRender: Self.composed(frame, in: target), from: bounds, to: destination, at: .zero)
         } catch {
             return .failed(error.localizedDescription)
         }

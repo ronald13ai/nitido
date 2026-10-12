@@ -63,4 +63,28 @@ final class PictureCropTests: XCTestCase {
             }
         }
     }
+
+    /// What a drawable shows: a picture that fits, 1:1 and centred at whole pixels on the background; a larger one scaled
+    /// down to fit, never up.
+    func testThePictureIsCentredAndScaledDownOnly() throws {
+        let small = try buffer(width: 64, height: 8) { _ in 200 }
+        let fitted = VideoView.composed(FramePacer.Frame(pixelBuffer: small, captureHostTimeNs: 0), in: CGSize(width: 101, height: 20))
+        XCTAssertEqual(fitted.extent, CGRect(x: 0, y: 0, width: 101, height: 20))
+        let drawn = pixels(fitted)
+        let row = 10 * 101 * 4
+        XCTAssertLessThan(drawn[row + 18 * 4], 20, "background left of the picture (it starts at x = 19, whole pixels)")
+        XCTAssertGreaterThan(drawn[row + 19 * 4], 150, "the picture 1:1 from x = 19")
+        XCTAssertGreaterThan(drawn[row + 82 * 4], 150)
+        XCTAssertLessThan(drawn[row + 83 * 4], 20)
+        let large = try buffer(width: 200, height: 40) { _ in 200 }
+        let scaled = VideoView.composed(FramePacer.Frame(pixelBuffer: large, captureHostTimeNs: 0), in: CGSize(width: 100, height: 20))
+        let half = pixels(scaled)
+        XCTAssertGreaterThan(half[(10 * 100 + 50) * 4], 150, "scaled down to fill the drawable")
+    }
+
+    /// Core Image's kernels compile off the main thread before the first frame: every kind of picture the view draws
+    /// (captured, decoded with its padding, scaled down, the comparison) draws without an error.
+    func testTheImageWarmUpDrawsEveryKindOfPicture() {
+        XCTAssertTrue(ImageWarmUp.warm())
+    }
 }

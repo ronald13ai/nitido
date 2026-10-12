@@ -37,8 +37,10 @@ extension ShareModel {
         if case .picking = state { return }
         if case .capturing = state { return }
         excludedWindowIDs = excludingWindowIDs
-        // VideoToolbox loads its codecs while the person picks, not on the main actor as the first viewer connects.
+        // VideoToolbox loads its codecs while the person picks, not on the main actor as the first viewer connects; Core
+        // Image compiles its kernels then too, not as the first frame is drawn.
         CodecWarmUp.start()
+        ImageWarmUp.start()
         failureNeedsPermission = false
         failureStoppedFromMenuBar = false
         renderFailure = nil
