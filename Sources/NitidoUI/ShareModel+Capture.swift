@@ -7,6 +7,7 @@ import CoreGraphics
 import QuartzCore
 import NitidoCore
 import NitidoCapture
+import NitidoCodec
 import NitidoLink
 import os
 
@@ -36,6 +37,8 @@ extension ShareModel {
         if case .picking = state { return }
         if case .capturing = state { return }
         excludedWindowIDs = excludingWindowIDs
+        // VideoToolbox loads its codecs while the person picks, not on the main actor as the first viewer connects.
+        CodecWarmUp.start()
         failureNeedsPermission = false
         failureStoppedFromMenuBar = false
         renderFailure = nil
