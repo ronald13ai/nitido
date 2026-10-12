@@ -79,10 +79,9 @@ public struct WelcomeView: View {
         }
         .onAppear {
             guard launching, !started else { return }
-            // Should the window never report itself (it is on screen when the probe misses the moment), the launch
-            // starts 150 ms after the view appeared.
+            // Drawn where no window will ever report (an offscreen render): the content shows after a while anyway.
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(LaunchChoreography.visibilityFallback))
+                try? await Task.sleep(for: .seconds(LaunchChoreography.noWindowFallback))
                 begin()
             }
         }
@@ -108,8 +107,11 @@ enum LaunchChoreography {
     static let subtitle: Double = 0.10
     static let buttons: Double = 0.14
     static let byline: Double = 0.18
-    /// If the window never says it is on screen, the launch starts this long after the view appeared.
+    /// Should the window's notifications miss the moment, the launch starts this long after the view is in a window that
+    /// is ordered in (`WindowVisibility`).
     static let visibilityFallback: Double = 0.15
+    /// With no window at all, the content shows after this long.
+    static let noWindowFallback: Double = 1.5
 
     /// The glint plays at launch only (once per process), never under Reduce Motion.
     static func playsShimmer(_ entrance: WelcomeView.Arrival, reduceMotion: Bool) -> Bool {
@@ -165,7 +167,8 @@ struct WordmarkShimmer<Glyphs: View>: View {
 }
 
 /// Calls `visible` once, when the window holding it is first on screen: key, or visible to the person (its occlusion
-/// state). `onAppear` can come before the window is ordered in, and an entrance would then play unseen.
+/// state), or, should both notifications miss the moment, ordered in 150 ms after it was first checked. `onAppear` can
+/// come before the window is ordered in, and an entrance would then play unseen.
 struct WindowVisibility: NSViewRepresentable {
     let visible: @MainActor () -> Void
     func makeNSView(context: Context) -> WindowVisibilityView { WindowVisibilityView(visible: visible) }
@@ -183,7 +186,7 @@ final class WindowVisibilityView: NSView {
         super.viewDidMoveToWindow()
         NotificationCenter.default.removeObserver(self)
         guard let window else { return }
-        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didChangeOcclusionStateNotification] {
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didChangeOcclusionStateNotification, NSWindow.didUpdateNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(windowChanged(_:)), name: name, object: window)
         }
         check()
@@ -192,8 +195,23 @@ final class WindowVisibilityView: NSView {
     @objc private func windowChanged(_ note: Notification) { check() }
 
     private func check() {
-        guard !fired, let window, window.isVisible, window.isKeyWindow || window.occlusionState.contains(.visible) else { return }
+        guard !fired, let window, window.isVisible else { return }
+        if window.isKeyWindow || window.occlusionState.contains(.visible) { fire(); return }
+        if fallback == nil {
+            fallback = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(LaunchChoreography.visibilityFallback))
+                guard let self, !Task.isCancelled, self.window?.isVisible == true else { return }
+                self.fire()
+            }
+        }
+    }
+
+    private var fallback: Task<Void, Never>?
+
+    private func fire() {
+        guard !fired else { return }
         fired = true
+        fallback?.cancel()
         NotificationCenter.default.removeObserver(self)
         // After this update: the window is on screen, and the entrance it starts is seen from its first frame.
         DispatchQueue.main.async { [visible] in visible?() }

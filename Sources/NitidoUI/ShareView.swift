@@ -330,6 +330,22 @@ struct PairingPanel: View {
         static let shrink = Theme.Motion.move.over(0.2)
     }
 
+    /// Whether the viewer's row and the reconnecting line are in the panel: set inside an explicit transaction as the
+    /// model changes, so the panel grows and folds on its own curve (an implicit animation left the Liquid Glass to snap
+    /// a frame or more late, recorded 2026-10-12). The row's name is kept while the row goes.
+    @State private var rowShown: Bool
+    @State private var lineShown: Bool
+    @State private var rowName: String?
+
+    init(name: String, code: String, viewer: String?, reconnecting: Bool = false, connectionCount: Int, ringShownFor: Binding<Int>,
+         since: CFTimeInterval? = nil, viewerSince: CFTimeInterval? = nil) {
+        self.name = name; self.code = code; self.viewer = viewer; self.reconnecting = reconnecting
+        self.connectionCount = connectionCount; _ringShownFor = ringShownFor; self.since = since; self.viewerSince = viewerSince
+        _rowShown = State(initialValue: viewer != nil)
+        _lineShown = State(initialValue: viewer != nil && reconnecting)
+        _rowName = State(initialValue: viewer)
+    }
+
     var body: some View {
         GlassCard {
             VStack(alignment: .trailing, spacing: 0) {
@@ -341,7 +357,7 @@ struct PairingPanel: View {
                 TypedCode(code: code, delay: ShareView.Stage.code - ShareView.Stage.pairing,
                           since: since.map { $0 + ShareView.Stage.pairing })
                     .padding(.trailing, -6)
-                if let viewer {
+                if rowShown, let viewer = viewer ?? rowName {
                     VStack(alignment: .trailing, spacing: 0) {
                         HStack(spacing: 6) {
                             // Gold and breathing while the viewer reconnects; the ring fades with it and draws again once
@@ -357,7 +373,7 @@ struct PairingPanel: View {
                                              delay: connectionCount <= 1 ? Connect.ring : Connect.ringAgain))
                         .entrance(.scale(Theme.Motion.enterScale, anchor: .trailing), delay: Connect.row, since: viewerSince)
                         .padding(.top, 8)
-                        if reconnecting {
+                        if lineShown {
                             Text("Reconnecting…").font(.system(size: 11)).foregroundStyle(Theme.Colors.secondaryText).padding(.top, 4)
                                 .entrance(.rise(4), delay: 0.06, curve: Theme.Motion.enter.over(0.2))
                                 .exitTransition(reduceMotion: reduceMotion)
@@ -368,10 +384,18 @@ struct PairingPanel: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
         }
-        // The panel grows below the code as a row or a line comes (240 ms) and folds back as it goes (200 ms); at once
-        // under Reduce Motion.
-        .animation(reduceMotion ? nil : (viewer != nil ? Theme.Motion.move : Connect.shrink).animation, value: viewer != nil)
-        .animation(reduceMotion ? nil : (reconnecting ? Theme.Motion.move : Connect.shrink).animation, value: reconnecting)
+        .onChange(of: viewer) { _, new in
+            if let new { rowName = new }
+            change(grows: new != nil) { rowShown = new != nil; if new == nil { lineShown = false } }
+        }
+        .onChange(of: reconnecting) { _, now in change(grows: now) { lineShown = now && viewer != nil } }
+    }
+
+    /// The panel grows below the code as a row or a line comes (240 ms) and folds back as it goes (200 ms); at once under
+    /// Reduce Motion.
+    private func change(grows: Bool, _ body: () -> Void) {
+        guard !reduceMotion else { body(); return }
+        withAnimation((grows ? Theme.Motion.move : Connect.shrink).animation) { body() }
     }
 }
 

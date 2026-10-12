@@ -7,6 +7,11 @@ import SwiftUI
 /// draw solid surfaces instead (`WelcomeView`, `SolidCard`).
 public struct Glass<S: InsettableShape>: ViewModifier {
     let shape: S
+    /// Whether the glass is there (`Entrance`, `Presence`): Liquid Glass is composited apart and ignores an opacity
+    /// above it, so a panel fading in showed a light grey slab under its dark backing for its first frames. The glass
+    /// materializes with its element's entrance instead (`glassEffectTransition(.materialize)`), as the backing and the
+    /// content fade in.
+    @Environment(\.glassShown) private var glassShown
     public init(in shape: S) { self.shape = shape }
     public func body(content: Content) -> some View {
         if #available(macOS 26, *) {
@@ -15,7 +20,9 @@ public struct Glass<S: InsettableShape>: ViewModifier {
             // otherwise lands over the backing (#47474a over a white document instead of #1c1c21).
             content.background {
                 ZStack {
-                    Color.clear.glassEffect(.regular, in: shape)
+                    if glassShown {
+                        Color.clear.glassEffect(.regular, in: shape).glassEffectTransition(.materialize)
+                    }
                     shape.fill(Theme.Colors.glassBacking)
                 }
             }
@@ -28,17 +35,25 @@ public struct Glass<S: InsettableShape>: ViewModifier {
     }
 }
 
+extension EnvironmentValues {
+    /// The glass of the views below is there: false while their element enters or leaves (`Glass`).
+    @Entry var glassShown = true
+}
+
 public extension View {
     func glass<S: InsettableShape>(in shape: S) -> some View { modifier(Glass(in: shape)) }
 }
 
-/// A glass card with the card radius (14), continuous corners (spec 11).
+/// A glass card with the card radius (14), continuous corners (spec 11). Its content is clipped to the card, so a row
+/// that comes in while the card grows around it (the codec loop unfolding, a viewer's row) shows inside the card as it
+/// grows, never on the picture beside it.
 public struct GlassCard<Content: View>: View {
     let radius: CGFloat
     let content: Content
     public init(radius: CGFloat = Theme.cardRadius, @ViewBuilder content: () -> Content) { self.radius = radius; self.content = content() }
     public var body: some View {
-        content.glass(in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        content.clipShape(shape).glass(in: shape)
     }
 }
 

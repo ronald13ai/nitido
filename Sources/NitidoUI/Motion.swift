@@ -101,6 +101,7 @@ struct Entrance: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .environment(\.glassShown, shown)
             .modifier(EntranceGeometry(motion: motion.reduced(reduceMotion), shown: shown))
             .opacity(shown ? 1 : 0)
             .onAppear {
@@ -174,7 +175,8 @@ struct Presence: Transition {
             if case .scale(_, let a) = motion { anchor = a }
         case .identity: break
         }
-        return content.scaleEffect(scale, anchor: anchor).offset(x: x, y: y).opacity(phase.isIdentity ? 1 : 0)
+        return content.environment(\.glassShown, phase.isIdentity)
+            .scaleEffect(scale, anchor: anchor).offset(x: x, y: y).opacity(phase.isIdentity ? 1 : 0)
     }
 }
 
@@ -241,7 +243,8 @@ struct ScreenTransition: Transition {
             if !back { scale = Theme.Motion.screenScale }
         }
         if reduceMotion { scale = 1; y = 0 }
-        return content.scaleEffect(scale).offset(y: y).opacity(opacity)
+        return content.environment(\.glassShown, phase.isIdentity)
+            .scaleEffect(scale).offset(y: y).opacity(opacity)
     }
 
     /// A screen coming back waits this long, so it rises from under the one fading out rather than through it.
