@@ -104,7 +104,8 @@ public final class ViewModel {
     public var showTelemetry = true
     public let sink = FrameSink()
     public let ink = InkController(role: .view)
-    public let name = Host.current().localizedName ?? "Mac"
+    /// What this Mac calls itself in its hello: its name, unless a test gives another (`init(startingDiscovery:name:)`).
+    public let name: String
 
     /// The Mac of the current session as the list named it, or the name its hello gave (VoiceOver's "Connected to").
     public var peerName: String { currentPeer?.name ?? sharerName }
@@ -142,8 +143,10 @@ public final class ViewModel {
     public convenience init() { self.init(startingDiscovery: true) }
 
     /// `startingDiscovery` false leaves the Bonjour browser unstarted, so a test that hands it states (`browser`) is
-    /// not raced by the real browser's own (its `.ready` clearing a notice the test just set).
-    init(startingDiscovery: Bool) {
+    /// not raced by the real browser's own (its `.ready` clearing a notice the test just set). `name` is the one its
+    /// hello gives; the README's reel names its loopback viewer apart from the sharer, which runs on the same Mac.
+    init(startingDiscovery: Bool, name: String = Host.current().localizedName ?? "Mac") {
+        self.name = name
         // VideoToolbox loads its codecs, and Core Image compiles its kernels, while the person picks a Mac and types the
         // code, not on the main actor as the first keyframe comes in.
         CodecWarmUp.start()
