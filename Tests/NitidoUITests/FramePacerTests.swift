@@ -1409,7 +1409,10 @@ final class FramePacerDisplayTests: XCTestCase {
     /// would take the drawable from the next frame, which would then be late and dropped, a frame lost per move (about
     /// 30 a second, the comparison at half rate and the dropped figure lit by the UI itself). Whatever the drag's rate
     /// and phase, with frames that come a little late, a late presented handler, a deep compositor or a 120 Hz panel:
-    /// no frame dropped, no redraw, latency unchanged, and the last divider on screen.
+    /// no frame dropped, no redraw, latency unchanged, and the last divider on screen. A frame 10 ms late, as one held up
+    /// on the main thread by the drag's own work reaches the pacer, came after a redraw waiting only until the middle
+    /// of the second interval, which took its drawable: the next frame waited, was held back as late and was dropped
+    /// (the README's take, 2026-10-13).
     @MainActor
     func testDraggingTheDividerOverAMovingSourceCostsNoFrame() throws {
         let sources: [(name: String, config: DisplaySim.Config)] = [
@@ -1419,6 +1422,7 @@ final class FramePacerDisplayTests: XCTestCase {
             ("120 Hz panel", .init(period: 1.0 / 120, sourceEvery: 2, compare: true)),
             ("every other frame 4 ms late", .init(compare: true, arrivalJitter: [0, 0.004])),
             ("frames up to 6 ms late", .init(compare: true, arrivalJitter: [0, 0.006, 0.002])),
+            ("a frame in four 10 ms late", .init(compare: true, arrivalJitter: [0, 0, 0, 0.010])),
         ]
         for source in sources {
             for drag in Self.drags {

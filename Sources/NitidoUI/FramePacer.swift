@@ -151,6 +151,9 @@ final class FramePacer {
     private var lastPresentedAt: Double = 0
     /// When the newest frame reached `present`: a divider move waits for the frame after it (`moveDivider`).
     private var lastArrival: CFTimeInterval = 0
+    /// When the two frames before it reached `present`, the later first, 0 for none yet: whether the source changes
+    /// every capture interval (`dividerRedrawDelay`).
+    private var earlierArrivals: (CFTimeInterval, CFTimeInterval) = (0, 0)
     /// A divider move waits for a redraw (`moveDivider`); a new frame, any redraw or a release makes it moot.
     private var dividerRedrawScheduled = false
     /// Bumped whenever the scheduled divider redraw becomes moot, so it then does nothing.
@@ -181,6 +184,7 @@ final class FramePacer {
         }
         held = frame
         waitingSince = arrival
+        earlierArrivals = (lastArrival, earlierArrivals.0)
         lastArrival = arrival
         waitingHeldBack = false
         lateDrawToken &+= 1
@@ -223,14 +227,21 @@ final class FramePacer {
     }
 
     /// How long a divider move waits for a frame to carry it: until the middle of a capture interval after the newest
-    /// frame, the second interval at the earliest. A source that changes every interval has sent its next frame by
-    /// then with half an interval to spare, so a frame a little late still carries the move. A slower one sends its
-    /// frames whole intervals apart on a 60 Hz display, so the redraw lands half an interval clear of them and never
-    /// takes the drawable one of them needs. On a still source the move is drawn within one interval.
+    /// frame, the second interval at the earliest, or the third for a source that changes every interval (one of its
+    /// last two frames came within an interval and a half of the one before). Such a source sends its next frame within
+    /// the second interval, and one held up on its way, by the main thread that also handles the drag, a little later
+    /// still: it carries the move, and a redraw at the middle of the second interval would take the drawable from a
+    /// frame more than half an interval late, which would then wait behind it, be held back as late and be dropped (the
+    /// README's take, 2026-10-13: a frame 10 ms late). A slower one sends its frames whole intervals apart on a 60 Hz
+    /// display, so the redraw lands half an interval clear of them and never takes the drawable one of them needs. On a
+    /// still source the move is drawn within one interval.
     private func dividerRedrawDelay() -> CFTimeInterval {
         let interval = Self.lateFrameGrace
         let elapsed = now() - lastArrival
-        let intervals = max(1, (elapsed / interval - 0.5).rounded(.up))
+        let (before, beforeThat) = earlierArrivals
+        let everyInterval = before > 0
+            && (lastArrival - before < 1.5 * interval || beforeThat > 0 && before - beforeThat < 1.5 * interval)
+        let intervals = max(everyInterval ? 2 : 1, (elapsed / interval - 0.5).rounded(.up))
         return max(0, (intervals + 0.5) * interval - elapsed)
     }
 
