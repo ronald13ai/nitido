@@ -33,7 +33,7 @@ final class MotionTokenTests: XCTestCase {
         assertCurve(M.figure, out, 0.18, "figure")
         assertCurve(M.settle, (0.42, 0, 0.58, 1), 0.6, "settle")
         assertCurve(M.breathe, (0.42, 0, 0.58, 1), 1.2, "breathe, each way")
-        assertCurve(M.shimmer, inOut, 0.76, "shimmer")
+        assertCurve(M.shimmer, (0.42, 0, 0.58, 1), 0.76, "shimmer: the system ease-in-out, so the glint lingers on the letters")
         XCTAssertEqual(M.shimmerDelay, 0.44, accuracy: 1e-9, "the glint ends at 1.2 s")
         assertCurve(M.reveal, inOut, 0.22, "reveal")
         XCTAssertEqual(M.connect, M.Spring(duration: 0.5, bounce: 0.2))
@@ -166,6 +166,22 @@ final class LaunchMotionTests: XCTestCase {
         XCTAssertEqual(path.from + WordmarkShimmer<EmptyView>.band + lean, 0, accuracy: 1e-6, "starts just left of the wordmark")
         XCTAssertEqual(path.to - lean, 130, accuracy: 1e-6, "ends just past its right edge")
         XCTAssertEqual(WordmarkShimmer<EmptyView>.band / 130, 0.28, accuracy: 0.01)
+    }
+
+    /// The glint lingers on the letters: its band is on them from about 19 % to 95 % of its travel (recorded, 2026-10-12),
+    /// which the curve must spread over 400 ms or more. The strong ease-in-out gave it 267 ms of the 760, a flick.
+    func testTheGlintLingersOnTheLetters() {
+        func time(_ curve: Theme.Motion.Curve, reaching progress: Double) -> Double {
+            var low = 0.0, high = curve.duration
+            for _ in 0..<50 { let mid = (low + high) / 2; if curve.progress(at: mid) < progress { low = mid } else { high = mid } }
+            return high
+        }
+        let shimmer = Theme.Motion.shimmer
+        let onLetters = time(shimmer, reaching: 0.95) - time(shimmer, reaching: 0.19)
+        XCTAssertGreaterThan(onLetters, 0.40, "on the letters for \(Int(onLetters * 1000)) ms")
+        XCTAssertLessThan(Theme.Motion.shimmerDelay + time(shimmer, reaching: 0.19), 0.70, "on the letters before 700 ms")
+        let strong = Theme.Motion.Curve(Theme.Motion.strongEaseInOut, shimmer.duration)
+        XCTAssertLessThan(time(strong, reaching: 0.95) - time(strong, reaching: 0.19), 0.28, "what the strong curve gave")
     }
 }
 

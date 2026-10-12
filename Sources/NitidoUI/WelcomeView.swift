@@ -125,7 +125,8 @@ enum LaunchChoreography {
 /// The one gold glint across the wordmark at launch (spec 11, M1): a band 36 pt wide (about 28 % of the wordmark),
 /// skewed 20°, masked by the wordmark's own glyphs and added over them (`.plusLighter`), gold at its edges and nearly
 /// white at its core, so over the cream it reads as a warm glint passing through the letters. It travels from just left
-/// of the wordmark to just past its right edge over 760 ms on the strong ease-in-out, 440 ms after the launch began.
+/// of the wordmark to just past its right edge over 760 ms on the system ease-in-out, 440 ms after the launch began:
+/// on the letters from about 670 to 1080 ms (`Theme.Motion.shimmer`).
 struct WordmarkShimmer<Glyphs: View>: View {
     let glyphs: Glyphs
     @State private var across = false

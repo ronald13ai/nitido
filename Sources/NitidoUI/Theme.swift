@@ -139,8 +139,8 @@ public enum Theme {
         }
 
         /// The named curves. Strong ease-out for what enters; strong ease-in-out for what moves on screen; ease for a
-        /// colour under the pointer; the system's ease-in-out for loops and settles, where the strong one would stall at
-        /// each end.
+        /// colour under the pointer; the system's ease-in-out for loops, settles and the launch's glint, where the strong
+        /// one would stall at each end.
         public static let strongEaseOut = (0.23, 1.0, 0.32, 1.0)
         public static let strongEaseInOut = (0.77, 0.0, 0.175, 1.0)
         public static let ease = (0.25, 0.1, 0.25, 1.0)
@@ -180,8 +180,10 @@ public enum Theme {
         /// breath, never a blink).
         public static let breathe = Curve(systemEaseInOut, 1.2)
         public static let breatheLow: Float = 0.35
-        /// The one gold glint across the wordmark at launch.
-        public static let shimmer = Curve(strongEaseInOut, 0.76)
+        /// The one gold glint across the wordmark at launch, on the system ease-in-out (amended 2026-10-12 from the strong
+        /// one): its band starts and ends clear of the glyphs, where the strong curve spends most of its time, so it
+        /// crossed the letters in about 270 ms of the 760 at full speed, a flick; this curve keeps it on them for about 410.
+        public static let shimmer = Curve(systemEaseInOut, 0.76)
         public static let shimmerDelay: Double = 0.44
         /// The divider line drawing itself up from its handle.
         public static let reveal = Curve(strongEaseInOut, 0.22)
