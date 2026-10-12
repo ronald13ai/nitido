@@ -266,31 +266,6 @@ extension EnvironmentValues {
     @Entry var screenArrival: NavigationDirection = .forward
 }
 
-// MARK: Changes and their transaction
-
-/// `onChange(of:)` that also says whether the change came on a keyboard path (a transaction that disables animations,
-/// `Instantly`): what the action animates in turn then stays instant too.
-private struct ChangeAndTransaction<Value: Equatable>: ViewModifier {
-    let value: Value
-    let action: (Value, Value, Bool) -> Void
-    @State private var witness = Witness()
-
-    final class Witness { var instant = false }
-
-    func body(content: Content) -> some View {
-        let witness = witness
-        content
-            .transaction(value: value) { witness.instant = $0.disablesAnimations }
-            .onChange(of: value) { old, new in action(old, new, witness.instant) }
-    }
-}
-
-extension View {
-    func onChange<Value: Equatable>(of value: Value, instant action: @escaping (_ old: Value, _ new: Value, _ instant: Bool) -> Void) -> some View {
-        modifier(ChangeAndTransaction(value: value, action: action))
-    }
-}
-
 // MARK: The window's size
 
 /// The frame that sizes the window (`.windowResizability(.contentSize)`), outermost in `RootView`: it follows the
