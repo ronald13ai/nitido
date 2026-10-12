@@ -3,8 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # The version the bundle says and the zip is named after; the build number goes up with it.
-VERSION=0.2
-BUILD=2
+VERSION=0.2.1
+BUILD=3
 # The identity first, so a Mac without one is told how to make one and no unsigned app is left behind (macOS keeps a
 # Screen Recording grant only for a signed bundle). awk reads to the end: quitting at the first match could leave
 # `security` writing into a closed pipe, which pipefail turns into a silent exit.

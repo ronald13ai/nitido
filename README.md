@@ -69,7 +69,7 @@ Keyboard actions repeated often (⌘H, ⌘L, ⌘Z, ⌘⌫, Esc) change things at
 
 Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon only.
 
-**From the zip.** Download `Nitido-0.2-macOS15.zip` from the [releases page](https://github.com/ronald13ai/nitido/releases), unzip it and open `Nítido.app`. It is signed for development, not notarized, so macOS blocks it the first time: open System Settings, Privacy & Security, and click Open Anyway. (Since macOS 15, Control-click and Open no longer gets past this.) In Terminal, `xattr -dr com.apple.quarantine Nítido.app` does the same.
+**From the zip.** Download `Nitido-0.2.1-macOS15.zip` from the [releases page](https://github.com/ronald13ai/nitido/releases), unzip it and open `Nítido.app`. It is signed for development, not notarized, so macOS blocks it the first time: open System Settings, Privacy & Security, and click Open Anyway. (Since macOS 15, Control-click and Open no longer gets past this.) In Terminal, `xattr -dr com.apple.quarantine Nítido.app` does the same.
 
 **From source.** You need Xcode 26 (Swift 6.2) and an Apple Development signing identity: in Xcode, Settings, Accounts, Manage Certificates makes one with a free Apple ID.
 
