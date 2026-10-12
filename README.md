@@ -1,4 +1,4 @@
-<!-- Before publishing: work through "Before publishing" in docs/testing.md; its step 3, scripts/check-readme.sh, must pass before the repository goes public. -->
+<!-- Before a release: work through "Before publishing" in docs/testing.md; its step 3, scripts/check-readme.sh, must pass. -->
 
 <p align="center">
   <img src="docs/screenshots/icon.png" width="128" height="128" alt="Nítido's icon: a thin gold italic N on a dark rounded square">
@@ -18,9 +18,9 @@
 <p align="center">
   <img src="docs/screenshots/loop.gif" width="900" alt="Twenty seconds of Nítido: the launch, a press on Share, the picture arriving with its code, a viewer pairing and its gold ring, a stroke from each side, the codec loop switched on and its divider dragged, the strokes fading, the quality lowered, and Stop back to Welcome">
 </p>
-<p align="center"><sub>One take through the render harness: the app's own screens and models, a synthetic desktop shared to a viewer over the loopback link, an arrow drawn where the harness clicks. Every value is under <a href="#motion">Motion</a>.</sub></p>
+<p align="center"><sub>One take through the render harness: the app's own screens and models, a synthetic desktop shared to a viewer over the loopback link, an arrow drawn where the harness clicks. Every timing is listed under <a href="#motion">Motion</a>.</sub></p>
 
-A native macOS app that shares a window or a screen to another Mac on the local network, with crisp text, measured latency and ink on top. Swift 6.2, ScreenCaptureKit, VideoToolbox, Network.framework and Metal; no third-party code.
+A native macOS app that shares a window or a screen to another Mac on the local network. Swift 6.2, ScreenCaptureKit, VideoToolbox, Network.framework and Metal; no third-party code.
 
 I built it in a week in October 2026, as a prototype of the core loop of a pair-programming tool: capture, encode, send, decode and draw a screen, and measure each step.
 
@@ -46,15 +46,15 @@ I built it in a week in October 2026, as a prototype of the core loop of a pair-
 
 ## Motion
 
-Every value here is a token in `Theme.Motion` ([`Theme.swift`](Sources/NitidoUI/Theme.swift)) or a constant beside the view it moves, and section 11 of the design spec reads the same numbers. Entrances run on `cubic-bezier(0.23, 1, 0.32, 1)`, movement on screen on `cubic-bezier(0.77, 0, 0.175, 1)`, exits are faster than entrances, and springs are kept for what feels alive (the connect ring) and what a drag can interrupt (the divider's dot).
+Every value here is a token in `Theme.Motion` ([`Theme.swift`](Sources/NitidoUI/Theme.swift)) or a constant beside the view it moves, and section 11 of the design spec gives the same numbers. Three curves do most of the work: the strong ease-out, `cubic-bezier(0.23, 1, 0.32, 1)`, for what enters; the strong ease-in-out, `cubic-bezier(0.77, 0, 0.175, 1)`, for what moves on screen; and the system ease-in-out, `cubic-bezier(0.42, 0, 0.58, 1)`, for loops and the glint, where the strong one would stall at each end. Exits are faster than entrances, and springs are kept for what feels alive (the connect ring) and what a drag can interrupt (the divider's dot).
 
 | Moment | What moves | Values |
 |---|---|---|
-| Launch | The warmth rises, the card settles, the wordmark comes into focus, one gold glint crosses it | Warmth 480 ms; card from 0.98; wordmark from an 8 pt blur over 240 ms at 60 ms, the rest 40 ms apart; glint 760 ms from 440 ms on the system ease-in-out, once per launch |
+| Launch | A faint gold glow rises behind the card, the card settles, the wordmark comes into focus, one gold glint crosses it | Glow 480 ms; card from 0.98; wordmark from an 8 pt blur over 240 ms at 60 ms, the rest 40 ms apart; glint 760 ms from 440 ms on the system ease-in-out, once per launch |
 | Press | Every button | Scale 0.97 over 120 ms on the strong ease-out (0.985 on wide rows), back the same way; ⏎ holds the gold button pressed 120 ms before it acts |
 | Entrances | Buttons, chips, cards, panels, rows | From opacity 0 and scale 0.96 (never from 0) over 220 ms; wide rows rise 6 pt instead; siblings 40 ms apart; exits 120 ms, ease-out |
-| The picture | The window grows from its top left corner; a cover over the picture fades | 300 ms growing, 260 ms shrinking; cover 220 ms, 40 ms after the first frame is on screen; the picture never scales, so its text is sharp from its first frame |
-| After the picture | Strip, pairing panel, codec loop panel, code, notices | At 160, 200, 240, 280 and 320 ms |
+| The picture | The window grows from its top left corner; a cover over the picture fades | 300 ms growing, 260 ms shrinking; cover 220 ms, 40 ms after the first frame is on screen, and never more than 1 s after the capture's start; the picture never scales, so its text is sharp from its first frame |
+| Around the picture | Strip, pairing panel, codec loop panel, code, notices | At 160, 200, 240, 280 and 320 ms from the capture's start, not from the first frame, so a late first frame comes after them |
 | The code | Digit by digit | 40 ms apart, each rising 4 pt over 160 ms and settling from the gold highlight to gold over 360 ms |
 | A viewer connects | The panel grows, the row arrives, a thin gold ring draws round it | Panel 240 ms; ring on a spring (duration 0.5, bounce 0.2), then down to a 1 pt hairline over 0.6 s; status dot on a spring (0.35, bounce 0.3) |
 | Codec loop on | The panel unfolds, a light runs up the divider | Panel 240 ms, its rows 40 ms apart; light 220 ms at 40 ms; the strip's codec figure fades in at 80 ms over 180 ms |
@@ -63,7 +63,7 @@ Every value here is a token in `Theme.Motion` ([`Theme.swift`](Sources/NitidoUI/
 | Ink | Strokes fade | 4 s after the last point, over 600 ms; the other Mac sees an undo rewind over 180 ms |
 | Reconnecting | The status dot breathes, the last frame dims | 1.2 s each way; 20 % |
 
-Keyboard actions repeated often (⌘H, ⌘L, ⌘Z, ⌘⌫, Esc) change things at once, the window's size included. Loops over a live picture run on Core Animation, so they never tick the main thread. Reduce Motion takes away every scale, rise and slide, the window's animated resize, the ring, the shake, the glint and the breathing, and keeps the fades at the same timings. The GIF at the top is `NITIDO_RENDER=1 NITIDO_README=1 swift test --filter RenderGallery/testReadmeReel`.
+Keyboard actions repeated often (⌘H, ⌘L, ⌘Z, ⌘⌫, Esc) change things at once, the window's size included. The breathing dot and the sparkline run on Core Animation, so they never tick the main thread; the ink ticks on the main thread at 30 Hz only while a stroke fades, and the code types itself in on a SwiftUI timeline. Reduce Motion takes away every scale, rise and slide, the window's animated resize, the ring, the shake, the glint and the breathing, and keeps the fades at the same timings. The GIF at the top comes from `NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=<dir> swift test --filter RenderGallery/testReadmeReel`, which writes `<dir>/clips/loop.gif`; it was recorded on 0.2, so its strip still shows the partial counts of the picture's first second.
 
 ## Try it in a minute
 
