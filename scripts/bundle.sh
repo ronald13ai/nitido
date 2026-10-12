@@ -2,6 +2,9 @@
 # Builds Nítido in release mode, assembles build/Nítido.app and signs it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The version the bundle says and the zip is named after; the build number goes up with it.
+VERSION=0.2
+BUILD=2
 # The identity first, so a Mac without one is told how to make one and no unsigned app is left behind (macOS keeps a
 # Screen Recording grant only for a signed bundle). awk reads to the end: quitting at the first match could leave
 # `security` writing into a closed pipe, which pipefail turns into a silent exit.
@@ -51,8 +54,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>ai.ronar.nitido</string>
   <key>CFBundleExecutable</key><string>nitido</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${BUILD}</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
 ${ICON_NAME}
   <key>LSMinimumSystemVersion</key><string>15.0</string>
@@ -66,8 +69,8 @@ codesign --force --deep --sign "$ID" "$APP"
 codesign --verify --strict "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority" | head -2
 echo "built $APP"
-# The archive to attach to the GitHub release (the README's "From the zipped app"): ditto keeps the signature intact.
-ZIP="build/Nitido-0.1-macOS15.zip"
+# The archive to attach to the GitHub release (the README's "From the zip"): ditto keeps the signature intact.
+ZIP="build/Nitido-${VERSION}-macOS15.zip"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 echo "built $ZIP"
