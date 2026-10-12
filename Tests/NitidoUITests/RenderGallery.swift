@@ -1830,6 +1830,11 @@ extension ReelDirector {
         let width = 1440, height = 900
         policy.rollsFigures = false
         defer { policy.rollsFigures = true }
+        // The feed stands in for ScreenCaptureKit, whose frames come at the display's refresh whatever the app's timers
+        // do. This process is never the active app, so the system may coalesce its timers, the feed's 16 ms sleeps among
+        // them: the take holds them to their time, as a capture's frames are.
+        let precise = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Recording the README's reel")
+        defer { ProcessInfo.processInfo.endActivity(precise) }
         let corner = CGPoint(x: 40, y: 82)
         let kept = CGRect(x: corner.x - 40, y: corner.y - 26, width: 720 + 80, height: 527 + 26 + 44)
         let recorded = CGRect(x: kept.minX, y: kept.minY - 26, width: kept.width, height: kept.height + 26)
