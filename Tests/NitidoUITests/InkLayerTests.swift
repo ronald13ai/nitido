@@ -286,7 +286,7 @@ final class InkOverlayTests: XCTestCase {
 
         model.ink.undoLocal()
         XCTAssertTrue(model.ink.document.strokes.isEmpty)
-        XCTAssertEqual(ribbons.first?.opacity, 0, "⌘Z fades the stroke out")
+        XCTAssertNil(ribbons.first?.superlayer, "⌘Z takes the stroke off at once: a keyboard action never animates (spec 11)")
     }
 }
 

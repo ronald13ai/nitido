@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import CoreText
+import QuartzCore
 import os
 
 public enum Theme {
@@ -75,18 +76,139 @@ public enum Theme {
         }
     }
 
+    /// Every motion value in one place (spec 11, and the choreography per moment): curves and springs as numbers, so the
+    /// spec, the code and the tests read the same values.
     public enum Motion {
-        /// Strong ease-out for entrances.
-        public static let enter = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.22)
-        public static let press = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
-        /// Hover answers as fast as a press, on the same curve.
-        public static let hover = press
-        /// Exits are faster than entrances: a plain ease-out over 120 ms.
-        public static let exit = Animation.easeOut(duration: 0.12)
-        public static let connect = Animation.spring(duration: 0.5, bounce: 0.2)
-        /// After the connect ring has drawn, it eases down to a hairline: the settle.
-        public static let settle = Animation.easeInOut(duration: 0.6)
+        /// A cubic Bézier timing curve, `cubic-bezier(x1, y1, x2, y2)`, over `duration` seconds.
+        public struct Curve: Equatable, Sendable {
+            public let x1: Double, y1: Double, x2: Double, y2: Double
+            public let duration: Double
+            public init(_ points: (Double, Double, Double, Double), _ duration: Double) {
+                (x1, y1, x2, y2) = points; self.duration = duration
+            }
+            public var animation: Animation { .timingCurve(x1, y1, x2, y2, duration: duration) }
+            /// The same curve after `delay` seconds.
+            public func animation(after delay: Double) -> Animation { delay > 0 ? animation.delay(delay) : animation }
+            /// The same curve over another duration.
+            public func over(_ seconds: Double) -> Curve { Curve((x1, y1, x2, y2), seconds) }
+            /// The curve for Core Animation (the ink, the breathing dot, the sparkline).
+            public var timingFunction: CAMediaTimingFunction {
+                CAMediaTimingFunction(controlPoints: Float(x1), Float(y1), Float(x2), Float(y2))
+            }
+            /// How far along the curve is at `time` seconds after it started: 0 before, 1 after, the curve's value in
+            /// between (the x of the Bézier solved for the time, then its y).
+            public func progress(at time: Double) -> Double {
+                guard duration > 0 else { return time >= 0 ? 1 : 0 }
+                let x = min(max(time / duration, 0), 1)
+                if x == 0 || x == 1 { return x }
+                return Self.bezier(y1, y2, at: Self.parameter(forX: x, x1, x2))
+            }
+            static func bezier(_ p1: Double, _ p2: Double, at t: Double) -> Double {
+                let u = 1 - t
+                return 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t
+            }
+            /// The Bézier parameter whose x is `x`: Newton's method, then bisection should it not converge.
+            static func parameter(forX x: Double, _ x1: Double, _ x2: Double) -> Double {
+                var t = x
+                for _ in 0..<8 {
+                    let error = bezier(x1, x2, at: t) - x
+                    if abs(error) < 1e-7 { return t }
+                    let u = 1 - t
+                    let slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2)
+                    if abs(slope) < 1e-6 { break }
+                    t = min(max(t - error / slope, 0), 1)
+                }
+                var low = 0.0, high = 1.0
+                t = x
+                for _ in 0..<40 {
+                    let value = bezier(x1, x2, at: t)
+                    if abs(value - x) < 1e-7 { break }
+                    if value < x { low = t } else { high = t }
+                    t = (low + high) / 2
+                }
+                return t
+            }
+        }
+
+        /// Apple's spring, `spring(duration:bounce:)`: for what feels alive, and for what a drag can interrupt.
+        public struct Spring: Equatable, Sendable {
+            public let duration: Double, bounce: Double
+            public init(duration: Double, bounce: Double) { self.duration = duration; self.bounce = bounce }
+            public var animation: Animation { .spring(duration: duration, bounce: bounce) }
+            public func animation(after delay: Double) -> Animation { delay > 0 ? animation.delay(delay) : animation }
+        }
+
+        /// The named curves. Strong ease-out for what enters; strong ease-in-out for what moves on screen; ease for a
+        /// colour under the pointer; the system's ease-in-out for loops and settles, where the strong one would stall at
+        /// each end.
+        public static let strongEaseOut = (0.23, 1.0, 0.32, 1.0)
+        public static let strongEaseInOut = (0.77, 0.0, 0.175, 1.0)
+        public static let ease = (0.25, 0.1, 0.25, 1.0)
+        public static let systemEaseInOut = (0.42, 0.0, 0.58, 1.0)
+        public static let easeOut = (0.0, 0.0, 0.58, 1.0)
+
+        /// Every entrance: strong ease-out, 220 ms.
+        public static let enter = Curve(strongEaseOut, 0.22)
+        /// Press in and out, and ⏎ held on a gold button: strong ease-out, 120 ms.
+        public static let press = Curve(strongEaseOut, 0.12)
+        /// Brightness and fill under the pointer: a colour change, so ease, over 160 ms (soft rather than a flicker
+        /// when the pointer sweeps a row of buttons).
+        public static let hover = Curve(ease, 0.16)
+        /// Every exit, faster than the entrance: ease-out, 120 ms, opacity only unless a moment says otherwise.
+        public static let exit = Curve(easeOut, 0.12)
+        /// What moves or resizes on screen: a panel growing, notices restacking, the strip's figures making room.
+        public static let move = Curve(strongEaseInOut, 0.24)
+        /// The window's frame when a picture arrives (300 ms) and when it leaves (260 ms), from its top left corner.
+        public static let windowGrow = Curve(strongEaseInOut, 0.30)
+        public static let windowShrink = Curve(strongEaseInOut, 0.26)
+        /// The wordmark coming into focus at launch, from an 8 pt blur.
+        public static let focus = Curve(strongEaseOut, 0.24)
+        public static let focusBlur: CGFloat = 8
+        /// A figure's numeric roll on the strip and the quality label.
+        public static let figure = Curve(strongEaseOut, 0.18)
+        /// The connect ring drawing itself, once per connection.
+        public static let connect = Spring(duration: 0.5, bounce: 0.2)
+        /// The ring easing down to a hairline once drawn.
+        public static let settle = Curve(systemEaseInOut, 0.6)
+        /// The status dot filling at a connection.
+        public static let alive = Spring(duration: 0.35, bounce: 0.3)
+        /// The divider dot under the pointer's drag; interruptible.
+        public static let grab = Spring(duration: 0.25, bounce: 0.2)
+        /// The divider dot let go: back to rest without a bounce.
+        public static let letGo = Spring(duration: 0.3, bounce: 0)
+        /// The gold dot of a reconnect: 1.2 s each way, repeating, on the system ease-in-out (a near sine; a 2.4 s
+        /// breath, never a blink).
+        public static let breathe = Curve(systemEaseInOut, 1.2)
+        public static let breatheLow: Float = 0.35
+        /// The one gold glint across the wordmark at launch.
+        public static let shimmer = Curve(strongEaseInOut, 0.76)
+        public static let shimmerDelay: Double = 0.44
+        /// The divider line drawing itself up from its handle.
+        public static let reveal = Curve(strongEaseInOut, 0.22)
+        /// Between siblings entering together.
         public static let stagger: Double = 0.04
+
+        /// Scales and travels. Compact things (buttons, chips, cards, panels) scale in from 0.96, a 12 pt dot from
+        /// 0.8 and a 6 pt dot from 0.5, where 0.96 would move less than half a point; wide rows and lines of text rise
+        /// 6 pt instead. A screen going forward recedes to 0.98, and one coming back returns from it.
+        public static let enterScale: CGFloat = 0.96
+        public static let screenScale: CGFloat = 0.98
+        public static let pressScale: CGFloat = 0.97
+        /// Rows wider than 300 pt: the same 4 pt of travel a side as 0.97 on a 260 pt control.
+        public static let pressScaleWide: CGFloat = 0.985
+        public static let pressOpacity: Double = 0.88
+        public static let hoverBrightness: Double = 0.04
+        public static let rise: CGFloat = 6
+        /// Under Reduce Motion a fade stands in for what moved: 150 ms where the moving version had none of its own.
+        public static let reducedFade = Curve(easeOut, 0.15)
+
+        /// The picture's entrance (M6, M7): a cover of the background colour over it fades away; the picture itself
+        /// never scales or fades.
+        public static let coverDelay: Double = 0.04
+        /// How dark the last frame goes: 20 % while a link reconnects (it reads as paused, the document stays
+        /// legible), 55 % under a failure card (the card must dominate).
+        public static let reconnectDim: Double = 0.20
+        public static let failureDim: Double = 0.55
     }
 
     public static let cardRadius: CGFloat = 14

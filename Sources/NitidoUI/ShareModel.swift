@@ -21,11 +21,20 @@ public final class ShareModel {
     /// Display and idle sleep stay off while the share captures, and only then: the viewer's picture freezes when this
     /// Mac's display sleeps, and a sharer watching the viewer's ink touches nothing (`SessionActivity`).
     public internal(set) var state: State = .idle {
-        didSet { if state == .capturing { activity.begin("Sharing the screen") } else { activity.end() } }
+        didSet {
+            if state == .capturing { activity.begin("Sharing the screen") } else { activity.end() }
+            if state != .capturing { capturingSince = nil } else if capturingSince == nil { capturingSince = CACurrentMediaTime() }
+        }
     }
+    /// When the share last began capturing (`CACurrentMediaTime`), nil while it is not: the picture's entrance is
+    /// staged from it (spec 11, M6), and a view built later than its slot shows its part at once.
+    @ObservationIgnored public internal(set) var capturingSince: CFTimeInterval?
     /// Internal, not private, so a test can see whether it is held.
     @ObservationIgnored let activity = SessionActivity()
     public internal(set) var snapshot: Snapshot = .empty
+    /// The snapshot as the strip shows it (`FigureHysteresis`): one-unit moves held half a second, so nothing flickers.
+    public internal(set) var stripSnapshot: Snapshot = .empty
+    @ObservationIgnored var figures = FigureHysteresis()
     public internal(set) var pixelSize: CGSize = .zero
     public internal(set) var scale: CGFloat = 2
     public var showTelemetry = true
@@ -46,6 +55,9 @@ public final class ShareModel {
     public internal(set) var mayAskForScreenRecording = false
 
     public var loopback = false { didSet { if loopback != oldValue { loopbackDidChange() } } }
+    /// When the codec loop was last switched on or off by the pointer (`LoopbackPanel`), which stages the panel's rows,
+    /// the divider's dot and its labels from it (M12); nil after ⌘L, which shows them at once.
+    @ObservationIgnored public var loopToggledAt: CFTimeInterval?
     public var qualityMbps: Double = 20 { didSet { qualityDidChange() } }
     /// The quality slider's range, in Mbps: the bitrate controller's own bounds (spec 8), 2 to 60.
     nonisolated static let qualityRange: ClosedRange<Double> = {
@@ -115,6 +127,8 @@ public final class ShareModel {
     public internal(set) var connectionCount = 0
     /// The connection the gold ring last played for, so the Share screen shown again draws it at rest (`ConnectRing`).
     @ObservationIgnored public var ringShownFor = 0
+    /// When the current viewer proved the code (`CACurrentMediaTime`): its row's entrance is staged from it (M9).
+    @ObservationIgnored public internal(set) var viewerSince: CFTimeInterval?
     /// The first pick's picker was cancelled: the app goes back to Welcome (`AppModel.startShare`).
     @ObservationIgnored public var onCancelled: (() -> Void)?
     /// Why viewers cannot reach this Mac right now (the listener is waiting), shown over the picture.

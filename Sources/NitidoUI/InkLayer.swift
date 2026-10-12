@@ -83,11 +83,15 @@ public final class InkController {
         return StrokePoint(x: min(max(p.x, 0), 1), y: min(max(p.y, 0), 1), pressure: min(max(p.pressure, 0), 1), tMs: p.tMs)
     }
 
+    /// The peer's undo, seen here: the person who did not do it sees what went, the stroke rewinding from its end
+    /// (spec 11, M15).
     public func undoRemote(id: UInt32) {
-        guard isPeers(id), document.strokes.contains(where: { $0.id == id && $0.isRemote }) else { return }
-        document.remove(id: id); canvas?.remove(id: id, duration: 0.15)
+        guard isPeers(id), let stroke = document.strokes.first(where: { $0.id == id && $0.isRemote }) else { return }
+        canvas?.rewind(stroke)
+        document.remove(id: id)
     }
-    public func clearRemote() { document.clear(); canvas?.removeAll() }
+    /// The peer's clear, seen here: every stroke fades over 200 ms (no rewinding: many at once would be noise).
+    public func clearRemote() { document.clear(); canvas?.fadeAll() }
     /// The peer's link dropped: its strokes still being drawn will get no `.end`, so they end now and fade in four seconds,
     /// and its cursor, which will not move again, goes.
     public func endRemoteStrokes() { document.endRemoteStrokes(now: CACurrentMediaTime()); hideRemoteCursor() }
@@ -99,13 +103,13 @@ public final class InkController {
         canvas?.showRemoteCursor(Cursor(x: min(max(c.x, 0), 1), y: min(max(c.y, 0), 1), visible: c.visible), name: name)
     }
 
-    // Commands
+    // Commands. ⌘Z and ⌘⌫ are keyboard actions on this Mac, so they take effect at once (the other Mac animates them).
     public func undoLocal() {
         guard let id = document.undoLastLocal() else { return }
-        canvas?.remove(id: id, duration: 0.15)
+        canvas?.removeNow(id: id)
         onOutgoing?(.undo(strokeId: id))
     }
-    public func clearLocal() { document.clear(); canvas?.removeAll(); onOutgoing?(.clear) }
+    public func clearLocal() { document.clear(); canvas?.removeAllNow(); onOutgoing?(.clear) }
 
     /// How many times the canvas ticked this controller. Internal for tests.
     private(set) var ticks = 0
@@ -149,6 +153,22 @@ public final class InkCanvasView: NSView {
     private weak var observedWindow: NSWindow?
     private let cursorLabel = CATextLayer()
     private static let cursorFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+    /// Reduce Motion, as SwiftUI says it (`InkOverlay`): a rewind becomes a fade.
+    var reduceMotion = false
+
+    /// The ink's motion (spec 11, M15), all of it Core Animation on the render server.
+    enum Motion {
+        /// The peer's undo: the stroke rewinds from its end over 180 ms, fading over the last 80.
+        static let rewind = Theme.Motion.Curve(Theme.Motion.strongEaseInOut, 0.18)
+        static let rewindFade: Double = 0.08
+        /// The peer's clear: every stroke fades over 200 ms.
+        static let clear = Theme.Motion.enter.over(0.2)
+        /// Under Reduce Motion the rewind is a 150 ms fade.
+        static let reducedRewind = Theme.Motion.reducedFade
+        /// The peer's cursor coming (120 ms) and going (200 ms).
+        static let cursorIn = Theme.Motion.enter.over(0.12)
+        static let cursorOut = Theme.Motion.Curve(Theme.Motion.easeOut, 0.2)
+    }
 
     init(controller: InkController) {
         super.init(frame: .zero)
@@ -472,17 +492,85 @@ public final class InkCanvasView: NSView {
     /// fade can end after `attach` handed the canvas a new controller, whose ids start over, so by then the id can name
     /// the new share's stroke. `passive`: the fade four seconds after the last point, which eases in and out so the
     /// stroke fades away instead of popping off; otherwise (undo, clear) the entrance curve, quick and decided.
-    func fade(id: UInt32, duration: Double, passive: Bool = false) {
+    func fade(id: UInt32, duration: Double, passive: Bool = false, curve given: CAMediaTimingFunction? = nil) {
         guard !fading.contains(id), let entry = layers[id] else { return }
         fading.insert(id)
-        let curve = passive ? CAMediaTimingFunction(name: .easeInEaseOut) : CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+        let curve = given ?? (passive ? CAMediaTimingFunction(name: .easeInEaseOut) : Theme.Motion.enter.timingFunction)
         animateOpacity(entry.shape, to: 0, duration: duration, curve: curve) { [weak self] in
             guard let self, layers[id] === entry else { return }
             entry.shape.removeFromSuperlayer(); layers[id] = nil; fading.remove(id)
         }
     }
     func remove(id: UInt32, duration: Double) { fade(id: id, duration: duration) }
-    func removeAll() { layers.keys.forEach { remove(id: $0, duration: 0.15) } }
+
+    /// Takes the stroke off at once: this side's undo, a keyboard action.
+    func removeNow(id: UInt32) {
+        guard let entry = layers[id] else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        entry.shape.removeAllAnimations()
+        entry.shape.removeFromSuperlayer()
+        CATransaction.commit()
+        layers[id] = nil; fading.remove(id)
+    }
+
+    /// Every stroke off at once: this side's clear.
+    func removeAllNow() { layers.keys.forEach(removeNow(id:)) }
+
+    /// Every stroke fades over 200 ms: the peer's clear.
+    func fadeAll() {
+        for id in layers.keys {
+            fading.remove(id)
+            fade(id: id, duration: Motion.clear.duration, curve: Motion.clear.timingFunction)
+        }
+    }
+
+    /// The peer's undo (spec 11, M15): the stroke rewinds from its end to its start, a mask stroking its centre line
+    /// (wide enough for its widest point, its halo and a margin, round caps) drawing back over 180 ms on the strong
+    /// ease-in-out, the stroke fading over the last 80 ms. The mask sits on the stroke's layer, so it covers its frozen
+    /// pieces and its halo too. Under Reduce Motion a 150 ms fade.
+    func rewind(_ stroke: Stroke) {
+        guard let entry = layers[stroke.id] else { return }
+        guard !reduceMotion, stroke.points.count > 1 else {
+            fade(id: stroke.id, duration: Motion.reducedRewind.duration, curve: Motion.reducedRewind.timingFunction)
+            return
+        }
+        guard !fading.contains(stroke.id) else { return }
+        fading.insert(stroke.id)
+        let line = CGMutablePath()
+        let centre = InkGeometry.smooth(stroke.points, segments: RibbonOutline.segments)
+        for (i, v) in centre.enumerated() {
+            let p = CGPoint(x: CGFloat(v.x) * bounds.width, y: CGFloat(v.y) * bounds.height)
+            i == 0 ? line.move(to: p) : line.addLine(to: p)
+        }
+        let mask = CAShapeLayer()
+        mask.frame = bounds
+        mask.path = line
+        mask.fillColor = nil
+        mask.strokeColor = NSColor.black.cgColor
+        mask.lineWidth = CGFloat(stroke.baseWidth) * 1.2 + 2 * Self.haloRadius + 3
+        mask.lineCap = .round; mask.lineJoin = .round
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        entry.shape.mask = mask
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self, layers[stroke.id] === entry else { return }
+            entry.shape.removeFromSuperlayer(); layers[stroke.id] = nil; fading.remove(stroke.id)
+        }
+        let back = CABasicAnimation(keyPath: "strokeEnd")
+        back.fromValue = 1; back.toValue = 0
+        back.duration = Motion.rewind.duration
+        back.timingFunction = Motion.rewind.timingFunction
+        mask.strokeEnd = 0
+        mask.add(back, forKey: "rewind")
+        let out = CABasicAnimation(keyPath: "opacity")
+        out.fromValue = 1; out.toValue = 0
+        out.beginTime = entry.shape.convertTime(CACurrentMediaTime(), from: nil) + Motion.rewind.duration - Motion.rewindFade
+        out.duration = Motion.rewindFade
+        out.fillMode = .backwards
+        entry.shape.opacity = 0
+        entry.shape.add(out, forKey: "opacity")
+        CATransaction.commit()
+    }
 
     /// An opacity fade over `duration`, Reduce Motion or not: spec 11 takes away scale and the ring, and keeps fades as
     /// they are.
@@ -499,7 +587,25 @@ public final class InkCanvasView: NSView {
         CATransaction.commit()
     }
 
-    func hideRemoteCursor() { cursorDot.opacity = 0; cursorPill.opacity = 0; lastRemoteCursor = nil }
+    func hideRemoteCursor() { setCursorShown(false); lastRemoteCursor = nil }
+
+    /// The peer's dot and its name pill in over 120 ms or out over 200 ms, explicitly: not the layers' implicit 250 ms.
+    private func setCursorShown(_ shown: Bool) {
+        let target: Float = shown ? 1 : 0
+        guard cursorDot.opacity != target else { return }
+        let curve = shown ? Motion.cursorIn : Motion.cursorOut
+        for l in [cursorDot, cursorPill] {
+            let a = CABasicAnimation(keyPath: "opacity")
+            a.fromValue = l.presentation()?.opacity ?? l.opacity
+            a.toValue = target
+            a.duration = curve.duration
+            a.timingFunction = curve.timingFunction
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            l.opacity = target
+            CATransaction.commit()
+            l.add(a, forKey: "opacity")
+        }
+    }
 
     /// Test only: where the peer's dot is, and whether it shows.
     var remoteCursorForTesting: (position: CGPoint, visible: Bool) { (cursorDot.position, cursorDot.opacity > 0) }
@@ -508,8 +614,7 @@ public final class InkCanvasView: NSView {
     func showRemoteCursor(_ c: Cursor, name: String) {
         lastRemoteCursor = (c, name)
         placeRemoteCursor(c, name: name)
-        let target: Float = c.visible ? 1 : 0
-        if cursorDot.opacity != target { cursorDot.opacity = target; cursorPill.opacity = target }
+        setCursorShown(c.visible)
     }
 
     /// The dot and the pill where `c` says, at the canvas's current size.
@@ -619,5 +724,8 @@ public struct InkOverlay: NSViewRepresentable {
     public init(controller: InkController) { self.controller = controller }
     public func makeNSView(context: Context) -> InkCanvasView { InkCanvasView(controller: controller) }
     /// SwiftUI keeps the canvas when the model on screen changes: it draws for the controller it is handed now.
-    public func updateNSView(_ view: InkCanvasView, context: Context) { view.attach(to: controller) }
+    public func updateNSView(_ view: InkCanvasView, context: Context) {
+        view.attach(to: controller)
+        view.reduceMotion = context.environment.reducesMotion
+    }
 }

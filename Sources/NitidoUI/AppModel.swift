@@ -14,19 +14,44 @@ public final class AppModel {
     public var confirmStop = false
     /// The question on screen was asked by a quit (`requestQuit`): Stop quits once the session has stopped.
     @ObservationIgnored private var quitAsked = false
+    /// The direction of the change of screen under way, read by the screens' transitions (`show`).
+    @ObservationIgnored let navigation = NavigationBox()
+    /// Welcome has played its launch entrance: once per process, never on a return to Welcome (spec 11).
+    @ObservationIgnored public internal(set) var launchPlayed = false
+    /// A quit is stopping the session: the window has gone, and nothing starts again (`quit(after:)`).
+    @ObservationIgnored private(set) var quitting = false
     /// Makes the share and the viewer, quits the app, and brings the window back from the Dock; tests give their own.
     @ObservationIgnored private let makeShare: @MainActor () -> ShareModel
     @ObservationIgnored private let makeView: @MainActor () -> ViewModel
     @ObservationIgnored private let terminate: @MainActor () -> Void
     @ObservationIgnored private let revealWindow: @MainActor () -> Void
+    @ObservationIgnored private let hideWindows: @MainActor () -> Void
 
     public convenience init() {
         self.init(makeShare: { ShareModel() }, makeView: { ViewModel() }, terminate: { NSApplication.shared.terminate(nil) })
     }
 
     init(makeShare: @escaping @MainActor () -> ShareModel, makeView: @escaping @MainActor () -> ViewModel,
-         terminate: @escaping @MainActor () -> Void, revealWindow: @escaping @MainActor () -> Void = AppModel.revealMinimizedWindow) {
+         terminate: @escaping @MainActor () -> Void, revealWindow: @escaping @MainActor () -> Void = AppModel.revealMinimizedWindow,
+         hideWindows: @escaping @MainActor () -> Void = AppModel.orderOutWindows) {
         self.makeShare = makeShare; self.makeView = makeView; self.terminate = terminate; self.revealWindow = revealWindow
+        self.hideWindows = hideWindows
+    }
+
+    /// The app's windows off the screen, as the quit that follows would take them (`quit(after:)`).
+    static func orderOutWindows() {
+        NSApplication.shared.windows.filter(\.isVisible).forEach { $0.orderOut(nil) }
+    }
+
+    /// Changes the screen. With `animated`, inside an explicit transaction made where the pointer lands: the only kind
+    /// that reaches the window's frame, which grows over 300 ms or shrinks over 260 ms from its top left corner (spec 11,
+    /// probe 2026-10-12), while the screens' own transitions carry their timings (`ScreenTransition`). Without it, on a
+    /// keyboard path, everything takes its place at once, the window's size included.
+    func show(_ next: Screen, direction: NavigationDirection, animated: Bool) {
+        navigation.direction = direction
+        guard animated else { Instantly.run { screen = next }; return }
+        let curve = direction == .back ? Theme.Motion.windowShrink : Theme.Motion.windowGrow
+        withAnimation(curve.animation) { screen = next }
     }
 
     /// The app's window back from the Dock, if it is there: the stop question is a sheet on it (`RootView`), which a
@@ -39,8 +64,10 @@ public final class AppModel {
     /// does nothing more; after a failure it reuses the same model, which stops its old session first. A cancelled
     /// picker goes back to Welcome, or to the View screen while a viewer is open (`cancelShare`), and lets the model go.
     public func startShare() {
+        guard !quitting else { return }
         let excluded = NSApplication.shared.windows.filter { $0.windowNumber > 0 }.map { CGWindowID($0.windowNumber) }
-        screen = .share
+        // Rare enough to animate, ⌘N included; the picker opens at once, and the screen changes under it.
+        show(.share, direction: .forward, animated: true)
         if let share {
             share.start(excludingWindowIDs: excluded)
             return
@@ -50,7 +77,7 @@ public final class AppModel {
         // A cancelled picker drops the share alone instead of leaving an empty Share screen.
         model.onCancelled = { [weak self, weak model] in
             guard let self, let model, share === model else { return }
-            cancelShare()
+            cancelShare(animated: true)
         }
         model.start(excludingWindowIDs: excluded)
     }
@@ -59,33 +86,42 @@ public final class AppModel {
     /// pressed on the picker or a failure with a viewer open (`shareBack`): only the share goes. The window goes back
     /// where the person came from: the View screen while a viewer is open (on the Share screen a viewer can only be there
     /// because they came from View with ⌘N, since `stop` always lets the viewer go), Welcome otherwise. A viewer's link
-    /// stays as it was, connected or not.
-    func cancelShare() {
+    /// stays as it was, connected or not. `animated`: the picker's Cancel (the system's), a change of screen going back;
+    /// Esc instead takes it at once.
+    func cancelShare(animated: Bool) {
         let s = share
+        // The screen first, then the model: in between, the Share screen with no share would be an empty window.
+        show(view != nil ? .view : .welcome, direction: .back, animated: animated)
         share = nil
-        screen = view != nil ? .view : .welcome
         Task { await s?.stop() }
     }
 
     /// Shows the View screen. One viewer at a time: a viewer that exists already (browsing, connected or failed) is
     /// kept, so ⌘⇧V twice never leaves a replaced viewer's link open with nobody to close it.
     public func startView() {
+        guard !quitting else { return }
         if view == nil { view = makeView() }
-        screen = .view
+        show(.view, direction: .forward, animated: true)
     }
 
-    /// ⌘H, ⌘Z, ⌘⌫ and ⌘L act on the screen shown, never on a share running behind the View screen.
+    /// ⌘H, ⌘Z, ⌘⌫ and ⌘L act on the screen shown, never on a share running behind the View screen. All four are
+    /// keyboard actions, repeated often, so they never animate: the strip and the window's height change at once.
     public func toggleTelemetry() {
-        switch screen {
-        case .share: share?.showTelemetry.toggle()
-        case .view: view?.showTelemetry.toggle()
-        case .welcome: break
+        Instantly.run {
+            switch screen {
+            case .share: share?.showTelemetry.toggle()
+            case .view: view?.showTelemetry.toggle()
+            case .welcome: break
+            }
         }
     }
 
+    /// ⌘L: the codec loop on or off at once, its line with the first comparison frame (the switch flipped by the pointer
+    /// animates instead, `LoopbackPanel`).
     public func toggleLoopback() {
-        guard menu.canToggleLoop else { return }
-        share?.loopback.toggle()
+        guard menu.canToggleLoop, let share else { return }
+        share.loopToggledAt = nil
+        Instantly.run { share.loopback.toggle() }
     }
 
     public func undo() {
@@ -141,16 +177,55 @@ public final class AppModel {
 
     /// Detach before the await (Task 8 fix): a Share or View that lands while the old one is still stopping
     /// keeps its own model instead of being cleared when this stop resumes. Returns once the other Mac has been told
-    /// `bye` (or its link gave up), so a quit (`shouldQuitNow`) does not cut the goodbye off.
+    /// `bye` (or its link gave up). The window goes back to Welcome at once, the screen leaving fading as Welcome returns.
     public func stop() async {
+        show(.welcome, direction: .back, animated: true)
+        let (s, v) = detach()
+        await goodbye(s, v)
+    }
+
+    /// Stops what is live, back to Welcome, the change of screen made here, in the caller's update: with `animated` the
+    /// window closes in around the card (a click on the question's Stop); without it (Esc) everything at once. The screen
+    /// changes before the models go: in between, a screen without its model would be an empty window, which sized the
+    /// window to nothing (logged 2026-10-12).
+    private func stopNow(animated: Bool) {
+        show(.welcome, direction: .back, animated: animated)
+        let (s, v) = detach()
+        Task { await goodbye(s, v) }
+    }
+
+    /// The share and the viewer let go of, so nothing new can land on them.
+    private func detach() -> (ShareModel?, ViewModel?) {
         let s = share, v = view
         share = nil; view = nil
-        screen = .welcome
-        // Both goodbyes at once: one after the other, a slow viewer's bye (up to its link's one-second fallback) could
-        // push the share's past the quit's two-second deadline, and its viewer would read a dropped link and reconnect.
+        return (s, v)
+    }
+
+    /// Both goodbyes at once: one after the other, a slow viewer's bye (up to its link's one-second fallback) could push
+    /// the share's past the quit's two-second deadline, and its viewer would read a dropped link and reconnect.
+    private func goodbye(_ s: ShareModel?, _ v: ViewModel?) async {
         async let viewerDone: Void? = v?.disconnectAndWait()
         async let shareDone: Void? = s?.stop()
         _ = await (viewerDone, shareDone)
+    }
+
+    /// A quit with something live (spec 11, M20): the window goes at once, as the quit takes it, with no return to
+    /// Welcome first (which flashed for up to the deadline) and nothing animated; the goodbye finishes behind it, then
+    /// `quit` runs, or after `deadline` at most.
+    private func quit(after deadline: Duration, then quit: @escaping @MainActor () -> Void) {
+        quitting = true
+        hideWindows()
+        let (s, v) = detach()
+        let once = Once(quit)
+        Task {
+            await goodbye(s, v)
+            once.run()
+        }
+        Task {
+            try? await Task.sleep(for: deadline)   // never cancelled; a stop that finished first has quit already
+            if once.pending { log.error("The session did not stop within \(deadline, privacy: .public); quitting anyway") }
+            once.run()
+        }
     }
 
     /// A quit the person asked for: ⌘Q, ⌘W or the window's close button (the app quits with its only window,
@@ -174,19 +249,9 @@ public final class AppModel {
     /// The question's destructive button: stops what is live, then quits if a quit asked the question, once the other
     /// Mac has been told `bye`, or after `quitDeadline` at most.
     public func confirmedStop() {
-        guard quitAsked else { Task { await stop() }; return }
+        guard quitAsked else { stopNow(animated: true); return }
         quitAsked = false
-        let once = Once(terminate)
-        Task {
-            await stop()
-            once.run()
-        }
-        let deadline = quitDeadline
-        Task {
-            try? await Task.sleep(for: deadline)   // never cancelled; a stop that finished first has quit already
-            if once.pending { log.error("The session did not stop within \(deadline, privacy: .public); quitting anyway") }
-            once.run()
-        }
+        quit(after: quitDeadline, then: terminate)
     }
 
     /// The longest a quit waits for the session to stop (`confirmedStop`, `shouldQuitNow`).
@@ -202,16 +267,7 @@ public final class AppModel {
     public func shouldQuitNow(deadline: Duration = .seconds(2), then quit: @escaping @MainActor () -> Void) -> Bool {
         guard share != nil || view != nil else { return true }
         log.info("Quitting: stopping the live session first")
-        let once = Once(quit)
-        Task {
-            await stop()
-            once.run()
-        }
-        Task {
-            try? await Task.sleep(for: deadline)   // never cancelled; a stop that finished first has quit already
-            if once.pending { log.error("The session did not stop within \(deadline, privacy: .public); quitting anyway") }
-            once.run()
-        }
+        self.quit(after: deadline, then: quit)
         return false
     }
 
@@ -270,10 +326,10 @@ public final class AppModel {
     /// is being shared or a viewer is connected or reconnecting; with nothing live (a picker, the list of Macs) it stops
     /// at once.
     public func requestStop() {
-        if viewBack, let view { view.disconnect(); return }
-        if shareBack { cancelShare(); return }
+        if viewBack, let view { Instantly.run { view.disconnect() }; return }
+        if shareBack { cancelShare(animated: false); return }
         quitAsked = false
-        if sharing || viewing { ask() } else { Task { await stop() } }
+        if sharing || viewing { ask() } else { stopNow(animated: false) }
     }
 
     /// The one entry point for Esc: the invisible in-window button on the Share and View screens and the Stop
@@ -283,32 +339,56 @@ public final class AppModel {
 
 public struct RootView: View {
     @Bindable var app: AppModel
+    @ReducedMotion private var reduceMotion
     public init(app: AppModel) { self.app = app }
-    /// Screens come in with the entrance (opacity and scale 0.98) and go faster, opacity only (`screenTransition`).
+    /// Screens change only through `AppModel.show`, inside an explicit transaction where the pointer lands, or at once
+    /// on a keyboard path; never through an implicit animation on this container, which would never reach the window's
+    /// frame and would animate Esc. Anchored top left, as the window grows and shrinks from its top left corner, so a
+    /// screen fading out stays where it was while the window closes in.
     public var body: some View {
-        ZStack {
+        AnimatedArea(area: screenArea) { screens }
+            .environment(\.screenArrival, app.navigation.direction)
+            .background(KeepWindowOnScreen())
+            // The close button (and ⌘W, which presses it) asks first while something is live, as ⌘Q does.
+            .background(CloseButtonQuits { app.requestQuit() })
+            // Raised by `requestStop` (Esc, the Stop menu item) while something is live; it names what stops, and who
+            // will see it.
+            .confirmationDialog(app.stopQuestion, isPresented: $app.confirmStop) {
+                Button(app.stopAction, role: .destructive) { app.confirmedStop() }
+                Button("Cancel", role: .cancel) { app.cancelledStop() }
+            } message: {
+                Text(app.stopMessage)
+            }
+    }
+
+    /// The area the window is sized to for the screen shown: Welcome's card, or the picture area of a share or a viewer.
+    private var screenArea: CGSize {
+        switch app.screen {
+        case .welcome: return WelcomeView.size
+        case .share: return app.share.map(ShareView.area(for:)) ?? WelcomeView.size
+        case .view: return app.view.map(ViewView.area(for:)) ?? ViewView.canvas
+        }
+    }
+
+    private var screens: some View {
+        ZStack(alignment: .topLeading) {
             switch app.screen {
             case .welcome:
-                WelcomeView(onShare: { app.startShare() }, onView: { app.startView() }).screenTransition()
+                WelcomeView(entrance: app.launchPlayed ? .return : .launch,
+                            onShare: { app.startShare() }, onView: { app.startView() },
+                            onLaunch: { app.launchPlayed = true })
+                    .screenTransition(app.navigation, staged: false, reduceMotion: reduceMotion)
             case .share:
                 if let share = app.share {
-                    ShareView(model: share).background(EscapeStops { app.escape() }).screenTransition()
+                    ShareView(model: share).background(EscapeStops { app.escape() })
+                        .screenTransition(app.navigation, staged: true, reduceMotion: reduceMotion)
                 }
             case .view:
-                if let view = app.view { ViewView(model: view).background(EscapeStops { app.escape() }).screenTransition() }
+                if let view = app.view {
+                    ViewView(model: view).background(EscapeStops { app.escape() })
+                        .screenTransition(app.navigation, staged: true, reduceMotion: reduceMotion)
+                }
             }
-        }
-        .animation(Theme.Motion.enter, value: app.screen)
-        .background(KeepWindowOnScreen())
-        // The close button (and ⌘W, which presses it) asks first while something is live, as ⌘Q does.
-        .background(CloseButtonQuits { app.requestQuit() })
-        // Raised by `requestStop` (Esc, the Stop menu item) while something is live; it names what stops, and who
-        // will see it.
-        .confirmationDialog(app.stopQuestion, isPresented: $app.confirmStop) {
-            Button(app.stopAction, role: .destructive) { app.confirmedStop() }
-            Button("Cancel", role: .cancel) { app.cancelledStop() }
-        } message: {
-            Text(app.stopMessage)
         }
     }
 }

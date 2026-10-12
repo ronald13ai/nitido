@@ -2630,7 +2630,7 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(quits, 0)
         try await waitUntil("the app quits once the session has stopped", timeout: 3) { quits == 1 }
         XCTAssertNil(app.view)
-        XCTAssertEqual(app.screen, .welcome)
+        XCTAssertEqual(app.screen, .view, "a quit never goes back to Welcome first, which flashed until the quit (spec 11, M20)")
         var ended: NitidoLink.Link.State?
         for await s in sharerSide.states { ended = s }
         XCTAssertEqual(ended, .cancelled, "the sharer heard bye, not a dropped connection")

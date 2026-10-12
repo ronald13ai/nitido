@@ -17,6 +17,7 @@ extension ShareModel {
         // Frames the capture stream let go because the share had not taken the one before yet.
         for _ in 0..<(capture?.takeDroppedFrames() ?? 0) { telemetry.recordDrop(at: now) }
         snapshot = telemetry.snapshot(now: now)
+        stripSnapshot = figures.apply(snapshot)
     }
 
     /// A frame reached the screen (`FrameSink.onPresented`): it counts towards the display rate and the

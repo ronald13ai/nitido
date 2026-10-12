@@ -41,11 +41,12 @@ final class CodeEntryTests: XCTestCase {
         XCTAssertTrue(window.firstResponder is NSText, "the code field is focused: \(String(describing: window.firstResponder))")
     }
 
-    /// The sharer chip's dot is inactive while reconnecting, as the sharer's own panel shows its viewer.
+    /// The sharer chip's dot turns gold (and breathes) while reconnecting, as the sharer's own panel shows its viewer
+    /// (spec 11, amended 2026-10-12: one dot language, green connected, gold breathing reconnecting).
     @MainActor
-    func testTheSharerChipsDotIsInactiveWhileReconnecting() {
+    func testTheSharerChipsDotTurnsGoldWhileReconnecting() {
         let mac = Peer(id: "mac", name: "Mac", keyName: "Mac", endpoint: .hostPort(host: "127.0.0.1", port: 1))
         XCTAssertEqual(ViewView.sharerDot(.connected), Theme.Colors.success)
-        XCTAssertEqual(ViewView.sharerDot(.reconnecting(mac, attempt: 2)), Theme.Colors.muted)
+        XCTAssertEqual(ViewView.sharerDot(.reconnecting(mac, attempt: 2)), Theme.Colors.gold)
     }
 }

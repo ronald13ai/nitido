@@ -34,8 +34,19 @@ public final class ViewModel {
                 activity.end()
                 browser.usePeerToPeer(true)
             }
+            switch state {
+            case .connected: if pictureSince == nil { pictureSince = CACurrentMediaTime() }
+            case .reconnecting: break
+            case .failed: if !failedOverPicture { pictureSince = nil }
+            case .browsing, .enteringCode, .connecting: pictureSince = nil
+            }
         }
     }
+    /// When the picture first came on this connection (`CACurrentMediaTime`): the picture's entrance is staged from it
+    /// (spec 11, M7). A reconnect keeps it; leaving the picture clears it.
+    @ObservationIgnored public private(set) var pictureSince: CFTimeInterval?
+    /// When the link last became ready, the first time or after a reconnect (M9, M10).
+    @ObservationIgnored public private(set) var connectedSince: CFTimeInterval?
     /// Internal, not private, so a test can see whether it is held.
     @ObservationIgnored let activity = SessionActivity()
     /// The sharers discovery lists now. Internal to set, so a test can say what discovery says.
@@ -44,6 +55,9 @@ public final class ViewModel {
     @ObservationIgnored private let listed = OSAllocatedUnfairLock<[Peer]>(initialState: [])
     public var code = ""
     public private(set) var snapshot: Snapshot = .empty
+    /// The snapshot as the strip shows it (`FigureHysteresis`): one-unit moves held half a second, so nothing flickers.
+    public private(set) var stripSnapshot: Snapshot = .empty
+    @ObservationIgnored private var figures = FigureHysteresis()
     public private(set) var pixelSize: CGSize = .zero
     public private(set) var scale: CGFloat = 2
     public private(set) var sharerName = ""
@@ -166,6 +180,7 @@ public final class ViewModel {
                     // Each pong once: this loop runs twice as often as pings go out.
                     if let rtt = link?.lastRTTSample, rtt.at != rttRecordedAt { rttRecordedAt = rtt.at; telemetry.recordRTT(ms: rtt.ms, at: rtt.at) }
                     snapshot = telemetry.snapshot(now: now)
+                    stripSnapshot = figures.apply(snapshot)
                 }
             },
         ]
@@ -358,6 +373,7 @@ public final class ViewModel {
             // browse keeps the Wi-Fi radio hopping to AWDL's channels, which costs the link latency. Through the Bonjour
             // service the sharer may be reachable over AWDL alone, so discovery keeps it.
             let throughAddress = link?.readyThroughPublishedAddress ?? false
+            connectedSince = CACurrentMediaTime()
             state = .connected; connectionCount += 1; decodeFailures = 0; lastSeq = nil; reportedClockMismatch = false
             browser.usePeerToPeer(!throughAddress)
             awaitingKeyframe = true

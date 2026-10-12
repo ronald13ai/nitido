@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import NitidoCore
 
 /// One quiet row of figures (wrapped only when the picture is narrower than the row). Gold while a value is over
@@ -41,15 +42,22 @@ public struct TelemetryStrip: View {
     /// strip is the surface with a hairline along its top, one dark family with the canvas.
     public var body: some View {
         StripRows(spacing: 16, rowSpacing: 6, sparklineGap: 8) {
-            Figure(captureLabel, value: fps(snapshot.captureFPS), unit: "fps")
-            Figure(Label.display, value: fps(snapshot.displayFPS), unit: "fps")
-            Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", highlight: latencyHigh)
-            if showsCodec { Figure(Label.codec, value: ms(codecMs), unit: "ms") }
-            Figure(Label.rtt, value: ms(snapshot.rttMs), unit: "ms")
-            Figure(Label.bitrate, value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps")
+            Figure(captureLabel, value: fps(snapshot.captureFPS), unit: "fps", number: snapshot.captureFPS)
+            Figure(Label.display, value: fps(snapshot.displayFPS), unit: "fps", number: snapshot.displayFPS)
+            Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", number: snapshot.latencyMs, highlight: latencyHigh)
+            if showsCodec {
+                // In with the loop, 80 ms after the switch, as the figures after it make room; out faster.
+                Figure(Label.codec, value: ms(codecMs), unit: "ms", number: codecMs)
+                    .transition(AsymmetricTransition(insertion: .opacity.animation(TelemetryMotion.codecIn.animation(after: TelemetryMotion.codecDelay)),
+                                                     removal: .opacity.animation(TelemetryMotion.codecOut.animation)))
+            }
+            Figure(Label.rtt, value: ms(snapshot.rttMs), unit: "ms", number: snapshot.rttMs)
+            Figure(Label.bitrate, value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps",
+                   number: snapshot.bitrateMbps)
             // "·" until frames come, as every other figure says nothing yet.
             Figure(Label.dropped, value: snapshot.captureFPS > 0 || dropping ? "\(snapshot.droppedLastSecond)" : "·", unit: "/s",
-                   highlight: dropping)
+                   number: Double(snapshot.droppedLastSecond), highlight: dropping)
+            // A change of size or codec is structural, not a count: it crossfades.
             Figure(Label.size, value: resolution, unit: codec)
             Sparkline(values: snapshot.latencySeries).frame(width: 80, height: 18)
         }
@@ -62,22 +70,125 @@ public struct TelemetryStrip: View {
     private func ms(_ v: Double?) -> String { v.map { String(format: "%.0f", $0) } ?? "·" }
 }
 
+/// The strip's motion (spec 11, M11): figures that change like an instrument, not a slot machine.
+enum TelemetryMotion {
+    /// A count's numeric roll: up when it rises, down when it falls (`Theme.Motion.figure`, 180 ms).
+    static let roll = Theme.Motion.figure
+    /// Under Reduce Motion the roll is a 120 ms crossfade.
+    static let reducedRoll = Theme.Motion.Curve(Theme.Motion.easeOut, 0.12)
+    /// A structural change (the size, the codec, "·" to a first value) crossfades over 180 ms, ease.
+    static let crossfade = Theme.Motion.Curve(Theme.Motion.ease, 0.18)
+    /// Over a threshold: to gold over 120 ms on the strong ease-out; back to the text colour over 400 ms when it clears.
+    static let warn = Theme.Motion.enter.over(0.12)
+    static let clear = Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 0.4)
+    /// The codec figure with the loop: in over 180 ms after 80 ms, out over 100 ms.
+    static let codecIn = Theme.Motion.enter.over(0.18)
+    static let codecDelay: Double = 0.08
+    static let codecOut = Theme.Motion.exit.over(0.1)
+}
+
 private struct Figure: View {
     let label: String, value: String, unit: String
+    /// The figure's value as a number, for its numeric roll; nil for a figure that is not a count (the size).
+    var number: Double?
     var highlight = false
-    init(_ label: String, value: String, unit: String, highlight: Bool = false) {
-        self.label = label; self.value = value; self.unit = unit; self.highlight = highlight
+    @ReducedMotion private var reduceMotion
+    /// The figure's slot: as wide as the widest value it has shown since the strip appeared, so 9 → 10 ms moves the
+    /// figures after it once, never back and forth. A reference, grown as the body reads it.
+    @State private var slot = Slot()
+
+    final class Slot {
+        private(set) var characters = 0
+        /// The value before the current change, for the kind of transition it gets.
+        var previous: String?
+        /// The slot's width in characters once it holds `count`: it only grows.
+        func grow(to count: Int) -> Int { characters = max(characters, count); return characters }
     }
+
+    init(_ label: String, value: String, unit: String, number: Double? = nil, highlight: Bool = false) {
+        self.label = label; self.value = value; self.unit = unit; self.number = number; self.highlight = highlight
+    }
+
+    /// The width of one character of the figures' face (SF Mono, so every character is as wide).
+    static let advance: CGFloat = {
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+        return ceil(("0" as NSString).size(withAttributes: [.font: font]).width * 2) / 2
+    }()
+
     var body: some View {
+        let characters = slot.grow(to: value.count)
+        let counts = number != nil && value != "·" && slot.previous != "·" && slot.previous != nil
+        let roll = !reduceMotion && counts
         VStack(alignment: .leading, spacing: 1) {
             Text(label.uppercased()).font(Theme.Fonts.smallCaps(10)).foregroundStyle(Theme.Colors.secondaryText).tracking(1.2)
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(value).font(Theme.Fonts.figures(12)).foregroundStyle(highlight ? Theme.Colors.gold : Theme.Colors.text)
+                    .contentTransition(roll ? .numericText(value: number ?? 0) : .opacity)
+                    .animation((roll ? TelemetryMotion.roll : reduceMotion && counts ? TelemetryMotion.reducedRoll : TelemetryMotion.crossfade).animation,
+                               value: value)
+                    .animation((highlight ? TelemetryMotion.warn : TelemetryMotion.clear).animation, value: highlight)
+                    .frame(minWidth: CGFloat(characters) * Self.advance, alignment: .leading)
                 Text(unit).font(Theme.Fonts.figures(10)).foregroundStyle(Theme.Colors.secondaryText)
+                    .contentTransition(.opacity)
+                    .animation(TelemetryMotion.crossfade.animation, value: unit)
             }
         }
         // A figure wider than a whole row (a tiny picture) is truncated, never wrapped onto a second line.
         .lineLimit(1)
+        .onChange(of: value, initial: true) { _, new in slot.previous = new }
+    }
+}
+
+/// The strip's figures as shown (spec 11, M11): an instrument, not a slot machine. An integer figure (frames a second,
+/// milliseconds) that moves by one shows once it has held for two snapshots more (half a second), so 59/60 does not
+/// flicker; a move of two or more shows at once. The bitrate, to one decimal, the same with 0.3 Mbps. Dropped frames
+/// always show at once: that figure warns. A figure appearing or going ("·") shows at once. It never hides a move of
+/// two or more and never delays one by more than half a second; the logs and the measurements read the raw snapshot.
+struct FigureHysteresis {
+    /// One figure's gate.
+    struct Gate {
+        /// Moves this large show at once; smaller ones wait.
+        let big: Double
+        private(set) var shown: Double?
+        private var pending: Double?
+        private var held = 0
+
+        init(big: Double) { self.big = big }
+
+        /// Snapshots a small move must hold for, after the one it first appears in.
+        static let hold = 2
+
+        /// The value to show for `value` (already rounded as the strip shows it; nil or 0 for none).
+        mutating func pass(_ value: Double?) -> Double? {
+            guard let value, value != 0, let current = shown, current != 0 else {
+                shown = value; pending = nil; held = 0
+                return value
+            }
+            let move = abs(value - current)
+            if move < 1e-9 { pending = nil; held = 0; return current }
+            if move >= big - 1e-9 { shown = value; pending = nil; held = 0; return value }
+            if let pending, abs(pending - value) < 1e-9 {
+                held += 1
+                if held >= Self.hold { shown = value; self.pending = nil; held = 0; return value }
+            } else {
+                pending = value; held = 0
+            }
+            return current
+        }
+    }
+
+    private var capture = Gate(big: 2), display = Gate(big: 2), latency = Gate(big: 2), rtt = Gate(big: 2)
+    private var bitrate = Gate(big: 0.3)
+
+    /// `raw` as the strip shows it.
+    mutating func apply(_ raw: Snapshot) -> Snapshot {
+        var shown = raw
+        shown.captureFPS = capture.pass(raw.captureFPS.rounded()) ?? 0
+        shown.displayFPS = display.pass(raw.displayFPS.rounded()) ?? 0
+        shown.latencyMs = latency.pass(raw.latencyMs.map { $0.rounded() })
+        shown.rttMs = rtt.pass(raw.rttMs.map { $0.rounded() })
+        shown.bitrateMbps = bitrate.pass((raw.bitrateMbps * 10).rounded() / 10) ?? 0
+        return shown
     }
 }
 

@@ -48,44 +48,54 @@ public struct SolidCard<Content: View>: View {
     let content: Content
     public init(@ViewBuilder content: () -> Content) { self.content = content() }
     public var body: some View {
+        content.background(SolidCardSurface())
+    }
+}
+
+/// The solid card's surface alone: the fill, the highlight along its top edge and the hairline, one piece, so a card that
+/// enters brings all three together (`WelcomeView`).
+struct SolidCardSurface: View {
+    var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-        content
-            .background(shape.fill(Theme.Colors.surface))
+        shape.fill(Theme.Colors.surface)
             .overlay(
                 shape.fill(LinearGradient(stops: [.init(color: Theme.Colors.text.opacity(0.06), location: 0),
                                                   .init(color: .clear, location: 0.4)],
                                           startPoint: .top, endPoint: .bottom))
-                    .allowsHitTesting(false)
             )
             .overlay(shape.strokeBorder(Theme.Colors.hairline, lineWidth: 1))
+            .allowsHitTesting(false)
     }
 }
 
-/// Every pressable element answers the press (scale 0.97 over 120 ms, opacity only under Reduce Motion) and the pointer
-/// (a 4 % lift in brightness over 120 ms on the same curve). `held` keeps the pressed look on while ⏎ runs the button
-/// (`GoldButton`).
+/// Every pressable element answers the press: scale 0.97 over 120 ms on the strong ease-out, and back on the same curve
+/// (0.985 on a row wider than 300 pt, `pressScale`, the same 4 pt of travel), with an opacity dip that stays under Reduce
+/// Motion. The pointer lifts its brightness 4 % over 160 ms, ease: a hover is a colour change, the pointer's alone, never
+/// keyboard focus's. `held` keeps the pressed look on while ⏎ runs the button (`GoldButton`).
 public struct PressFeedback: ButtonStyle {
     var held = false
+    var pressScale: CGFloat = Theme.Motion.pressScale
     public init() {}
-    init(held: Bool) { self.held = held }
+    init(held: Bool = false, pressScale: CGFloat = Theme.Motion.pressScale) { self.held = held; self.pressScale = pressScale }
     public func makeBody(configuration: Configuration) -> some View {
-        PressBody(label: configuration.label, pressed: configuration.isPressed || held)
+        PressBody(label: configuration.label, pressed: configuration.isPressed || held, pressScale: pressScale)
     }
 }
 
 private struct PressBody<Label: View>: View {
     let label: Label
     let pressed: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let pressScale: CGFloat
+    @ReducedMotion private var reduceMotion
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovered = false
     var body: some View {
         label
-            .brightness(hovered && isEnabled && !pressed ? 0.04 : 0)
-            .scaleEffect(pressed && !reduceMotion ? 0.97 : 1)
-            .opacity(pressed ? 0.88 : 1)
-            .animation(Theme.Motion.press, value: pressed)
-            .animation(Theme.Motion.hover, value: hovered)
+            .brightness(hovered && isEnabled && !pressed ? Theme.Motion.hoverBrightness : 0)
+            .animation(Theme.Motion.hover.animation, value: hovered)
+            .scaleEffect(pressed && !reduceMotion ? pressScale : 1)
+            .opacity(pressed ? Theme.Motion.pressOpacity : 1)
+            .animation(Theme.Motion.press.animation, value: pressed)
             .onHover { hovered = $0 }
     }
 }
@@ -131,7 +141,7 @@ public struct GoldButton: View {
         guard isEnabled, !held else { return }
         held = true
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
+            try? await Task.sleep(for: .seconds(Theme.Motion.press.duration))
             held = false
             action()
         }
@@ -169,10 +179,11 @@ struct DefaultAction: View {
 }
 
 /// The connect moment (spec 11): a thin gold ring draws itself once around the peer's row or chip per connection
-/// (`trigger`, a model's connection count) with the connect spring, then over 0.6 s eases down to a 1 pt hairline,
-/// which is where the spring's bounce shows: as a settle. The model keeps the last connection it played for
-/// (`shownFor`), so a screen shown again draws it at rest instead of playing it again. While the link is reconnecting the
-/// ring fades out in 150 ms, so the badge never says connected when it is not. Under Reduce Motion there is no ring.
+/// (`trigger`, a model's connection count) with the connect spring, `delay` after the connection so it follows the row,
+/// the dot and the name in, then over 0.6 s eases down to a 1 pt hairline, which is where the spring's bounce shows: as a
+/// settle. The model keeps the last connection it played for (`shownFor`), so a screen shown again draws it at rest
+/// instead of playing it again. While the link is reconnecting the ring fades out in 150 ms, so the badge never says
+/// connected when it is not. Under Reduce Motion there is no ring.
 public struct ConnectRing: View {
     /// How the ring starts when it appears or its trigger changes.
     enum Start: Equatable {
@@ -189,22 +200,27 @@ public struct ConnectRing: View {
         return trigger > shownFor ? .animate : .drawn
     }
 
+    /// How fast the ring fades while the link reconnects.
+    nonisolated static let fadeOut = Theme.Motion.Curve(Theme.Motion.easeOut, 0.15)
+
     let trigger: Int
     @Binding var shownFor: Int
     let reconnecting: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let delay: Double
+    @ReducedMotion private var reduceMotion
     @State private var progress: CGFloat = 0
     @State private var settled = false
-    public init(trigger: Int, shownFor: Binding<Int>, reconnecting: Bool = false) {
-        self.trigger = trigger; _shownFor = shownFor; self.reconnecting = reconnecting
+    public init(trigger: Int, shownFor: Binding<Int>, reconnecting: Bool = false, delay: Double = 0) {
+        self.trigger = trigger; _shownFor = shownFor; self.reconnecting = reconnecting; self.delay = delay
     }
     public var body: some View {
         Capsule(style: .continuous).inset(by: -4).trim(from: 0, to: progress)
             .stroke(settled ? Theme.Colors.hairline : Theme.Colors.gold,
                     style: StrokeStyle(lineWidth: settled ? 1 : 1.5, lineCap: .round))
             .opacity(reduceMotion || reconnecting ? 0 : 1)
-            .animation(.easeOut(duration: 0.15), value: reconnecting)
+            .animation(Self.fadeOut.animation, value: reconnecting)
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
             .onAppear { begin() }
             .onChange(of: trigger) { _, _ in begin() }
     }
@@ -213,43 +229,21 @@ public struct ConnectRing: View {
         case .hidden: progress = 0
         case .drawn: progress = 1; settled = true
         case .animate:
-            progress = 0; settled = false
-            withAnimation(Theme.Motion.connect) { progress = 1 } completion: {
-                withAnimation(Theme.Motion.settle) { settled = true }
+            var reset = Transaction(animation: nil); reset.disablesAnimations = true
+            withTransaction(reset) { progress = 0; settled = false }
+            withAnimation(Theme.Motion.connect.animation(after: delay)) { progress = 1 } completion: {
+                withAnimation(Theme.Motion.settle.animation) { settled = true }
             }
         }
         shownFor = trigger
     }
 }
 
-/// Entrance: opacity 0 and scale 0.96 to rest, strong ease-out, optional delay for staggering.
-public struct Appear: ViewModifier {
-    let delay: Double
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var shown = false
-    public func body(content: Content) -> some View {
-        content.opacity(shown ? 1 : 0).scaleEffect(shown || reduceMotion ? 1 : 0.96)
-            .onAppear { withAnimation(Theme.Motion.enter.delay(delay)) { shown = true } }
-    }
-}
-public extension View { func appear(delay: Double = 0) -> some View { modifier(Appear(delay: delay)) } }
-
-/// A screen coming in and going: in with the entrance (opacity and scale 0.98, the scale left out under Reduce Motion),
-/// out faster, opacity only over 120 ms (spec 11: exits are faster than entrances).
-public struct ScreenTransition: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    public func body(content: Content) -> some View {
-        content.transition(.asymmetric(
-            insertion: reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)),
-            removal: .opacity.animation(Theme.Motion.exit)))
-    }
-}
-public extension View { func screenTransition() -> some View { modifier(ScreenTransition()) } }
-
-/// One short horizontal shake (180 ms) when `trigger` changes; nothing under Reduce Motion.
+/// One short horizontal shake (x −6, +6, −3, 0 pt, four linear segments of 45 ms) when `trigger` changes; nothing
+/// under Reduce Motion.
 public struct Shake: ViewModifier {
     let trigger: Int
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
     @State private var offset: CGFloat = 0
     public func body(content: Content) -> some View {
         content.offset(x: offset).onChange(of: trigger) { _, _ in
@@ -324,4 +318,13 @@ public struct MessageCard: View {
             QuietButton(action.title, action: action.run)
         }
     }
+}
+
+/// A failure card's moment (spec 11, M16). Over a picture the dim comes first, to 55 % over 180 ms, and the card 40 ms
+/// later from 0.96 over 220 ms: it is modal, so it scales from its centre. Going, the card recedes to 0.98 over 120 ms
+/// and the dim lifts over 160 ms. The symbol and the buttons come with the card: a failure does not perform.
+enum MessageMotion {
+    static let dimIn = Theme.Motion.enter.over(0.18)
+    static let dimOut = Theme.Motion.Curve(Theme.Motion.easeOut, 0.16)
+    static let cardDelay: Double = 0.04
 }

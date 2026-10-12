@@ -3,6 +3,7 @@
 // viewer sends back (`handleIncoming`), and ending them all when the share stops sending (`endViewers`).
 
 import Foundation
+import QuartzCore
 import NitidoCore
 import NitidoLink
 import os
@@ -158,7 +159,7 @@ extension ShareModel {
             if link != nil { ink.endRemoteStrokes() }   // the viewer it replaces sends no more points
             link?.close(reason: ByeReason.replaced)
             linkTasks.forEach { $0.cancel() }
-            link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1
+            link = l; viewerName = l.peerHello?.name; isSending = true; connectionCount += 1; viewerSince = CACurrentMediaTime()
             viewerReconnecting = false; reconnectGraceToken &+= 1; viewerNotice = nil
             // The hello the link sent was the listener's when the connection came in: a resize since (its handshake can
             // straddle one) would leave this viewer with the old size and scale. The current ones are said again.
