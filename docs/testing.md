@@ -133,7 +133,7 @@ Added on 2026-10-11 for what the journey review found; on the two Macs unless an
 Steps 1 and 2 on the build that will ship, during the two-Mac session; its commit goes in the Build column of the README's Measured table.
 
 1. Read every figure in the README's Measured table from the strip again: the two-Mac rows (the 2026-10-09 figures predate the fixes made after the evening run), the codec loop at 20 Mbps on the same 1346×878 window, and raw capture to display with the whole 3024×1964 display shared. Delete a row you cannot measure.
-2. Capture `docs/screenshots/01-welcome.png`, `02-share-loopback.png`, `03-viewer.png` and `04-strip.png`, and record a 20-second GIF of the codec loop as `docs/screenshots/loop.gif`. Delete the README's link to any you skip, then delete `docs/screenshots/.gitkeep`.
+2. Capture `docs/screenshots/01-welcome.png`, `02-share-loopback.png` and `04-strip.png`; `03-viewer.png` and `05-pairing.png` come from the render gallery (`NITIDO_RENDER=1 swift test --filter RenderGallery/testWindowGallery`), and the 20-second GIF `docs/screenshots/loop.gif` from the README's reel (`NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=<dir> swift test --filter RenderGallery/testReadmeReel` writes `<dir>/clips/loop.gif`). Delete the README's link to any you skip, then delete `docs/screenshots/.gitkeep`.
 3. Run `scripts/check-readme.sh`: it passes once no "(fill in)" is left, every image the README shows is tracked by git, and there is no em dash.
 4. Merge build/v0.1 into main, create github.com/ronald13ai/nitido, push main and make it public; check that the README's clone URL and releases link open.
-5. Run `scripts/bundle.sh` and attach `build/Nitido-0.1-macOS15.zip` to a v0.1 release on GitHub.
+5. Run `scripts/bundle.sh` and attach `build/Nitido-<version>-macOS15.zip` (the version is `VERSION` in the script) to the release on GitHub.

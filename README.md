@@ -1,10 +1,26 @@
 <!-- Before publishing: work through "Before publishing" in docs/testing.md; its step 3, scripts/check-readme.sh, must pass before the repository goes public. -->
 
-# Nítido
+<p align="center">
+  <img src="docs/screenshots/icon.png" width="128" height="128" alt="Nítido's icon: a thin gold italic N on a dark rounded square">
+</p>
+
+<h1 align="center">Nítido</h1>
+
+<p align="center"><em>Share a screen to another Mac. Crisp text, measured latency, ink on top.</em></p>
+
+<p align="center">
+  <a href="#try-it-in-a-minute"><img src="https://img.shields.io/badge/macOS-15%2B-c9a86a?style=flat-square&amp;logo=apple&amp;logoColor=white&amp;labelColor=0e1015" alt="macOS 15 or later"></a>
+  <a href="#how-it-works"><img src="https://img.shields.io/badge/Swift-6.2-c9a86a?style=flat-square&amp;logo=swift&amp;logoColor=white&amp;labelColor=0e1015" alt="Swift 6.2"></a>
+  <a href="#testing"><img src="https://img.shields.io/badge/tests-443%20passing-62c37e?style=flat-square&amp;labelColor=0e1015" alt="443 tests passing"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-c9a86a?style=flat-square&amp;labelColor=0e1015" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/loop.gif" width="900" alt="Twenty seconds of Nítido: the launch, a press on Share, the picture arriving with its code, a viewer pairing and its gold ring, a stroke from each side, the codec loop switched on and its divider dragged, the strokes fading, the quality lowered, and Stop back to Welcome">
+</p>
+<p align="center"><sub>One take through the render harness: the app's own screens and models, a synthetic desktop shared to a viewer over the loopback link, an arrow drawn where the harness clicks. Every value is under <a href="#motion">Motion</a>.</sub></p>
 
 A native macOS app that shares a window or a screen to another Mac on the local network, with crisp text, measured latency and ink on top. Swift 6.2, ScreenCaptureKit, VideoToolbox, Network.framework and Metal; no third-party code.
-
-![The viewer paired over loopback, with ink from both sides and the sharer's pointer (captured from the real window through the render harness over a synthetic desktop)](docs/screenshots/03-viewer.png)
 
 I built it in a week in October 2026, as a prototype of the core loop of a pair-programming tool: capture, encode, send, decode and draw a screen, and measure each step.
 
@@ -17,19 +33,49 @@ I built it in a week in October 2026, as a prototype of the core loop of a pair-
 - Shows the numbers in a strip under the picture: capture or received fps, display fps, capture to display (one Mac) or glass to glass (two Macs), codec time, RTT, bitrate, drops, size and codec.
 - Survives a lost network: both sides say Reconnecting, the viewer retries with backoff and recovers with a keyframe, and the bitrate follows the send backlog and the RTT.
 
-![The codec loop at the quality slider's bitrates, 20 seconds](docs/screenshots/loop.gif)
+## Screens
+
+| <img src="docs/screenshots/01-welcome.png" width="380" alt="Welcome"> | <img src="docs/screenshots/05-pairing.png" width="380" alt="The viewer typing the sharer's 4-digit code (captured from the real window through the render harness)"> |
+|:---:|:---:|
+| **Welcome.** Share this Mac, or view another. | **Pairing.** The viewer types the 4-digit code the sharer shows. |
+| <img src="docs/screenshots/02-share-loopback.png" width="380" alt="The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it"> | <img src="docs/screenshots/03-viewer.png" width="380" alt="The viewer paired over loopback, with ink from both sides and the sharer's pointer (captured from the real window through the render harness over a synthetic desktop)"> |
+| **The codec loop.** Raw capture left of the divider, HEVC at the slider's bitrate right of it. | **The viewer.** Ink from both sides and the sharer's pointer (render harness, synthetic desktop). |
+
+<p align="center"><img src="docs/screenshots/04-strip.png" width="820" alt="The telemetry strip"></p>
+<p align="center"><sub><b>The telemetry strip.</b> Every figure under the picture, four times a second; the Measured table below was read from it.</sub></p>
+
+## Motion
+
+Every value here is a token in `Theme.Motion` ([`Theme.swift`](Sources/NitidoUI/Theme.swift)) or a constant beside the view it moves, and section 11 of the design spec reads the same numbers. Entrances run on `cubic-bezier(0.23, 1, 0.32, 1)`, movement on screen on `cubic-bezier(0.77, 0, 0.175, 1)`, exits are faster than entrances, and springs are kept for what feels alive (the connect ring) and what a drag can interrupt (the divider's dot).
+
+| Moment | What moves | Values |
+|---|---|---|
+| Launch | The warmth rises, the card settles, the wordmark comes into focus, one gold glint crosses it | Warmth 480 ms; card from 0.98; wordmark from an 8 pt blur over 240 ms at 60 ms, the rest 40 ms apart; glint 760 ms from 440 ms on the system ease-in-out, once per launch |
+| Press | Every button | Scale 0.97 over 120 ms on the strong ease-out (0.985 on wide rows), back the same way; ⏎ holds the gold button pressed 120 ms before it acts |
+| Entrances | Buttons, chips, cards, panels, rows | From opacity 0 and scale 0.96 (never from 0) over 220 ms; wide rows rise 6 pt instead; siblings 40 ms apart; exits 120 ms, ease-out |
+| The picture | The window grows from its top left corner; a cover over the picture fades | 300 ms growing, 260 ms shrinking; cover 220 ms, 40 ms after the first frame is on screen; the picture never scales, so its text is sharp from its first frame |
+| After the picture | Strip, pairing panel, codec loop panel, code, notices | At 160, 200, 240, 280 and 320 ms |
+| The code | Digit by digit | 40 ms apart, each rising 4 pt over 160 ms and settling from the gold highlight to gold over 360 ms |
+| A viewer connects | The panel grows, the row arrives, a thin gold ring draws round it | Panel 240 ms; ring on a spring (duration 0.5, bounce 0.2), then down to a 1 pt hairline over 0.6 s; status dot on a spring (0.35, bounce 0.3) |
+| Codec loop on | The panel unfolds, a light runs up the divider | Panel 240 ms, its rows 40 ms apart; light 220 ms at 40 ms; the strip's codec figure fades in at 80 ms over 180 ms |
+| The divider | The line follows the pointer 1:1; the dot answers the grab | Dot to 1.3 on a spring (0.25, bounce 0.2) while held, 1.12 within 20 pt |
+| The strip | Figures roll | 180 ms; a one-unit change waits half a second; each figure keeps the widest width it has shown, so nothing in the row jitters |
+| Ink | Strokes fade | 4 s after the last point, over 600 ms; the other Mac sees an undo rewind over 180 ms |
+| Reconnecting | The status dot breathes, the last frame dims | 1.2 s each way; 20 % |
+
+Keyboard actions repeated often (⌘H, ⌘L, ⌘Z, ⌘⌫, Esc) change things at once, the window's size included. Loops over a live picture run on Core Animation, so they never tick the main thread. Reduce Motion takes away every scale, rise and slide, the window's animated resize, the ring, the shake, the glint and the breathing, and keeps the fades at the same timings. The GIF at the top is `NITIDO_RENDER=1 NITIDO_README=1 swift test --filter RenderGallery/testReadmeReel`.
 
 ## Try it in a minute
 
 Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon only.
 
-**From the zip.** Download `Nitido-0.1-macOS15.zip` from the [releases page](https://github.com/ronald13ai/nitido/releases), unzip it and open `Nítido.app`. It is signed for development, not notarized, so macOS blocks it the first time: open System Settings, Privacy & Security, and click Open Anyway. (Since macOS 15, Control-click and Open no longer gets past this.) In Terminal, `xattr -dr com.apple.quarantine Nítido.app` does the same.
+**From the zip.** Download `Nitido-0.2-macOS15.zip` from the [releases page](https://github.com/ronald13ai/nitido/releases), unzip it and open `Nítido.app`. It is signed for development, not notarized, so macOS blocks it the first time: open System Settings, Privacy & Security, and click Open Anyway. (Since macOS 15, Control-click and Open no longer gets past this.) In Terminal, `xattr -dr com.apple.quarantine Nítido.app` does the same.
 
 **From source.** You need Xcode 26 (Swift 6.2) and an Apple Development signing identity: in Xcode, Settings, Accounts, Manage Certificates makes one with a free Apple ID.
 
 ```bash
 git clone https://github.com/ronald13ai/nitido && cd nitido
-swift test                            # 443 tests (and 8 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
+swift test                            # 443 tests (and 9 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
 swift scripts/make-icon.swift build   # optional: the app icon
 scripts/bundle.sh                     # release build: build/Nítido.app, signed, and its zip
 open build/Nítido.app
@@ -40,8 +86,6 @@ macOS keeps a Screen Recording grant only for a signed bundle, so share from the
 **On one Mac.** Click Share and pick a window. macOS asks for Screen Recording the first time; allow it, and choose Quit & Reopen if it offers that. Turn on the Codec loop switch (or press ⌘L) and drag the slider and the divider. For the network path, start a second copy with `open -n build/Nítido.app` (or `open -n Nítido.app` from the zip), click View in it (⌘⇧V), pick this Mac and type the code the first copy shows. The two copies talk over the same TLS link two Macs use.
 
 **On two Macs.** Put both on the same network. Share on one, View on the other, pick the sharer by name and type its code. If macOS asks to let Nítido find devices on your local network, allow it on both Macs.
-
-![Welcome](docs/screenshots/01-welcome.png)
 
 ## Measured
 
@@ -62,10 +106,6 @@ Read from the telemetry strip on 2026-10-09. Sharer: MacBook Pro 14-inch, Apple 
 - The spec aimed for capture to display under 20 ms through the codec loop. I measured 34 ms there at 2 Mbps, and 21 ms without the codec. Glass to glass met its target of under 100 ms.
 - At 2 Mbps the encoder kept under the rate (1.5 Mbps real), and still text stayed sharp. That was measured on build 168b191, under the earlier hard cap of 1.5 times the rate per second; the cap is now twice the rate over 2 s (spec 7), so the 2 Mbps row is to be measured again. Whether text stays sharp while it scrolls is still to be checked.
 - Both two-Mac runs came before the fixes made after the evening run (the backlog rule, the keyframe limit, the pacer's cadence check). They were not measured again on the final build: the second Mac was not available on 2026-10-11, when the one-Mac rows above were taken. The first run (168b191) read 46 ms while the Air showed 33 of 58 fps (bug 2 below).
-
-![The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it](docs/screenshots/02-share-loopback.png)
-
-![The telemetry strip](docs/screenshots/04-strip.png)
 
 ## How it works
 
@@ -135,7 +175,7 @@ So the 4-digit code is for a network you trust (home, office), not public Wi-Fi.
 
 ## Testing
 
-`swift test` runs 443 XCTest tests, with no failures at the current commit (about three and a half minutes on an M5 once built); 8 more, the render gallery, its motion reel and the soak tests, run only with NITIDO_RENDER=1 (and NITIDO_MOTION=1 for the reel, which records every moment of the motion and cuts it into contact sheets) or NITIDO_SOAK=1.
+`swift test` runs 443 XCTest tests, with no failures at the current commit (about three and a half minutes on an M5 once built); 9 more, the render gallery, its motion reel, the README's reel and the soak tests, run only with NITIDO_RENDER=1 (and NITIDO_MOTION=1 for the motion reel, which records every moment of the motion and cuts it into contact sheets, or NITIDO_README=1 for the README's GIF, one 20 s take through the moments) or NITIDO_SOAK=1.
 
 - `NitidoCore` (60): wire round-trips and decoding fed byte by byte or a megabyte at a time, telemetry percentiles and the sparkline's time buckets, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
 - `NitidoCodec` (25): encode and decode loops on real VideoToolbox sessions, the warm-up that keeps the first session off the main thread, odd sizes kept 1:1, H.264's size limit, keyframe requests, the decoder's skip rule, colour tags, failure reporting and the rate cap on a dense scrolling page.
