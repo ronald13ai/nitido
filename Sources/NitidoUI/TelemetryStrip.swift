@@ -276,9 +276,10 @@ final class SparklineView: NSView {
         guard newest != shownNewest, !buckets.isEmpty else { return }
         let w = max(bounds.width, 1), h = max(bounds.height, 1)
         let bucketWidth = w / CGFloat(Self.visible - 1)
-        let advance = sliding ? shownNewest.map { min(max(newest - $0, 0), buckets.count - Self.visible) } ?? 0 : 0
+        // Never negative, nor more buckets than there are: fewer buckets than the width shows slide nothing.
+        let advance = sliding ? shownNewest.map { max(0, min(newest - $0, buckets.count - Self.visible)) } ?? 0 : 0
         shownNewest = newest
-        let shownValues = buckets.suffix(Self.visible + advance).compactMap { $0 }
+        let shownValues = buckets.suffix(min(Self.visible + advance, buckets.count)).compactMap { $0 }
         let top = max(120, shownValues.max() ?? 0)
         // At no translation the bucket the line was last drawn up to sits at the right edge, where the last slide left it;
         // the line then slides left by the buckets come since.

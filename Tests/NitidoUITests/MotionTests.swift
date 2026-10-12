@@ -378,6 +378,21 @@ final class SparklineMotionTests: XCTestCase {
         XCTAssertNil(slider.animation(forKey: "slide"), "Reduce Motion: a step")
         XCTAssertEqual(SparklineView.slide(advance: 6, bucketWidth: 2).duration, 0.3, accuracy: 1e-9)
     }
+
+    /// Fewer buckets than the sparkline shows across its width (a constant changed one day) draw at rest: the advance
+    /// is never negative, which moved the line right by the buckets missing.
+    @MainActor
+    func testFewerBucketsThanTheWidthSlideNothing() throws {
+        let view = SparklineView(frame: CGRect(x: 0, y: 0, width: 78, height: 18))
+        view.layout()
+        let buckets: [Double?] = (0..<10).map { 30 + Double($0) }
+        view.update(buckets: buckets, newest: 1000, sliding: true)
+        view.update(buckets: buckets, newest: 1005, sliding: true)
+        let slider = try XCTUnwrap(view.layer?.sublayers?.last)
+        XCTAssertNil(slider.animation(forKey: "slide"))
+        XCTAssertEqual(slider.transform.m41, 0, "no translation either way")
+        XCTAssertEqual(view.shownNewest, 1005)
+    }
 }
 
 final class NavigationMotionTests: XCTestCase {
