@@ -232,9 +232,6 @@ public final class VideoView: NSView {
 }
 
 extension VideoView {
-    /// What `frame` shows before it is fitted to the drawable, with its origin at zero: the picture (`image(of:size:)`),
-    /// or with `compareWith` the codec loop's comparison, the raw frame left of the divider, the decoded one right of it,
-    /// and the 2 px gold line between them.
     /// What a drawable of `target` pixels shows for `frame`: its picture 1:1 when it fits, scaled down with Lanczos when
     /// it does not, never up, centred at whole pixels on the background colour.
     nonisolated static func composed(_ frame: FramePacer.Frame, in target: CGSize) -> CIImage {
@@ -255,6 +252,9 @@ extension VideoView {
         return image.composited(over: background)
     }
 
+    /// What `frame` shows before it is fitted to the drawable, with its origin at zero: the picture (`image(of:size:)`),
+    /// or with `compareWith` the codec loop's comparison, the raw frame left of the divider, the decoded one right of it,
+    /// and the 2 px gold line between them.
     nonisolated static func picture(of frame: FramePacer.Frame) -> CIImage {
         let image = Self.image(of: frame.pixelBuffer, size: frame.pictureSize)
         guard let raw = frame.compareWith else { return image }
