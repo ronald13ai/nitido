@@ -438,7 +438,7 @@ struct LoopbackPanel: View {
                     .exitTransition(exit: Unfold.rowsOut, reduceMotion: reduceMotion)
                     // Whole Mbps without `step`, which would draw 59 tick marks under the track.
                     Slider(value: Binding(get: { model.qualityMbps },
-                                          set: { let v = $0.rounded(); if v != model.qualityMbps { model.qualityMbps = v } }),
+                                          set: { let v = $0.rounded(); if v != model.qualityMbps { arrive(at: v); model.qualityMbps = v } }),
                            in: ShareModel.qualityRange)
                         .tint(Theme.Colors.gold).controlSize(.small)
                         .entrance(.rise(4), delay: Unfold.rows + Theme.Motion.stagger, curve: Unfold.row, since: since, enabled: since != nil)
@@ -453,6 +453,17 @@ struct LoopbackPanel: View {
             .frame(width: model.loopback ? Self.width - 32 : nil, alignment: .leading)
             .padding(.horizontal, 16).padding(.vertical, 12)
         }
+    }
+
+    /// The slider reaching an end (2 or 60 Mbps) taps the trackpad once (spec 11, M14), so the hand feels where the range
+    /// stops; a step within the range does not.
+    private func arrive(at value: Double) {
+        guard Self.reachesAnEnd(from: model.qualityMbps, to: value) else { return }
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+    }
+
+    nonisolated static func reachesAnEnd(from old: Double, to new: Double) -> Bool {
+        new != old && (new == ShareModel.qualityRange.lowerBound || new == ShareModel.qualityRange.upperBound)
     }
 
     /// The switch flipped by the pointer: inside an explicit transaction, so the panel unfolds (and the strip makes room
@@ -542,6 +553,10 @@ struct DividerHandle: View {
                         .presence(.scale(Theme.Motion.enterScale, anchor: .leading), outScale: Theme.Motion.enterScale,
                                   enter: Labels.back, reduceMotion: reduceMotion)
                 }
+                // Turned on by the pointer: a light runs up the line from its handle as the comparison opens.
+                if let since, !reduceMotion, CACurrentMediaTime() - since < DividerGlint.end {
+                    DividerGlint(since: since, rise: y).position(x: x, y: y / 2)
+                }
                 Circle().fill(Theme.Colors.gold).frame(width: 12, height: 12)
                     .overlay(Circle().strokeBorder(Theme.Colors.background, lineWidth: 2).padding(-2))
                     .scaleEffect(reduceMotion ? 1 : dragging ? 1.3 : near ? 1.12 : 1)
@@ -563,6 +578,49 @@ struct DividerHandle: View {
             .lineLimit(1).fixedSize()
             .padding(.horizontal, 8).padding(.vertical, 4)
             .glass(in: Capsule(style: .continuous))
+    }
+}
+
+/// The codec loop switched on by the pointer (spec 11, M12, amended 2026-10-12): a light runs up the divider line from
+/// its handle to the top of the picture over 220 ms on the strong ease-in-out, 40 ms after the switch, then fades. The
+/// line itself is the frame's, drawn exactly on the cut from the first comparison frame: the choreography's reveal hid it
+/// for 260 ms through a flag on the frame path and a hand-off back to it, and the glint gives the same sense of the line
+/// drawing itself up without touching the frame path. A narrow band of the gold highlight, nearly white at its core,
+/// added over the line (`.plusLighter`), taking no click.
+struct DividerGlint: View {
+    let since: CFTimeInterval
+    /// How far it rises: from the handle's centre to the top of the picture, in points.
+    let rise: CGFloat
+    @State private var risen = false
+    @State private var faded = false
+
+    nonisolated static let delay: Double = 0.04
+    nonisolated static let fade = Theme.Motion.exit
+    nonisolated static var end: Double { delay + Theme.Motion.reveal.duration + fade.duration }
+    static let length: CGFloat = 90
+
+    var body: some View {
+        LinearGradient(stops: [
+            .init(color: .clear, location: 0),
+            .init(color: Theme.Colors.goldHighlight.opacity(0.6), location: 0.3),
+            .init(color: Color(hex: 0xfff4d6).opacity(0.95), location: 0.5),
+            .init(color: Theme.Colors.goldHighlight.opacity(0.6), location: 0.7),
+            .init(color: .clear, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+        .frame(width: 2, height: Self.length)
+        .offset(y: risen ? -rise / 2 : rise / 2)
+        .opacity(faded ? 0 : 1)
+        .blendMode(.plusLighter)
+        .frame(width: 2, height: rise)
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear {
+            let wait = Entrance.remainingDelay(Self.delay, since: since, now: CACurrentMediaTime())
+            withAnimation(Theme.Motion.reveal.animation(after: wait)) { risen = true } completion: {
+                withAnimation(Self.fade.animation) { faded = true }
+            }
+        }
     }
 }
 

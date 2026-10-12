@@ -290,6 +290,30 @@ final class FigureHysteresisTests: XCTestCase {
     }
 }
 
+final class SparklineMotionTests: XCTestCase {
+    /// The sparkline slides left by the buckets come since the last snapshot, over the time they cover, linear, on Core
+    /// Animation; the same snapshot again changes nothing; under Reduce Motion it steps.
+    @MainActor
+    func testTheSparklineSlidesBetweenSnapshots() throws {
+        let view = SparklineView(frame: CGRect(x: 0, y: 0, width: 78, height: 18))
+        view.layout()
+        let buckets: [Double?] = (0..<Snapshot.bucketCount).map { $0 % 9 == 0 ? nil : 30 + Double($0 % 7) }
+        view.update(buckets: buckets, newest: 1000, sliding: true)
+        let slider = try XCTUnwrap(view.layer?.sublayers?.last)
+        XCTAssertNil(slider.animation(forKey: "slide"), "the first snapshot is drawn at rest")
+        view.update(buckets: buckets, newest: 1005, sliding: true)
+        let slide = try XCTUnwrap(slider.animation(forKey: "slide") as? CABasicAnimation)
+        XCTAssertEqual(slide.keyPath, "transform.translation.x")
+        XCTAssertEqual(slide.duration, 0.25, accuracy: 1e-9, "five buckets of 50 ms")
+        XCTAssertEqual(slide.toValue as? CGFloat ?? 0, -5 * 78 / 39, accuracy: 1e-6)
+        view.update(buckets: buckets, newest: 1005, sliding: true)
+        XCTAssertNotNil(slider.animation(forKey: "slide"), "the same snapshot again changes nothing")
+        view.update(buckets: buckets, newest: 1010, sliding: false)
+        XCTAssertNil(slider.animation(forKey: "slide"), "Reduce Motion: a step")
+        XCTAssertEqual(SparklineView.slide(advance: 6, bucketWidth: 2).duration, 0.3, accuracy: 1e-9)
+    }
+}
+
 final class NavigationMotionTests: XCTestCase {
     /// Ranked screens: a higher rank is forward, a lower one back, the first takes its container's way in.
     @MainActor
@@ -388,6 +412,19 @@ final class ListAndNoticeMotionTests: XCTestCase {
         XCTAssertEqual(NoticeStack.reconcile(gone, said: ["b"], now: 11.02, since: 10, stageDelay: 0.32).map(\.text), ["b"])
         let later = NoticeStack.reconcile([], said: ["c", "d"], now: 40, since: 10, stageDelay: 0.32)
         XCTAssertEqual(later.map(\.delay), [0, 0.04])
+    }
+
+    /// The quality slider taps once as it reaches either end, never within the range.
+    func testTheQualitySliderTapsAtItsEnds() {
+        XCTAssertTrue(LoopbackPanel.reachesAnEnd(from: 3, to: 2))
+        XCTAssertTrue(LoopbackPanel.reachesAnEnd(from: 59, to: 60))
+        XCTAssertFalse(LoopbackPanel.reachesAnEnd(from: 20, to: 21))
+        XCTAssertFalse(LoopbackPanel.reachesAnEnd(from: 60, to: 60))
+    }
+
+    /// The glint up the divider line ends 380 ms after the switch: 40 ms, then 220 ms up, then a 120 ms fade.
+    func testTheDividerGlintsTimeline() {
+        XCTAssertEqual(DividerGlint.end, 0.38, accuracy: 1e-9)
     }
 
     /// A divider label near an edge goes at its threshold and comes back 8 pt further out, so a drag resting on the
