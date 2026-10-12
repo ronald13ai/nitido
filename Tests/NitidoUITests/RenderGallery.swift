@@ -5,6 +5,8 @@ import CoreVideo
 import ImageIO
 import UniformTypeIdentifiers
 import QuartzCore
+import CoreMedia
+import ScreenCaptureKit
 import Network
 import dnssd
 import NitidoCore
@@ -1699,17 +1701,17 @@ private struct ReelMark {
 /// models in the real screens. The launch; a press on Share; the picture's entrance with the code; a viewer pairing over
 /// the loopback link, the ring; a gold stroke drawn here and a cream one from the viewer; the codec loop switched on, its
 /// divider dragged; both strokes fading; the quality lowered; the loop off; Stop, back to Welcome. The press, the stroke
-/// and the drag are mouse events sent to the window, and a stand-in arrow is drawn where they land (screencapture leaves
+/// and the drag are mouse events sent to the window, and a stand-in arrow is drawn where they land (the recording leaves
 /// the real pointer out); the switch and the slider take the values their bindings would. The system picker never
-/// opens, nothing waits on a person, and the recording covers only Nítido's window on a plain backdrop. The strip's
-/// figures and the loop's quality change at once, without their roll (`ReelPolicy.rollsFigures`). Skipped unless
-/// NITIDO_RENDER=1 and NITIDO_README=1:
+/// opens, nothing waits on a person, and the recording covers only Nítido's window on a plain backdrop
+/// (`ReadmeStream`). The strip's figures and the loop's quality change at once, without their roll
+/// (`ReelPolicy.rollsFigures`). Skipped unless NITIDO_RENDER=1 and NITIDO_README=1:
 ///
 ///     NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=/some/dir swift test --filter RenderGallery/testReadmeReel
 ///
-/// It writes `clips/readme.mov`, `clips/loop.gif` (19.6 s from Welcome to Welcome, cropped to the window and its margin,
-/// 1200 px wide, or 1000 if that passes 6 MB, 15 fps) and `clips/codec-loop.png` (the codec loop on its own, captured
-/// from the window after the take: the README's `02-share-loopback.png`).
+/// It writes `clips/readme.mkv`, `clips/loop.gif` (19.6 s from Welcome to Welcome, the window and its margin, 1200 px
+/// wide, or 1000 if that passes 6 MB, 15 fps) and `clips/codec-loop.png` (the codec loop on its own, captured from the
+/// window after the take: the README's `02-share-loopback.png`).
 extension RenderGallery {
     @MainActor
     func testReadmeReel() async throws {
@@ -1735,20 +1737,19 @@ extension RenderGallery {
     }
 }
 
-/// What the README's take recorded: the movie, the rect it covers and, inside it, the rect the GIF keeps (both top left
-/// origin, points).
+/// What the README's take recorded: the movie, the screen rect it covers (top left origin, points) and how far into the
+/// movie the window was put on screen (seconds).
 private struct ReadmeTake {
     let movie: URL
-    let recorded: CGRect
-    let kept: CGRect
+    let rect: CGRect
+    let launch: Double
     /// Where the GIF opens on the launch's clock: the card, the wordmark and the buttons have arrived (the last at
     /// 400 ms) and the glint is still to come (from 440 ms). So its first frame is Welcome, as its last is: the loop
     /// runs Welcome into Welcome with the glint, and a GIF that does not autoplay shows Welcome, not the empty window
     /// the launch starts from.
     static let opening: Double = 0.45
     static let seconds: Double = 19.6
-    /// Stop, on the launch's clock: the recording must reach it (screencapture writes frames until the screen last
-    /// changes, which is a little after it, and a recording that stops early would leave the GIF a frozen frame).
+    /// Stop, on the launch's clock: the recording must reach it, or the GIF would end on a frozen frame.
     static let stop: Double = 17.3
     /// Wide enough for the text to stay sharp on a Retina screen (the take is recorded at 2x, 1600 px), narrower if the
     /// GIF would pass `limit`.
@@ -1756,25 +1757,24 @@ private struct ReadmeTake {
     static let limit = 6_000_000
     static let fps = 15
 
-    /// The GIF: `opening` after the frame before the window's first change, `seconds` long, the marker's strip above
-    /// the kept rect left out, one palette made from the whole take, ordered dithering at a low scale (it stays put from
-    /// frame to frame, so a still stretch costs nothing, and the low scale keeps gradients from banding) and only the
-    /// changed rectangle written per frame. The first width in `widths` that stays under `limit`, or the last.
+    /// The GIF: `opening` after the frame before the window's first change, `seconds` long, one palette made from the
+    /// whole take, ordered dithering at a low scale (it stays put from frame to frame, so a still stretch costs nothing,
+    /// and the low scale keeps gradients from banding) and only the changed rectangle written per frame. The first width
+    /// in `widths` that stays under `limit`, or the last.
     static func gif(_ take: ReadmeTake) throws -> (width: Int, bytes: Int) {
-        guard let marker = try MotionReel.markerTimes(take.movie).first else { throw ReelError.noMarker("readme") }
-        let launch = try MotionReel.contentStart(take.movie, near: marker)
+        let launch = try MotionReel.contentStart(take.movie, near: take.launch)
         let start = launch + opening
         let probe = try MotionReel.runCapturing(MotionReel.ffprobe, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", take.movie.path])
         let duration = Double(String(decoding: probe, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         guard duration >= launch + stop else {
             throw ReelError.tool(String(format: "the recording ends %.1f s into the take, before its Stop at %.1f s", duration - launch, stop))
         }
-        let top = Int((take.kept.minY - take.recorded.minY) * 2), height = Int(take.kept.height * 2) / 2 * 2
+        let height = Int(take.rect.height * 2) / 2 * 2
         let gif = MotionReel.clips.appendingPathComponent("loop.gif")
         var result = (width: 0, bytes: 0)
         for width in widths {
-            let chain = "tpad=stop_mode=clone:stop_duration=8,fps=60,trim=start=\(String(format: "%.4f", start)):duration=\(seconds),"
-                + "setpts=PTS-STARTPTS,crop=\(Int(take.kept.width * 2)):\(height):0:\(top),fps=\(fps),scale=\(width):-2:flags=lanczos,"
+            let chain = "fps=60,trim=start=\(String(format: "%.4f", start)):duration=\(seconds),"
+                + "setpts=PTS-STARTPTS,crop=\(Int(take.rect.width * 2)):\(height):0:0,fps=\(fps),scale=\(width):-2:flags=lanczos,"
                 + "split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=2:diff_mode=rectangle"
             try MotionReel.run(MotionReel.ffmpeg, ["-y", "-loglevel", "error", "-i", take.movie.path, "-filter_complex", chain, "-loop", "0", gif.path])
             result = (width, (try FileManager.default.attributesOfItem(atPath: gif.path)[.size] as? Int) ?? 0)
@@ -1784,8 +1784,8 @@ private struct ReadmeTake {
     }
 }
 
-/// A stand-in for the pointer, which screencapture leaves out of a recording: the system's arrow with its tip where the
-/// reel's events land, in a window of its own above the reel's windows, taking no click.
+/// A stand-in for the pointer, which the README's recording leaves out (`ReadmeStream`): the system's arrow with its tip
+/// where the reel's events land, in a window of its own above the reel's windows, taking no click.
 @MainActor
 private final class ReelPointer {
     private let window: NSWindow
@@ -1822,9 +1822,156 @@ private final class ReelPointer {
     func close() { window.orderOut(nil) }
 }
 
+/// The README's take, recorded by ScreenCaptureKit from this process: a rect of the main screen, under the reel's
+/// backdrop, at 2x and `fps` frames a second, the real pointer left out. Each frame goes to ffmpeg as it comes and is
+/// written lossless on the CPU, and a stretch the screen did not change as its last frame again, so the movie runs at
+/// `fps` from its first frame. Not screencapture -V, which the motion reel uses: its 60 fps recording of the take's rect
+/// made the codec loop drop up to 6 frames a second on their way to the screen, in gold in the strip from the loop's
+/// start to Stop in every take, where the same take unrecorded, or with screencapture recording a still corner of the
+/// screen, dropped none from the drag to Stop (2026-10-13). The whole display is filtered, not this process's windows:
+/// a capture of an app's windows draws a shared window's traffic lights as a screen sharing badge. What it keeps of the
+/// frames is touched only on `queue`, where ScreenCaptureKit hands them over, and by `finish` through it.
+private final class ReadmeStream: NSObject, SCStreamOutput, @unchecked Sendable {
+    /// Twice the GIF's rate.
+    static let fps = 30
+    let movie: URL
+    private let stream: SCStream
+    private let width: Int, height: Int
+    private let encoder = Process()
+    private let input: FileHandle
+    private let queue = DispatchQueue(label: "ai.ronar.nitido.readme-stream", qos: .userInitiated)
+    /// The first frame's capture time, on the host clock (`CACurrentMediaTime`): the movie's start.
+    private var firstAt: Double?
+    /// Frames written so far; the next one is the movie's frame at this index.
+    private var written = 0
+    private var last: Data?
+    private var failure: String?
+
+    /// Records `rect` (top left origin, points) of the main screen into `movie` from now on.
+    static func record(_ rect: CGRect, into movie: URL) async throws -> ReadmeStream {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) else {
+            throw ReelError.missing("the main display among ScreenCaptureKit's")
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.sourceRect = rect
+        config.width = Int(rect.width * 2)
+        config.height = Int(rect.height * 2)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.colorSpaceName = CGColorSpace.sRGB
+        config.showsCursor = false
+        config.queueDepth = 5
+        config.captureResolution = .best
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let recorder = try ReadmeStream(stream: stream, width: config.width, height: config.height, movie: movie)
+        do {
+            try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: recorder.queue)
+            try await stream.startCapture()
+        } catch {
+            recorder.encoder.terminate()
+            throw error
+        }
+        return recorder
+    }
+
+    private init(stream: SCStream, width: Int, height: Int, movie: URL) throws {
+        self.stream = stream
+        self.width = width
+        self.height = height
+        self.movie = movie
+        let pipe = Pipe()
+        input = pipe.fileHandleForWriting
+        // A write after ffmpeg is gone fails (`failure`) instead of ending this process.
+        _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
+        try? FileManager.default.removeItem(at: movie)
+        encoder.executableURL = URL(fileURLWithPath: MotionReel.ffmpeg)
+        encoder.arguments = ["-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgra", "-video_size", "\(width)x\(height)",
+                             "-framerate", "\(Self.fps)", "-i", "pipe:0", "-c:v", "libx264rgb", "-preset", "ultrafast", "-qp", "0",
+                             movie.path]
+        encoder.standardInput = pipe
+        // Below the app's own work, which is what the take shows.
+        encoder.qualityOfService = .utility
+        super.init()
+        try encoder.run()
+        try? pipe.fileHandleForReading.close()
+    }
+
+    /// The movie's start on the host clock (`CACurrentMediaTime`): its first frame's capture time. Nil before one came.
+    var movieStart: Double? { queue.sync { firstAt } }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, failure == nil, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let info = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
+              info[.status] as? Int == SCFrameStatus.complete.rawValue else { return }
+        let at = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        let first = firstAt ?? at
+        firstAt = first
+        let frame = packed(pixels)
+        let index = Int(((at - first) * Double(Self.fps)).rounded())
+        // The screen showed the last frame until this one.
+        if let last { while written < index, failure == nil { write(last) } }
+        // A frame that comes within the same slot as the one before waits for the next slot, as the newest.
+        if written == index { write(frame) }
+        last = frame
+    }
+
+    /// Ends the recording at `end` (host clock), the last frame repeated up to it, and waits for ffmpeg to finish the
+    /// movie. Throws if no frame came, a frame could not be written or ffmpeg failed.
+    func finish(at end: Double) async throws {
+        try await stream.stopCapture()
+        let failed = queue.sync { () -> String? in
+            if let firstAt, let last {
+                let index = Int(((end - firstAt) * Double(Self.fps)).rounded())
+                while written <= index, failure == nil { write(last) }
+            }
+            try? input.close()
+            return failure ?? (firstAt == nil ? "ScreenCaptureKit sent no frame of the take" : nil)
+        }
+        while encoder.isRunning { try await Task.sleep(for: .milliseconds(50)) }
+        if let failed { throw ReelError.tool(failed) }
+        guard encoder.terminationStatus == 0 else { throw ReelError.tool("ffmpeg exited \(encoder.terminationStatus) writing \(movie.path)") }
+    }
+
+    /// Ends the recording at once and deletes it: a take that failed, or saw something other than Nítido, keeps nothing.
+    func abandon() {
+        stream.stopCapture { _ in }
+        encoder.terminate()
+        queue.async { [input, movie] in
+            try? input.close()
+            try? FileManager.default.removeItem(at: movie)
+        }
+    }
+
+    private func write(_ frame: Data) {
+        do {
+            try input.write(contentsOf: frame)
+            written += 1
+        } catch {
+            failure = "ffmpeg stopped taking the take's frames: \(error)"
+        }
+    }
+
+    /// The frame's pixels, row after row without the buffer's padding.
+    private func packed(_ pixels: CVPixelBuffer) -> Data {
+        CVPixelBufferLockBaseAddress(pixels, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        var data = Data(count: width * height * 4)
+        guard let base = CVPixelBufferGetBaseAddress(pixels) else { return data }
+        let stride = CVPixelBufferGetBytesPerRow(pixels)
+        let rows = min(height, CVPixelBufferGetHeight(pixels)), bytes = min(width, CVPixelBufferGetWidth(pixels)) * 4
+        data.withUnsafeMutableBytes { out in
+            guard let to = out.baseAddress else { return }
+            for row in 0..<rows { memcpy(to + row * width * 4, base + row * stride, bytes) }
+        }
+        return data
+    }
+}
+
 extension ReelDirector {
     /// The README's take: the window at `corner`, the GIF's rect around the window's largest frame (the picture with the
-    /// strip), the marker's strip above it. Times are from the window's first frame on screen.
+    /// strip). Times are from the window's first frame on screen.
     func playReadme() async throws -> ReadmeTake {
         // The picture: 1440×900 px at 2x, so 720×450 pt and the window 720×527 with its title bar and strip.
         let width = 1440, height = 900
@@ -1836,9 +1983,8 @@ extension ReelDirector {
         let precise = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Recording the README's reel")
         defer { ProcessInfo.processInfo.endActivity(precise) }
         let corner = CGPoint(x: 40, y: 82)
-        let kept = CGRect(x: corner.x - 40, y: corner.y - 26, width: 720 + 80, height: 527 + 26 + 44)
-        let recorded = CGRect(x: kept.minX, y: kept.minY - 26, width: kept.width, height: kept.height + 26)
-        raiseBackdrop(CGRect(x: 0, y: recorded.minY, width: recorded.maxX + 40, height: recorded.height + 40))
+        let area = CGRect(x: corner.x - 40, y: corner.y - 26, width: 720 + 80, height: 527 + 26 + 44)
+        raiseBackdrop(CGRect(x: 0, y: area.minY, width: area.maxX + 40, height: area.height + 40))
 
         let window = ReelWindow(visual: ReelRoot(app: shareApp, policy: policy), corner: corner)
         self.share = window
@@ -1852,19 +1998,16 @@ extension ReelDirector {
         try prepare(width: width, height: height)
         try await pause(0.4)
 
-        let movie = MotionReel.clips.appendingPathComponent("readme.mov")
-        let clip = ReelClip(name: "readme", rect: recorded, markers: ["launch"], sheets: 0)
-        let marker = ReelMarker(rect: recorded)
-        defer { marker.close() }
         let pointer = ReelPointer()
         defer { pointer.close() }
-        // screencapture records the pointer: one resting over the take is moved aside for it, and put back after.
+        // The recording leaves the real pointer out, but one resting over the take would still be over its windows: it is
+        // moved aside for the take, and put back after.
         let screen = NSScreen.main!.frame
         let resting = CGPoint(x: NSEvent.mouseLocation.x, y: screen.height - NSEvent.mouseLocation.y)
-        let parked = recorded.insetBy(dx: -24, dy: -24).contains(resting)
-        if parked { CGWarpMouseCursorPosition(CGPoint(x: min(screen.width - 80, recorded.maxX + 200), y: min(screen.height - 80, recorded.maxY + 100))) }
+        let parked = area.insetBy(dx: -24, dy: -24).contains(resting)
+        if parked { CGWarpMouseCursorPosition(CGPoint(x: min(screen.width - 80, area.maxX + 200), y: min(screen.height - 80, area.maxY + 100))) }
         defer { if parked { CGWarpMouseCursorPosition(resting) } }
-        let recorder = try ReelRecorder(clip, seconds: ReadmeTake.opening + ReadmeTake.seconds + 2.6)
+        let recorder = try await ReadmeStream.record(area, into: MotionReel.clips.appendingPathComponent("readme.mkv"))
         // Only Nítido may be recorded. The screen is the person's while the take runs: should another app's window come
         // over the GIF's rect, or the screen go to another Space, the recording is deleted and the take fails (a take
         // on 2026-10-12 recorded another app after its windows left the screen with their Space). So is it when the
@@ -1872,11 +2015,10 @@ extension ReelDirector {
         var finished = false
         defer { if !finished { recorder.abandon() } }
         let ground = try XCTUnwrap(backdrop)
-        watch = { if let other = Self.intruder(over: kept, backdrop: ground) { throw ReelError.intruded(other) } }
+        watch = { if let other = Self.intruder(over: area, backdrop: ground) { throw ReelError.intruded(other) } }
         defer { watch = nil }
         try await pause(0.9)
 
-        marker.flash()
         window.window.orderFrontRegardless()
         let t0 = CACurrentMediaTime()
         func at(_ t: Double) async throws {
@@ -2085,8 +2227,9 @@ extension ReelDirector {
               + String(format: "; longest step of the drag %.1f ms", dragStep * 1000))
         shareApp.confirmedStop()
         try await at(ReadmeTake.opening + ReadmeTake.seconds + 0.4)
-        try await recorder.finish()
+        try await recorder.finish(at: CACurrentMediaTime())
         finished = true
+        let movieStart = try XCTUnwrap(recorder.movieStart)
 
         // The codec loop's still, after the take so its capture costs the take nothing: a share again, the loop on at once
         // (as ⌘L does), the strip a full second in and its figures changing without their roll, and the window alone at
@@ -2104,14 +2247,14 @@ extension ReelDirector {
         try MotionReel.run("/usr/sbin/screencapture", ["-x", "-o", "-l", "\(window.window.windowNumber)",
                                                        MotionReel.clips.appendingPathComponent("codec-loop.png").path])
         feed?.cancel(); feed = nil
-        return ReadmeTake(movie: movie, recorded: recorded, kept: kept)
+        return ReadmeTake(movie: recorder.movie, rect: area, launch: t0 - movieStart)
     }
 
     /// What, other than this process's windows, shows over `rect` (top left origin, points): the backdrop off the
     /// screen (another Space, or a full-screen app, is showing), or the first window of another app above it there.
-    /// The recording's own clear windows over the whole screen, screencapture's and screencaptureui's, do not count,
-    /// nor does Notification Center's, also over the whole screen, which draws its banners and its panel at the right
-    /// edge, away from the take on the left. Nil while only Nítido can be recorded.
+    /// The clear windows that screencapture and screencaptureui put over the whole screen do not count, nor does
+    /// Notification Center's, also over the whole screen, which draws its banners and its panel at the right edge, away
+    /// from the take on the left. Nil while only Nítido can be recorded.
     static func intruder(over rect: CGRect, backdrop: NSWindow) -> String? {
         guard backdrop.isOnActiveSpace, backdrop.occlusionState.contains(.visible) else { return "another Space or a full-screen app" }
         let own = ProcessInfo.processInfo.processIdentifier
