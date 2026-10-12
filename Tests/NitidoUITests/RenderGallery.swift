@@ -1272,6 +1272,18 @@ private final class ReelDirector {
         }
     }
 
+    /// A pick whose first frame comes `delay` seconds after the capture starts, as on a Mac whose first render is slow:
+    /// the capture says so at once, and the feed sends nothing until then.
+    private func pick(width: Int, height: Int, firstFrameAfter delay: Double) async throws {
+        try prepare(width: width, height: height)
+        let ready = prepared?.pictures ?? []
+        pictures = []
+        try pick(width: width, height: height)
+        pictures = []
+        try await pause(delay)
+        pictures = ready
+    }
+
     /// A crop of the share window's content (points from its content's top left), within the recorded rect.
     private func crop(_ name: String, of window: ReelWindow?, in rect: CGRect, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) -> ReelCrop {
         let origin = window?.contentOrigin(in: rect) ?? .zero
@@ -1510,14 +1522,36 @@ private final class ReelDirector {
             try await pause(0.4)
         }
 
+        // M6 with a late first frame (a slow first render, a cold Mac): the window grows and the panels come as the
+        // capture starts, and the cover over the picture stays opaque until its first frame is on screen, 300 ms later,
+        // then fades from it.
+        let lateFrom = sources.count
+        try prepare(width: 1600, height: 1000)
+        // A capture sends nothing before its pick: the feed stays quiet until the pick says otherwise.
+        pictures = []
+        try await record("share-first-frame-late", rect: shareRect, seconds: 3.4, markers: ["share", "pick"], sheets: 2,
+                         crops: [crop("picture", of: shareWindow, in: shareRect, x: 120, y: 60, width: 400, height: 240)]) { mark in
+            mark.flash()
+            shareApp.startShare()
+            try await waitUntil("a new session") { self.sources.count > lateFrom }
+            try await pause(0.9)
+            mark.flash()
+            try await pick(width: 1600, height: 1000, firstFrameAfter: 0.3)
+            try await pause(1.0)
+        }
+        await shareApp.stop()
+        try await pause(0.6)
+
         // Reduce Motion: the share's picture and the launch again, fades only, the window at once.
         policy.reduceMotion = true
         try prepare(width: 1600, height: 1000)
         try await pause(0.3)
+        pictures = []
+        let reducedFrom = sources.count
         try await record("share-picture-reduced", rect: shareRect, seconds: 3.4, markers: ["share", "pick"], sheets: 2) { mark in
             mark.flash()
             shareApp.startShare()
-            try await waitUntil("a new session") { self.sources.count > sessions + 1 }
+            try await waitUntil("a new session") { self.sources.count > reducedFrom }
             try await pause(0.9)
             mark.flash()
             try pick(width: 1600, height: 1000)
