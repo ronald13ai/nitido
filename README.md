@@ -11,7 +11,7 @@
 <p align="center">
   <a href="#try-it-in-a-minute"><img src="https://img.shields.io/badge/macOS-15%2B-c9a86a?style=flat-square&amp;logo=apple&amp;logoColor=white&amp;labelColor=0e1015" alt="macOS 15 or later"></a>
   <a href="#how-it-works"><img src="https://img.shields.io/badge/Swift-6.2-c9a86a?style=flat-square&amp;logo=swift&amp;logoColor=white&amp;labelColor=0e1015" alt="Swift 6.2"></a>
-  <a href="#testing"><img src="https://img.shields.io/badge/tests-443%20passing-62c37e?style=flat-square&amp;labelColor=0e1015" alt="443 tests passing"></a>
+  <a href="#testing"><img src="https://img.shields.io/badge/tests-452%20passing-62c37e?style=flat-square&amp;labelColor=0e1015" alt="452 tests passing"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-c9a86a?style=flat-square&amp;labelColor=0e1015" alt="MIT license"></a>
 </p>
 
@@ -75,7 +75,7 @@ Built for macOS 15 or later; tested on macOS 26.5. The zip runs on Apple silicon
 
 ```bash
 git clone https://github.com/ronald13ai/nitido && cd nitido
-swift test                            # 443 tests (and 9 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
+swift test                            # 452 tests (and 9 more behind NITIDO_RENDER=1 and NITIDO_SOAK=1)
 swift scripts/make-icon.swift build   # optional: the app icon
 scripts/bundle.sh                     # release build: build/Nítido.app, signed, and its zip
 open build/Nítido.app
@@ -175,13 +175,13 @@ So the 4-digit code is for a network you trust (home, office), not public Wi-Fi.
 
 ## Testing
 
-`swift test` runs 443 XCTest tests, with no failures at the current commit (about three and a half minutes on an M5 once built); 9 more, the render gallery, its motion reel, the README's reel and the soak tests, run only with NITIDO_RENDER=1 (and NITIDO_MOTION=1 for the motion reel, which records every moment of the motion and cuts it into contact sheets, or NITIDO_README=1 for the README's GIF, one 20 s take through the moments) or NITIDO_SOAK=1.
+`swift test` runs 452 tests, with no failures at the current commit (about three minutes on an M5 once built). Nine more run only when asked for: the render gallery, its motion reel and the README's reel with NITIDO_RENDER=1 (and NITIDO_MOTION=1 for the motion reel, which records every moment of the motion and cuts it into contact sheets, or NITIDO_README=1 for the README's GIF, one 20 s take through the moments), and the soak tests with NITIDO_SOAK=1.
 
-- `NitidoCore` (60): wire round-trips and decoding fed byte by byte or a megabyte at a time, telemetry percentiles and the sparkline's time buckets, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
+- `NitidoCore` (61): wire round-trips and decoding fed byte by byte or a megabyte at a time, telemetry percentiles, its first second and the sparkline's time buckets, the bitrate controller, the backlog rule, the keyframe limit, the clock-offset filter, ink geometry and the pairing key.
 - `NitidoCodec` (25): encode and decode loops on real VideoToolbox sessions, the warm-up that keeps the first session off the main thread, odd sizes kept 1:1, H.264's size limit, keyframe requests, the decoder's skip rule, colour tags, failure reporting and the rate cap on a dense scrolling page.
 - `NitidoLink` (56): real TLS connections on this Mac (frames both ways, a wrong code, the negotiated ciphersuite, reconnects, a sharer gone for good), connections from outside the local network turned away before their handshake, the TXT record, the order of routes and discovery with and without peer-to-peer Wi-Fi.
 - `NitidoCapture` (16): restarts after a resize or a display mode change, the serial start and stop, and the capture clock.
-- `NitidoUI` (286): the frame pacer against a fake display, the motion's tokens, curves and state (staged entrances, the picture's cover waiting for its first frame, the code's stagger, the ring once per connection, the strip's hysteresis), the picture as drawn and Core Image's warm-up, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink (a hostile peer's included, and a long stroke's cost per point), window sizes, menus, quitting and the sleep a live session holds off.
+- `NitidoUI` (294): the frame pacer against a fake display, the motion's tokens, curves and state (staged entrances, the picture's cover waiting for its first frame, redrawn or not, a second at most, the code's stagger, the ring once per connection, the strip's hysteresis and its first second, the window's size), the picture as drawn and Core Image's warm-up, the sharer and the viewer end to end over a real link with a stand-in capture source, colours through the codec, ink (a hostile peer's included, and a long stroke's cost per point), window sizes, menus, quitting and the sleep a live session holds off.
 
 The picker and the Screen Recording grant, what reaches a real screen, and two real Macs are checked by hand: [docs/testing.md](docs/testing.md) is the checklist, one action and one expected result per item.
 
