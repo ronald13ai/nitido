@@ -33,7 +33,18 @@ public struct TelemetryStrip: View {
     }
 
     private var latencyHigh: Bool { (snapshot.latencyMs ?? 0) > 100 }
-    private var dropping: Bool { snapshot.droppedLastSecond > 0 }
+
+    /// A rate (frames captured, received or displayed a second): "·" until a full second has been counted, since the
+    /// first second of a capture or a picture is a partial count (`Snapshot.warm`), and while no frame comes.
+    nonisolated static func rate(_ value: Double, warm: Bool) -> String { warm && value > 0 ? "\(Int(value.rounded()))" : "·" }
+
+    /// The dropped figure, and whether it warns in gold: "·" and never gold until a full second has been counted (a
+    /// partial count, as the rates), then "·" until frames come, as every other figure says nothing yet.
+    nonisolated static func dropped(_ snapshot: Snapshot) -> (value: String, warns: Bool) {
+        guard snapshot.warm else { return ("·", false) }
+        let warns = snapshot.droppedLastSecond > 0
+        return (snapshot.captureFPS > 0 || warns ? "\(snapshot.droppedLastSecond)" : "·", warns)
+    }
 
     /// One row when the strip is wide enough; narrower than that (the picture is narrower), the figures wrap
     /// onto another row instead of widening the strip, so the window stays exactly as wide as the picture. The codec
@@ -41,9 +52,10 @@ public struct TelemetryStrip: View {
     /// picture on one row. Solid, not glass: glass under the picture refracts nothing and only adds a grey band, so the
     /// strip is the surface with a hairline along its top, one dark family with the canvas.
     public var body: some View {
-        StripRows(spacing: 16, rowSpacing: 6, sparklineGap: 8) {
-            Figure(captureLabel, value: fps(snapshot.captureFPS), unit: "fps", number: snapshot.captureFPS)
-            Figure(Label.display, value: fps(snapshot.displayFPS), unit: "fps", number: snapshot.displayFPS)
+        let dropped = Self.dropped(snapshot)
+        return StripRows(spacing: 16, rowSpacing: 6, sparklineGap: 8) {
+            Figure(captureLabel, value: Self.rate(snapshot.captureFPS, warm: snapshot.warm), unit: "fps", number: snapshot.captureFPS)
+            Figure(Label.display, value: Self.rate(snapshot.displayFPS, warm: snapshot.warm), unit: "fps", number: snapshot.displayFPS)
             Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", number: snapshot.latencyMs, highlight: latencyHigh)
             if showsCodec {
                 // In with the loop, 80 ms after the switch, into the room the strip made for it at once; out at once
@@ -55,9 +67,7 @@ public struct TelemetryStrip: View {
             Figure(Label.rtt, value: ms(snapshot.rttMs), unit: "ms", number: snapshot.rttMs)
             Figure(Label.bitrate, value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps",
                    number: snapshot.bitrateMbps)
-            // "·" until frames come, as every other figure says nothing yet.
-            Figure(Label.dropped, value: snapshot.captureFPS > 0 || dropping ? "\(snapshot.droppedLastSecond)" : "·", unit: "/s",
-                   number: Double(snapshot.droppedLastSecond), highlight: dropping)
+            Figure(Label.dropped, value: dropped.value, unit: "/s", number: Double(snapshot.droppedLastSecond), highlight: dropped.warns)
             // A change of size or codec is structural, not a count: it crossfades.
             Figure(Label.size, value: resolution, unit: codec)
             Sparkline(buckets: snapshot.latencyBuckets, newest: snapshot.newestBucket).frame(width: 80, height: 18)
@@ -72,7 +82,6 @@ public struct TelemetryStrip: View {
         .transaction(value: showsCodec) { $0.animation = nil }
     }
 
-    private func fps(_ v: Double) -> String { v > 0 ? "\(Int(v.rounded()))" : "·" }
     private func ms(_ v: Double?) -> String { v.map { String(format: "%.0f", $0) } ?? "·" }
 }
 
@@ -193,11 +202,12 @@ struct FigureHysteresis {
     private var capture = Gate(big: 2), display = Gate(big: 2), latency = Gate(big: 2), rtt = Gate(big: 2)
     private var bitrate = Gate(big: 0.3)
 
-    /// `raw` as the strip shows it.
+    /// `raw` as the strip shows it. Until a full second has been counted there is no rate to show (`Snapshot.warm`), and
+    /// the first one then shows at once rather than as a move from a partial count.
     mutating func apply(_ raw: Snapshot) -> Snapshot {
         var shown = raw
-        shown.captureFPS = capture.pass(raw.captureFPS.rounded()) ?? 0
-        shown.displayFPS = display.pass(raw.displayFPS.rounded()) ?? 0
+        shown.captureFPS = capture.pass(raw.warm ? raw.captureFPS.rounded() : nil) ?? 0
+        shown.displayFPS = display.pass(raw.warm ? raw.displayFPS.rounded() : nil) ?? 0
         shown.latencyMs = latency.pass(raw.latencyMs.map { $0.rounded() })
         shown.rttMs = rtt.pass(raw.rttMs.map { $0.rounded() })
         shown.bitrateMbps = bitrate.pass((raw.bitrateMbps * 10).rounded() / 10) ?? 0

@@ -27,7 +27,10 @@ public final class ShareModel {
                 capturingSince = nil; awaitingFirstFrame = false
                 if firstFrameAt != nil { firstFrameAt = nil }
             } else if capturingSince == nil {
-                capturingSince = CACurrentMediaTime(); awaitingFirstFrame = true
+                let now = CACurrentMediaTime()
+                capturingSince = now; awaitingFirstFrame = true
+                // The strip counts from here: its first second is no rate yet (`Snapshot.warm`).
+                telemetry.reset(now: now)
             }
         }
     }

@@ -260,6 +260,7 @@ final class FigureHysteresisTests: XCTestCase {
     private func snapshot(fps: Double = 60, latency: Double? = 34, bitrate: Double = 14.2, dropped: Int = 0) -> Snapshot {
         var s = Snapshot.empty
         s.captureFPS = fps; s.displayFPS = fps; s.latencyMs = latency; s.rttMs = 3; s.bitrateMbps = bitrate; s.droppedLastSecond = dropped
+        s.warm = true
         return s
     }
 
@@ -303,6 +304,55 @@ final class FigureHysteresisTests: XCTestCase {
         let shown = h.apply(raw)
         XCTAssertEqual(shown.latencySeries, [30.4, 31.2])
         XCTAssertEqual(shown.captureFPS, 60)
+    }
+}
+
+/// The strip's first second (spec 10 and 11, added 2026-10-12 after review): a partial count is no rate.
+final class StripFirstSecondTests: XCTestCase {
+    private func snapshot(fps: Double, dropped: Int, warm: Bool) -> Snapshot {
+        var s = Snapshot.empty
+        s.captureFPS = fps; s.displayFPS = fps; s.droppedLastSecond = dropped; s.warm = warm
+        return s
+    }
+
+    /// The review's case, the GIF's first reading (capture 5, display 1, dropped 7 in gold): until a full second has been
+    /// counted, capture, display and dropped say "·" and dropped is never gold; then they read as before.
+    func testTheFirstSecondShowsNoRates() {
+        let cold = snapshot(fps: 5, dropped: 7, warm: false)
+        XCTAssertEqual(TelemetryStrip.rate(cold.captureFPS, warm: cold.warm), "·")
+        XCTAssertEqual(TelemetryStrip.dropped(cold).value, "·")
+        XCTAssertFalse(TelemetryStrip.dropped(cold).warns, "no gold for a partial second")
+        let warm = snapshot(fps: 57.6, dropped: 2, warm: true)
+        XCTAssertEqual(TelemetryStrip.rate(warm.captureFPS, warm: true), "58")
+        XCTAssertEqual(TelemetryStrip.dropped(warm).value, "2")
+        XCTAssertTrue(TelemetryStrip.dropped(warm).warns)
+        XCTAssertEqual(TelemetryStrip.rate(0, warm: true), "·", "no frames: nothing to say")
+        XCTAssertEqual(TelemetryStrip.dropped(snapshot(fps: 0, dropped: 0, warm: true)).value, "·")
+        XCTAssertEqual(TelemetryStrip.dropped(snapshot(fps: 60, dropped: 0, warm: true)).value, "0")
+    }
+
+    /// The first rate after the first second shows at once, never held back as a one-unit move from a partial count.
+    func testTheFirstRateShowsAtOnce() {
+        var h = FigureHysteresis()
+        XCTAssertEqual(h.apply(snapshot(fps: 57, dropped: 0, warm: false)).displayFPS, 0, "no rate yet")
+        XCTAssertEqual(h.apply(snapshot(fps: 58, dropped: 0, warm: true)).displayFPS, 58, "the first rate, at once")
+        XCTAssertEqual(h.apply(snapshot(fps: 57, dropped: 0, warm: true)).displayFPS, 58, "then the hysteresis as before")
+    }
+
+    /// The share counts from its capture's start: a capture that begins starts the strip's first second afresh.
+    @MainActor
+    func testTheShareCountsFromItsCapturesStart() throws {
+        let share = ShareModel(makeSource: { NeverSource() }, screenRecordingGranted: { true })
+        share.telemetry.recordCapture(at: CACurrentMediaTime())
+        share.state = .capturing
+        let since = try XCTUnwrap(share.capturingSince)
+        XCTAssertEqual(share.telemetry.countingSince, since)
+        XCTAssertFalse(share.telemetry.snapshot(now: since + 0.5).warm)
+        XCTAssertEqual(share.telemetry.snapshot(now: since + 0.5).captureFPS, 0, "nothing from before the capture")
+        XCTAssertTrue(share.telemetry.snapshot(now: since + 1).warm)
+        share.state = .capturing
+        XCTAssertEqual(share.telemetry.countingSince, since, "a new size from the same capture keeps counting")
+        share.state = .idle
     }
 }
 

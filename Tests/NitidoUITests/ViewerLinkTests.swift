@@ -535,6 +535,10 @@ final class ViewerLinkTests: XCTestCase {
         XCTAssertEqual(viewer.firstFrameAt, shown, "a frame drawn again counts: one that came while the window was covered reaches the screen so")
         viewer.sink.onShown?(.live, shown + 0.016)
         XCTAssertEqual(viewer.firstFrameAt, shown, "only the first frame counts")
+        // The strip counts from the picture's start, so its first second shows no rates (`Snapshot.warm`).
+        let since = try XCTUnwrap(viewer.pictureSince)
+        try await waitUntil("a full second of the picture is counted") { viewer.snapshot.warm }
+        XCTAssertGreaterThanOrEqual(CACurrentMediaTime() - since, 1)
         viewer.disconnect()
         XCTAssertNil(viewer.firstFrameAt)
         XCTAssertNil(viewer.pictureSince)

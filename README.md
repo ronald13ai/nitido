@@ -59,7 +59,7 @@ Every value here is a token in `Theme.Motion` ([`Theme.swift`](Sources/NitidoUI/
 | A viewer connects | The panel grows, the row arrives, a thin gold ring draws round it | Panel 240 ms; ring on a spring (duration 0.5, bounce 0.2), then down to a 1 pt hairline over 0.6 s; status dot on a spring (0.35, bounce 0.3) |
 | Codec loop on | The panel unfolds, a light runs up the divider | Panel 240 ms, its rows 40 ms apart; light 220 ms at 40 ms; the strip's codec figure fades in at 80 ms over 180 ms |
 | The divider | The line follows the pointer 1:1; the dot answers the grab | Dot to 1.3 on a spring (0.25, bounce 0.2) while held, 1.12 within 20 pt |
-| The strip | Figures roll | 180 ms; a one-unit change waits half a second; each figure keeps the widest width it has shown, so nothing in the row jitters |
+| The strip | Figures roll | 180 ms; a one-unit change waits half a second; each figure keeps the widest width it has shown, so nothing in the row jitters; capture, display and dropped show "·" until a full second has been counted, since the first second of a share or a picture is a partial count |
 | Ink | Strokes fade | 4 s after the last point, over 600 ms; the other Mac sees an undo rewind over 180 ms |
 | Reconnecting | The status dot breathes, the last frame dims | 1.2 s each way; 20 % |
 

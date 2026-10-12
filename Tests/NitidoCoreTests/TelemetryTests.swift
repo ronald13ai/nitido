@@ -63,6 +63,27 @@ final class TelemetryTests: XCTestCase {
         XCTAssertEqual(next.latencyBuckets[Snapshot.bucketCount - 1 - 6], 60, "bucket 204, six buckets older now")
     }
 
+    /// A snapshot is warm once a full second has been counted since the telemetry began or was reset: before that its
+    /// one-second counts cover part of a second, and the strip shows "·" for them. The counts stay raw; a reset empties
+    /// the windows and keeps the running total of drops.
+    func testASnapshotIsWarmOnceAFullSecondHasBeenCounted() {
+        var t = Telemetry(now: 10)
+        t.recordCapture(at: 10.2); t.recordDrop(at: 10.3)
+        XCTAssertFalse(t.snapshot(now: 10.5).warm, "half a second counted")
+        XCTAssertEqual(t.snapshot(now: 10.5).captureFPS, 1, "the raw count, as it is")
+        XCTAssertTrue(t.snapshot(now: 11).warm)
+        t.recordCapture(at: 19.8); t.recordDrop(at: 19.9)
+        t.reset(now: 20)
+        let s = t.snapshot(now: 20.5)
+        XCTAssertFalse(s.warm, "counting again from the reset")
+        XCTAssertEqual(s.captureFPS, 0, "the frame before the reset is not counted")
+        XCTAssertEqual(s.droppedLastSecond, 0)
+        XCTAssertEqual(t.droppedTotal, 2, "the running total keeps counting")
+        XCTAssertEqual(t.countingSince, 20)
+        XCTAssertTrue(t.snapshot(now: 21).warm)
+        XCTAssertFalse(Snapshot.empty.warm, "nothing counted yet")
+    }
+
     func testEmptySnapshotHasNils() {
         let s = Telemetry(now: 0).snapshot(now: 0)
         XCTAssertNil(s.latencyMs); XCTAssertNil(s.rttMs); XCTAssertEqual(s.bitrateMbps, 0); XCTAssertEqual(s.captureFPS, 0)

@@ -72,6 +72,10 @@ public struct Snapshot: Sendable, Equatable {
     /// (`RollingWindow.buckets`).
     public var latencyBuckets: [Double?] = []
     public var newestBucket = 0
+    /// A full second has been counted since the telemetry began or was last reset (`Telemetry.reset`), so the one-second
+    /// counts (frames captured or received, displayed, dropped) are rates. In the first second they cover only part of
+    /// one, and the strip shows "·" for them; the counts themselves stay as they are, for the logs and the tests.
+    public var warm = false
     public static let bucketWidth = 0.05
     /// Two and a quarter seconds: the two the sparkline shows, and the quarter that slides in until the next snapshot.
     public static let bucketCount = 45
@@ -89,10 +93,20 @@ public struct Telemetry: Sendable {
     private var bytes = RollingWindow(seconds: 1)
     private var drops = RollingWindow(seconds: 1)
     /// Every dropped frame recorded so far, not only the last second's: what a check that must not depend on when the
-    /// snapshot is taken reads.
+    /// snapshot is taken reads. A reset keeps it.
     public private(set) var droppedTotal = 0
+    /// When counting began: when the telemetry was made, or last reset. A snapshot is `warm` a second after it.
+    public private(set) var countingSince: Double
 
-    public init(now: Double) {}
+    public init(now: Double) { countingSince = now }
+
+    /// Starts counting afresh at `now`, as a capture or a picture begins: every window is emptied, and snapshots are not
+    /// `warm` until a second has passed. `droppedTotal` keeps counting.
+    public mutating func reset(now: Double) {
+        let total = droppedTotal
+        self = Telemetry(now: now)
+        droppedTotal = total
+    }
 
     public mutating func recordCapture(at t: Double) { captures.add(1, at: t) }
     public mutating func recordDisplay(at t: Double) { displays.add(1, at: t) }
@@ -115,6 +129,7 @@ public struct Telemetry: Sendable {
                                 latencySeries: latencySeries.values(now: now))
         snapshot.latencyBuckets = latencyTimeline.buckets(now: now, width: Snapshot.bucketWidth, count: Snapshot.bucketCount)
         snapshot.newestBucket = Int((now / Snapshot.bucketWidth).rounded(.down))
+        snapshot.warm = now - countingSince >= captures.seconds
         return snapshot
     }
 }

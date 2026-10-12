@@ -269,6 +269,7 @@ final class RenderGallery: XCTestCase {
     private static var calmSnapshot: Snapshot {
         var s = Snapshot.empty
         s.captureFPS = 60; s.displayFPS = 60; s.latencyMs = 34; s.latencyP95Ms = 41; s.rttMs = 3; s.bitrateMbps = 14.2
+        s.warm = true
         s.latencySeries = (0..<40).map { 30 + 6 * sin(Double($0) / 3) + Double($0 % 7) }
         return s
     }

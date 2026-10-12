@@ -35,7 +35,13 @@ public final class ViewModel {
                 browser.usePeerToPeer(true)
             }
             switch state {
-            case .connected: if pictureSince == nil { pictureSince = CACurrentMediaTime(); awaitingFirstFrame = true }
+            case .connected:
+                guard pictureSince == nil else { break }
+                let now = CACurrentMediaTime()
+                pictureSince = now; awaitingFirstFrame = true
+                // The strip counts from the picture's start (a reconnect keeps counting, so it shows the gap): its first
+                // second is no rate yet (`Snapshot.warm`).
+                telemetry.reset(now: now)
             case .reconnecting: break
             case .failed: if !failedOverPicture { forgetPicture() }
             case .browsing, .enteringCode, .connecting: forgetPicture()
