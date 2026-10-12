@@ -580,3 +580,916 @@ private enum Picture {
         NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color]).draw(at: point)
     }
 }
+
+
+// MARK: - The motion reel (NITIDO_MOTION=1)
+
+/// The choreography recorded (spec 11): every moment played through the real models in the real screens, captured with
+/// `screencapture -V`, and cut into contact sheets of ten frames 50 ms apart from each moment's start. Skipped unless
+/// NITIDO_RENDER=1 and NITIDO_MOTION=1:
+///
+///     NITIDO_RENDER=1 NITIDO_MOTION=1 NITIDO_MOTION_DIR=/some/dir swift test --filter RenderGallery/testMotionReel
+///
+/// Two runs of one scenario (`ReelDirector`). The window's growth belongs to SwiftUI's `Window` scene, which a hand-made
+/// window cannot reproduce (it never animates its frame), and SwiftUI never puts a scene's window on screen for a process
+/// that is not the active app (a plain process, an app bundle and LaunchServices alike, 2026-10-12), though it animates
+/// that window's frame all the same. So:
+/// - `frames`: a child process runs this bundle's `testMotionHost`, which runs `MotionReelApp`, the app's own `Window`
+///   scene twice (one for each Mac), off screen, and logs every step of both windows' frames for each moment
+///   (`frames/<moment>.csv`): the growth, its curve and its timing as the app has them.
+/// - `visual`: the same moments in windows of this process, recorded. Each window's frame takes, at every step, the size
+///   its root reports (`AnimatedArea` animates that size frame by frame, which is what the scene's window follows), from
+///   the top left corner, the content laid out at its final size as in the app.
+/// The system picker never opens, nothing waits on a person, and every recording covers only Nítido's windows on a plain
+/// backdrop. Each carries a sync marker, a small white square in its top left corner for one frame where its moment
+/// starts. The press (M2) is recorded in a window that takes the first click: this process is never the active app.
+extension RenderGallery {
+    @MainActor
+    func testMotionReel() async throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["NITIDO_MOTION"] == "1", "set NITIDO_MOTION=1 to record the motion reel")
+        try XCTSkipIf(env["NITIDO_MOTION_HOST"] == "1", "the host process runs testMotionHost alone")
+        for dir in [MotionReel.clips, MotionReel.sheets, MotionReel.frames] {
+            try? FileManager.default.removeItem(at: dir)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        FontLoader.registerBundledFonts()
+        NSApplication.shared.setActivationPolicy(.accessory)
+        NSApplication.shared.finishLaunching()
+        try await pump(0.3)
+
+        // The app's own scene, off screen, in a child process: the window's frame at every step.
+        let hostStatus = try await runFrameHost()
+
+        var manifest = try await recordPress()
+        let director = ReelDirector(mode: .visual)
+        do {
+            try await director.play()
+        } catch {
+            XCTFail("the reel stopped: \(error)")
+        }
+        director.tearDown()
+        manifest += director.clips
+
+        // A movie whose recording did not finish may hold whatever the screen showed once the reel was gone: it goes.
+        let finished = Set(manifest.map { "\($0.name).mov" })
+        for file in (try? FileManager.default.contentsOfDirectory(atPath: MotionReel.clips.path)) ?? [] where file.hasSuffix(".mov") && !finished.contains(file) {
+            try? FileManager.default.removeItem(at: MotionReel.clips.appendingPathComponent(file))
+        }
+        for clip in manifest { try MotionReel.cut(clip) }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(to: MotionReel.clips.appendingPathComponent("manifest.json"))
+        XCTAssertEqual(hostStatus, 0, "the scene's run ended with \(hostStatus); see \(MotionReel.frames.appendingPathComponent("host.log").path)")
+    }
+
+    /// The child process's one test: the app's own scenes, which log their frames for every moment, then end the process.
+    @MainActor
+    func testMotionHost() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["NITIDO_MOTION_HOST"] == "1", "run by testMotionReel")
+        MotionReelApp.main()
+    }
+
+    /// Runs `testMotionHost` in a child process (this bundle, by the runner that runs this test) and waits for it.
+    @MainActor
+    private func runFrameHost() async throws -> Int32 {
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        child.arguments = ["-XCTest", "NitidoUITests.RenderGallery/testMotionHost", Bundle(for: RenderGallery.self).bundlePath]
+        var env = ProcessInfo.processInfo.environment
+        env["NITIDO_MOTION_HOST"] = "1"
+        child.environment = env
+        let log = MotionReel.frames.appendingPathComponent("host.log")
+        FileManager.default.createFile(atPath: log.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: log)
+        defer { try? handle.close() }
+        child.standardOutput = handle; child.standardError = handle
+        try child.run()
+        let deadline = Date().addingTimeInterval(320)
+        while child.isRunning, Date() < deadline { try await Task.sleep(for: .milliseconds(200)) }
+        if child.isRunning { child.terminate(); return -1 }
+        return child.terminationStatus
+    }
+
+    /// M2: a press on the gold and the quiet button and on a row of the list, held 300 ms each.
+    @MainActor
+    private func recordPress() async throws -> [ReelClip] {
+        let content = VStack(alignment: .leading, spacing: 24) {
+            HStack(spacing: 12) { GoldButton("Share") {}; QuietButton("View") {} }
+            PressRowSample()
+        }
+        .padding(24)
+        .frame(width: 600, height: 180, alignment: .topLeading)
+        .background(Theme.Colors.background)
+        let host = ReelFirstMouseView(rootView: AnyView(content.environment(\.colorScheme, .dark)))
+        let rect = CGRect(x: 40, y: 200, width: 600, height: 180)
+        let window = NSWindow(contentRect: CGRect(x: rect.minX, y: NSScreen.main!.frame.height - rect.maxY, width: rect.width, height: rect.height),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.level = .floating
+        window.backgroundColor = NSColor(hex: Theme.Hex.background)
+        window.isReleasedWhenClosed = false
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        try await pump(0.8)
+        let marker = ReelMarker(rect: rect)
+        defer { marker.close() }
+        let clip = ReelClip(name: "press", rect: rect, markers: ["share", "view", "row"], sheets: 1,
+                            crops: [ReelCrop(name: "buttons", x: 16, y: 16, width: 236, height: 48)])
+        let recorder = try ReelRecorder(clip, seconds: 3.4)
+        try await pump(0.9)
+        for (index, point) in [CGPoint(x: 72, y: 40), CGPoint(x: 180, y: 40), CGPoint(x: 300, y: 104)].enumerated() {
+            marker.flash()
+            send(.leftMouseDown, at: point, to: window, host: host)
+            try await pump(0.3)
+            send(.leftMouseUp, at: point, to: window, host: host)
+            try await pump(index == 2 ? 0.6 : 0.5)
+        }
+        try await recorder.finish()
+        return [clip]
+    }
+
+    @MainActor
+    private func send(_ type: NSEvent.EventType, at point: CGPoint, to window: NSWindow, host: NSView) {
+        let location = host.convert(point, to: nil)
+        guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                             pressure: type == .leftMouseUp ? 0 : 1) else { return }
+        window.sendEvent(event)
+    }
+}
+
+/// One row of the list of Macs, for the press (it is private to the View screen).
+private struct PressRowSample: View {
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+        Button {} label: {
+            HStack(spacing: 12) {
+                Image(systemName: "laptopcomputer").font(.system(size: 15)).foregroundStyle(Theme.Colors.secondaryText).frame(width: 22)
+                Text("Mac Studio de Ana").font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.Colors.text)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.Colors.secondaryText)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 48, maxHeight: 48)
+            .background(shape.fill(Theme.Colors.surface))
+            .overlay(shape.strokeBorder(Theme.Colors.hairline, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(PressFeedback(pressScale: Theme.Motion.pressScaleWide))
+    }
+}
+
+/// Takes the first click like a window of the active app does: this process is never the active app.
+private final class ReelFirstMouseView: NSHostingView<AnyView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// Where the reel writes: NITIDO_MOTION_DIR, or a folder in the temporary directory; the clips and the sheets in it.
+private enum MotionReel {
+    static var directory: URL {
+        if let dir = ProcessInfo.processInfo.environment["NITIDO_MOTION_DIR"] { return URL(fileURLWithPath: dir, isDirectory: true) }
+        return FileManager.default.temporaryDirectory.appendingPathComponent("nitido-motion", isDirectory: true)
+    }
+    static var clips: URL { directory.appendingPathComponent("clips", isDirectory: true) }
+    static var sheets: URL { directory.appendingPathComponent("sheets", isDirectory: true) }
+    static var frames: URL { directory.appendingPathComponent("frames", isDirectory: true) }
+    static let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+
+    /// The clip's contact sheets: for each marker, `sheets` rows of ten frames 50 ms apart from the frame the marker
+    /// shows in, the whole recording and each crop.
+    static func cut(_ clip: ReelClip) throws {
+        let movie = clips.appendingPathComponent("\(clip.name).mov")
+        guard FileManager.default.fileExists(atPath: movie.path) else { throw ReelError.missing(movie.path) }
+        let starts = try markerTimes(movie)
+        guard !starts.isEmpty else { throw ReelError.noMarker(clip.name) }
+        // screencapture writes a frame only when the screen changes, so a recording ends at its last change: the last
+        // frame is held, and every sheet has its ten frames.
+        let hold = "tpad=stop_mode=clone:stop_duration=4"
+        for (index, start) in starts.enumerated() {
+            let label = index < clip.markers.count ? clip.markers[index] : "m\(index)"
+            for row in 0..<clip.sheets {
+                let at = start + Double(row) * 0.5
+                let width = min(Int(clip.rect.width * 2), 620)
+                try run(ffmpeg, ["-y", "-loglevel", "error", "-i", movie.path, "-ss", String(format: "%.3f", at),
+                                 "-vf", "\(hold),fps=20,scale=\(width):-2,tile=10x1", "-frames:v", "1",
+                                 sheets.appendingPathComponent("\(clip.name)-\(label)-\(row).png").path])
+                for crop in clip.crops {
+                    let c = "crop=\(Int(crop.width * 2)):\(Int(crop.height * 2)):\(Int(crop.x * 2)):\(Int(crop.y * 2))"
+                    try run(ffmpeg, ["-y", "-loglevel", "error", "-i", movie.path, "-ss", String(format: "%.3f", at),
+                                     "-vf", "\(hold),fps=20,\(c),tile=10x1", "-frames:v", "1",
+                                     sheets.appendingPathComponent("\(clip.name)-\(label)-\(crop.name)-\(row).png").path])
+                }
+            }
+        }
+        let times = starts.map { String(format: "%.3f", $0) }.joined(separator: " ")
+        try "\(times)\n".write(to: sheets.appendingPathComponent("\(clip.name)-markers.txt"), atomically: true, encoding: .utf8)
+    }
+
+    /// When the sync marker shows, in seconds into the movie at 60 frames a second: each rising edge.
+    static func markerTimes(_ movie: URL) throws -> [Double] {
+        let raw = try runCapturing(ffmpeg, ["-loglevel", "error", "-i", movie.path, "-vf", "fps=60,crop=8:8:6:6",
+                                            "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        var times: [Double] = []
+        var on = false
+        let frame = 64
+        var index = 0
+        while (index + 1) * frame <= raw.count {
+            let slice = raw[(index * frame)..<((index + 1) * frame)]
+            let mean = slice.reduce(0) { $0 + Int($1) } / frame
+            if mean > 180, !on { times.append(Double(index) / 60) }
+            on = mean > 180
+            index += 1
+        }
+        return times
+    }
+
+    static func run(_ tool: String, _ arguments: [String]) throws {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: tool); p.arguments = arguments
+        try p.run(); p.waitUntilExit()
+        guard p.terminationStatus == 0 else { throw ReelError.tool("\(tool) \(arguments.joined(separator: " "))") }
+    }
+
+    static func runCapturing(_ tool: String, _ arguments: [String]) throws -> Data {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: tool); p.arguments = arguments
+        let pipe = Pipe(); p.standardOutput = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return data
+    }
+}
+
+private enum ReelError: Error {
+    case missing(String)
+    case noMarker(String)
+    case tool(String)
+}
+
+/// A recorded moment: its movie's name, the screen rect it recorded (top left origin, points), its markers in order,
+/// how many sheets of half a second follow each, and the close-ups (in points within the rect).
+private struct ReelClip: Codable {
+    var name: String
+    var rect: CGRect
+    var markers: [String]
+    var sheets: Int
+    var crops: [ReelCrop] = []
+}
+
+private struct ReelCrop: Codable {
+    var name: String
+    var x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat
+}
+
+/// `screencapture -V` of a screen rect, started at once; `finish` waits for it. The rect must lie under the reel's
+/// backdrop, so it holds nothing but Nítido's windows; and screencapture runs under a small guard that ends it the moment
+/// the process that started it is gone, so a reel killed halfway never goes on recording whatever the screen shows next
+/// (`testMotionReel` also deletes any movie whose recording did not finish).
+@MainActor
+private final class ReelRecorder {
+    private let process = Process()
+    init(_ clip: ReelClip, seconds: Double) throws {
+        let r = clip.rect
+        let movie = MotionReel.clips.appendingPathComponent("\(clip.name).mov").path
+        // screencapture does not write over a movie that is there.
+        try? FileManager.default.removeItem(atPath: movie)
+        let capture = "/usr/sbin/screencapture -x -V \(String(format: "%.1f", seconds)) -R \(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height)) '\(movie)'"
+        let owner = ProcessInfo.processInfo.processIdentifier
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "\(capture) & c=$!; while kill -0 \(owner) 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 0.05; done; "
+                             + "if kill -0 $c 2>/dev/null; then kill -9 $c; rm -f '\(movie)'; exit 9; fi; wait $c"]
+        try process.run()
+    }
+    func finish() async throws {
+        while process.isRunning { try await Task.sleep(for: .milliseconds(50)) }
+        guard process.terminationStatus == 0 else { throw ReelError.tool("screencapture exited \(process.terminationStatus)") }
+    }
+    /// Whether the recording has ended (it throws if it ended badly).
+    func poll() throws -> Bool {
+        guard !process.isRunning else { return false }
+        guard process.terminationStatus == 0 else { throw ReelError.tool("screencapture exited \(process.terminationStatus)") }
+        return true
+    }
+}
+
+/// The sync marker: a white square of 6 pt in the top left corner of a recorded rect, shown for 50 ms where a moment
+/// starts, in a window of its own above everything.
+@MainActor
+private final class ReelMarker {
+    let rect: CGRect
+    private let window: NSWindow
+    init(rect: CGRect) {
+        self.rect = rect
+        let size: CGFloat = 8
+        let screen = NSScreen.main!.frame.height
+        window = NSWindow(contentRect: CGRect(x: rect.minX + 2, y: screen - rect.minY - 2 - size, width: size, height: size),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+        window.backgroundColor = .white
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        window.isReleasedWhenClosed = false
+        window.ignoresMouseEvents = true
+        window.hasShadow = false
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+    }
+    func flash() {
+        window.alphaValue = 1
+        Task { @MainActor [window] in
+            try? await Task.sleep(for: .milliseconds(60))
+            window.alphaValue = 0
+        }
+    }
+    func close() { window.orderOut(nil) }
+}
+
+/// Reduce Motion for the reel's windows, switched for the variants.
+@MainActor @Observable
+private final class ReelPolicy {
+    var reduceMotion = false
+}
+
+/// The app's root as the app shows it (`NitidoApp`): the window chrome, and Reduce Motion as the reel says.
+private struct ReelRoot: View {
+    let app: AppModel
+    let policy: ReelPolicy
+    var body: some View {
+        RootView(app: app)
+            .environment(\.motionPolicy, MotionPolicy(reduceMotion: policy.reduceMotion))
+            .background(Theme.Colors.background)
+            .environment(\.colorScheme, .dark)
+    }
+}
+
+/// The child's app: the app's own `Window` scene twice, one for each Mac.
+private struct MotionReelApp: App {
+    init() {
+        FontLoader.registerBundledFonts()
+        let director = ReelDirector(mode: .frames)
+        ReelDirector.hosted = director
+        Task { @MainActor in await director.runHosted() }
+    }
+
+    var body: some Scene {
+        // A test tool's process may not show windows (its activation policy is "prohibited"); as an accessory its scenes
+        // open, off screen, and animate their frames.
+        let _ = NSApp?.setActivationPolicy(.accessory)
+        Window("Nítido", id: "share") { ReelSceneRoot(id: "share") }
+            .windowResizability(.contentSize)
+        Window("Nítido Viewer", id: "view") { ReelSceneRoot(id: "view") }
+            .windowResizability(.contentSize)
+            .commands { ReelCommands() }
+    }
+}
+
+private struct ReelSceneRoot: View {
+    let id: String
+    var body: some View {
+        if let director = ReelDirector.hosted {
+            ReelRoot(app: id == "share" ? director.shareApp : director.viewApp, policy: director.policy)
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+                .toolbar(removing: .title)
+                .containerBackground(Theme.Colors.background, for: .window)
+        }
+    }
+}
+
+/// Hands the scenes' `openWindow` to the director: in a test tool's process SwiftUI opens no window at launch.
+private struct ReelCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    var body: some Commands {
+        let open = openWindow
+        let _ = { ReelDirector.hosted?.opener = { open(id: $0) } }()
+        CommandGroup(after: .newItem) { Button("Open the reel's windows") { open(id: "share") } }
+    }
+}
+
+/// One of the reel's windows. Visual: a window of this process whose frame follows the size its root reports at every
+/// step, as the scene's window does (`AnimatedArea` animates that size frame by frame), the content pinned to the top
+/// left corner. Frames: the scene's own window, off screen, whose every step is logged.
+@MainActor
+private final class ReelWindow {
+    let window: NSWindow
+    private let host: NSHostingView<AnyView>?
+    private var content: CGSize = .zero
+    private var observer: NSObjectProtocol?
+    private(set) var log: [(t: CFTimeInterval, size: CGSize, origin: CGPoint)] = []
+    var logging = false
+
+    /// A window of this process holding `root`.
+    init(visual root: some View, corner: CGPoint) {
+        let host = NSHostingView(rootView: AnyView(root))
+        // Its ideal size as an intrinsic size, nothing pinning the window to it: the reel sets the frame itself.
+        host.sizingOptions = [.intrinsicContentSize]
+        self.host = host
+        let size = host.intrinsicContentSize
+        content = size
+        let window = KeyWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable],
+                               backing: .buffered, defer: false)
+        window.title = "Nítido"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.backgroundColor = NSColor(hex: Theme.Hex.background)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.isReleasedWhenClosed = false
+        let pin = ReelPinView(frame: CGRect(origin: .zero, size: size))
+        pin.addSubview(host)
+        host.frame = CGRect(origin: .zero, size: size)
+        window.contentView = pin
+        window.level = .floating
+        self.window = window
+        place(at: corner)
+        window.orderFrontRegardless()
+    }
+
+    /// The scene's own window.
+    init(scene window: NSWindow) {
+        self.window = window
+        host = nil
+        observer = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.logging else { return }
+                self.log.append((CACurrentMediaTime(), self.window.contentLayoutRect.size, self.window.frame.origin))
+            }
+        }
+    }
+
+    func place(at corner: CGPoint) {
+        window.setFrameTopLeftPoint(CGPoint(x: corner.x, y: NSScreen.main!.frame.height - corner.y))
+    }
+
+    /// The content's origin within a recorded rect (top left origin, points).
+    func contentOrigin(in rect: CGRect) -> CGPoint {
+        let frame = window.frame, layout = window.contentLayoutRect
+        let top = NSScreen.main!.frame.height - frame.maxY + (frame.height - layout.maxY)
+        return CGPoint(x: frame.minX - rect.minX, y: top - rect.minY)
+    }
+
+    func startLog() { log = [(CACurrentMediaTime(), window.contentLayoutRect.size, window.frame.origin)]; logging = true }
+
+    /// One step of the visual window: the frame takes the size the root reports now, top left fixed.
+    func step(now: CFTimeInterval) {
+        guard let host else { return }
+        host.layoutSubtreeIfNeeded()
+        let target = host.intrinsicContentSize
+        guard target.width > 0, target.height > 0, target != content else { return }
+        host.frame = CGRect(origin: .zero, size: target)
+        resize(to: target)
+    }
+
+    private func resize(to size: CGSize) {
+        guard size != content || window.contentLayoutRect.size != size else { return }
+        content = size
+        let top = window.frame.maxY
+        var frame = window.frameRect(forContentRect: CGRect(origin: .zero, size: size))
+        frame.origin = CGPoint(x: window.frame.minX, y: top - frame.height)
+        window.setFrame(frame, display: true)
+    }
+
+    func close() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        window.orderOut(nil)
+    }
+}
+
+/// Keeps the content at the top left corner, at its own size, however large the window is.
+private final class ReelPinView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Plays the choreography's moments in order: recorded in the visual run, the scene's frames logged in the frames run.
+@MainActor
+private final class ReelDirector {
+    enum Mode { case visual, frames }
+    /// The child's director, which its scenes read.
+    static var hosted: ReelDirector?
+
+    let mode: Mode
+    let sources = PictureSources()
+    let policy = ReelPolicy()
+    var opener: ((String) -> Void)?
+    private(set) var clips: [ReelClip] = []
+    private var pictures: [CVPixelBuffer] = []
+    private var pictureSize = CGSize.zero
+    private var feed: Task<Void, Never>?
+    private var peers: [Peer] = []
+    private var backdrop: NSWindow?
+    private var share: ReelWindow?
+    private var view: ReelWindow?
+
+    init(mode: Mode) { self.mode = mode }
+
+    lazy var shareApp: AppModel = {
+        let sources = self.sources
+        return AppModel(makeShare: { ShareModel(makeSource: { sources.make() }, screenRecordingGranted: { true }) },
+                        makeView: { ViewModel(startingDiscovery: false) }, terminate: {}, revealWindow: {}, hideWindows: {})
+    }()
+
+    lazy var viewApp: AppModel = {
+        AppModel(makeShare: { ShareModel(makeSource: { PictureSource() }, screenRecordingGranted: { true }) },
+                 makeView: { [weak self] in
+                     let v = ViewModel(startingDiscovery: false)
+                     v.peers = self?.peers ?? []
+                     return v
+                 }, terminate: {}, revealWindow: {}, hideWindows: {})
+    }()
+
+    /// The share window's top left corner and the viewer's, on screen (top left origin, points), and what is recorded.
+    private let shareCorner = CGPoint(x: 12, y: 44)
+    private let viewCorner = CGPoint(x: 686, y: 44)
+    private var backdropRect: CGRect { CGRect(x: 0, y: 30, width: NSScreen.main!.frame.width, height: 610) }
+    private var shareRect: CGRect { CGRect(x: 2, y: 34, width: 836, height: 600) }
+    private var bothRect: CGRect { CGRect(x: 0, y: 34, width: NSScreen.main!.frame.width, height: 560) }
+    private var viewRect: CGRect { CGRect(x: viewCorner.x - 10, y: 34, width: 676, height: 560) }
+
+    /// The child's run: whatever happens, the process ends and the frames written so far stay.
+    func runHosted() async {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(280))
+            print("motion reel: watchdog fired"); fflush(stdout); exit(1)
+        }
+        do {
+            try await play()
+            print("motion reel: frames done"); fflush(stdout)
+            exit(0)
+        } catch {
+            print("motion reel failed: \(error)"); fflush(stdout)
+            exit(1)
+        }
+    }
+
+    func tearDown() {
+        feed?.cancel()
+        share?.close(); view?.close()
+        backdrop?.orderOut(nil)
+    }
+
+    /// Waits `seconds`, the windows following their content meanwhile (visual), or the app's run loop turning (frames).
+    private func pause(_ seconds: Double) async throws {
+        guard mode == .visual else { try await Task.sleep(for: .seconds(seconds)); return }
+        let end = CACurrentMediaTime() + seconds
+        repeat {
+            while let event = NSApp.nextEvent(matching: .any, until: nil, inMode: .default, dequeue: true) { NSApp.sendEvent(event) }
+            let now = CACurrentMediaTime()
+            share?.step(now: now); view?.step(now: now)
+            try await Task.sleep(for: .milliseconds(4))
+        } while CACurrentMediaTime() < end
+    }
+
+    private func waitUntil(_ what: String, timeout: Double = 10, _ condition: () -> Bool) async throws {
+        let deadline = CACurrentMediaTime() + timeout
+        while !condition() {
+            guard CACurrentMediaTime() < deadline else { throw RenderError.timedOut(what) }
+            try await pause(0.02)
+        }
+    }
+
+    private func sceneWindow(_ title: String) async throws -> NSWindow {
+        let deadline = CACurrentMediaTime() + 10
+        while CACurrentMediaTime() < deadline {
+            if let w = NSApp.windows.first(where: { $0.title == title }) { return w }
+            try await pause(0.05)
+        }
+        throw RenderError.timedOut("the window \(title)")
+    }
+
+    /// The share's window, or the viewer's, made for this run.
+    private func openWindow(_ which: String) async throws -> ReelWindow {
+        let app = which == "share" ? shareApp : viewApp
+        switch mode {
+        case .visual:
+            return ReelWindow(visual: ReelRoot(app: app, policy: policy), corner: which == "share" ? shareCorner : viewCorner)
+        case .frames:
+            opener?(which)
+            return ReelWindow(scene: try await sceneWindow(which == "share" ? "Nítido" : "Nítido Viewer"))
+        }
+    }
+
+    /// Records the moment `name` (visual: the screen rect under the backdrop, its markers where `body` flashes them;
+    /// frames: both windows' frames from the first flash, `frames/<name>.csv`).
+    private func record(_ name: String, rect: CGRect, seconds: Double, markers: [String], sheets: Int = 2, crops: [ReelCrop] = [],
+                        _ body: @MainActor (ReelMark) async throws -> Void) async throws {
+        switch mode {
+        case .visual:
+            let clip = ReelClip(name: name, rect: rect, markers: markers, sheets: sheets, crops: crops)
+            // Only what lies under the backdrop is recorded: Nítido's windows on a plain ground, nothing else.
+            guard let backdrop, backdrop.isVisible, backdropRect.contains(rect) else { throw ReelError.tool("the backdrop does not cover \(name)") }
+            let marker = ReelMarker(rect: rect)
+            defer { marker.close() }
+            let recorder = try ReelRecorder(clip, seconds: seconds)
+            try await pause(0.9)
+            try await body(ReelMark { marker.flash() })
+            try await pause(0.05)
+            while true {
+                let done = try recorder.poll()
+                if done { break }
+                try await pause(0.05)
+            }
+            clips.append(clip)
+        case .frames:
+            var start: CFTimeInterval?
+            share?.startLog(); view?.startLog()
+            try await body(ReelMark { if start == nil { start = CACurrentMediaTime() } })
+            try await pause(max(0.6, seconds - 1.6))
+            share?.logging = false; view?.logging = false
+            var csv = "t_ms,window,width,height,x,y\n"
+            for (label, w) in [("share", share), ("view", view)] {
+                for entry in w?.log ?? [] {
+                    csv += String(format: "%.1f,%@,%.0f,%.0f,%.0f,%.0f\n", (entry.t - (start ?? entry.t)) * 1000, label, entry.size.width,
+                                  entry.size.height, entry.origin.x, entry.origin.y)
+                }
+            }
+            try csv.write(to: MotionReel.frames.appendingPathComponent("\(name).csv"), atomically: true, encoding: .utf8)
+        }
+        print("motion reel: \(name)"); fflush(stdout)
+    }
+
+    /// A new pick of `width` by `height` pixels at 2x: the capture says so, and frames of that size follow at 60 fps.
+    private func pick(width: Int, height: Int) throws {
+        pictures = try [Picture.desktop(width: width, height: height, caret: true), Picture.desktop(width: width, height: height, caret: false)]
+        pictureSize = CGSize(width: width, height: height)
+        sources.current?.emit(.started(pixelWidth: width, pixelHeight: height, scale: 2))
+        guard feed == nil else { return }
+        feed = Task { @MainActor [weak self] in
+            var index = 0
+            while !Task.isCancelled {
+                if let self, !self.pictures.isEmpty {
+                    let size = self.pictureSize
+                    self.sources.current?.emit(frame: CapturedFrame(pixelBuffer: self.pictures[index / 30 % 2],
+                                                                    captureHostTimeNs: UInt64(CACurrentMediaTime() * 1e9),
+                                                                    contentRect: CGRect(x: 0, y: 0, width: size.width / 2, height: size.height / 2),
+                                                                    scale: 2))
+                }
+                index += 1
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+        }
+    }
+
+    /// A crop of the share window's content (points from its content's top left), within the recorded rect.
+    private func crop(_ name: String, of window: ReelWindow?, in rect: CGRect, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) -> ReelCrop {
+        let origin = window?.contentOrigin(in: rect) ?? .zero
+        let cx = max(0, min(origin.x + x, rect.width - width)), cy = max(0, min(origin.y + y, rect.height - height))
+        return ReelCrop(name: name, x: cx, y: cy, width: width, height: height)
+    }
+
+    /// The moments, in order.
+    func play() async throws {
+        if mode == .visual {
+            // A plain backdrop behind the reel's windows, so the recordings hold nothing but Nítido.
+            let ground = NSWindow(contentRect: CGRect(x: backdropRect.minX, y: NSScreen.main!.frame.height - backdropRect.maxY,
+                                                      width: backdropRect.width, height: backdropRect.height),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            ground.backgroundColor = NSColor(srgbRed: 0.105, green: 0.11, blue: 0.125, alpha: 1)
+            ground.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+            ground.isReleasedWhenClosed = false
+            ground.ignoresMouseEvents = true
+            ground.orderFrontRegardless()
+            backdrop = ground
+        }
+        let shareWindow = try await openWindow("share")
+        share = shareWindow
+        try await pause(1.5)
+
+        // M1: the launch. Welcome is built anew for a launch while its window is away, and the window comes back.
+        shareWindow.window.orderOut(nil)
+        Instantly.run { shareApp.screen = .share }
+        try await pause(0.2)
+        shareApp.launchPlayed = false
+        Instantly.run { shareApp.screen = .welcome }
+        try await pause(0.3)
+        try await record("welcome-launch", rect: shareRect, seconds: 3.0, markers: ["launch"], sheets: 3,
+                         crops: [crop("card", of: shareWindow, in: shareRect, x: 34, y: 64, width: 532, height: 272)]) { mark in
+            mark.flash()
+            shareWindow.window.orderFrontRegardless()
+        }
+
+        // M3 and M6: Share, the picker's card; then a pick: the window grows to the picture and its entrance plays.
+        try await record("share-picture", rect: shareRect, seconds: 3.6, markers: ["share", "pick"], sheets: 2,
+                         crops: [crop("panel", of: shareWindow, in: shareRect, x: 540, y: 0, width: 260, height: 150),
+                                 crop("strip", of: shareWindow, in: shareRect, x: 0, y: 480, width: 800, height: 80)]) { mark in
+            mark.flash()
+            shareApp.startShare()
+            try await pause(1.0)
+            mark.flash()
+            try pick(width: 1600, height: 1000)
+            try await pause(1.4)
+        }
+        let share = try XCTUnwrap(shareApp.share)
+        try await waitUntil("the sharer listens") { share.listeningPort != nil }
+
+        // M8: a new code types itself in, after what three wrong codes do: a new code, and a listener keyed with it.
+        try await record("code-reveal", rect: shareRect, seconds: 2.0, markers: ["rotate"], sheets: 2,
+                         crops: [crop("code", of: shareWindow, in: shareRect, x: 600, y: 10, width: 200, height: 110)]) { mark in
+            mark.flash()
+            share.rotateCode()
+            try await pause(0.8)
+        }
+        try await waitUntil("the sharer listens with the new code") { share.listeningPort != nil }
+
+        // A later resize of the shared window: the window follows it.
+        try await record("share-resize", rect: shareRect, seconds: 2.0, markers: ["resize"], sheets: 2) { mark in
+            mark.flash()
+            try pick(width: 1300, height: 860)
+            try await pause(0.8)
+        }
+
+        // The viewer's window, at the right.
+        let sharer = Peer(id: "loopback", name: share.advertisedName ?? share.name, keyName: share.name,
+                          endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: share.listeningPort!)!))
+        peers = [sharer, Peer(id: "b", name: "Mac Studio de Ana", keyName: "Mac Studio de Ana", endpoint: .hostPort(host: "127.0.0.1", port: 9)),
+                 Peer(id: "c", name: "MacBook Air de Luis", keyName: "MacBook Air de Luis", endpoint: .hostPort(host: "127.0.0.1", port: 9))]
+        viewApp.launchPlayed = true
+        let viewWindow = try await openWindow("view")
+        view = viewWindow
+        try await pause(1.2)
+
+        // M4: View; the list staggers in.
+        try await record("view-list", rect: viewRect, seconds: 2.2, markers: ["view"], sheets: 2) { mark in
+            mark.flash()
+            viewApp.startView()
+            try await pause(0.9)
+        }
+        let viewer = try XCTUnwrap(viewApp.view)
+        // A Mac that appears alone rises at once; one that goes fades and the rows close up.
+        try await record("view-arrival", rect: viewRect, seconds: 2.4, markers: ["arrives", "goes"], sheets: 1) { mark in
+            mark.flash()
+            viewer.peers.append(Peer(id: "d", name: "Mac mini del estudio", keyName: "Mac mini del estudio", endpoint: .hostPort(host: "127.0.0.1", port: 9)))
+            try await pause(0.7)
+            mark.flash()
+            viewer.peers.removeAll { $0.id == "b" }
+            try await pause(0.6)
+        }
+
+        // M5: a Mac picked, the code; a wrong code shakes; Back returns to the list (M19).
+        try await record("view-code", rect: viewRect, seconds: 2.0, markers: ["pick"], sheets: 2) { mark in
+            mark.flash()
+            viewer.select(sharer)
+            try await pause(0.8)
+        }
+        try await record("view-wrong-code", rect: viewRect, seconds: 2.0, markers: ["connect"], sheets: 2) { mark in
+            viewer.code = share.code == "0000" ? "1111" : "0000"
+            mark.flash()
+            viewer.connect()
+            try await waitUntil("the sharer turns the code away") { viewer.wrongCodeCount == 1 }
+            try await pause(0.5)
+        }
+        try await record("view-back", rect: viewRect, seconds: 1.8, markers: ["back"], sheets: 1) { mark in
+            mark.flash()
+            viewer.disconnect()
+            try await pause(0.6)
+        }
+        viewer.select(sharer)
+        try await pause(0.6)
+
+        // M7 and M9: the viewer connects; its window grows to the stream while the sharer's panel takes the viewer in.
+        try await record("viewer-connecting", rect: bothRect, seconds: 3.0, markers: ["connect"], sheets: 3,
+                         crops: [crop("sharer-panel", of: shareWindow, in: bothRect, x: 400, y: 0, width: 250, height: 190),
+                                 crop("viewer-chip", of: viewWindow, in: bothRect, x: 420, y: 0, width: 230, height: 80)]) { mark in
+            viewer.code = share.code
+            mark.flash()
+            viewer.connect()
+            try await waitUntil("the viewer is connected") { viewer.state == .connected && share.viewerName != nil }
+            try await pause(1.2)
+        }
+
+        // M15: the viewer draws, then takes the stroke back with ⌘Z: at once on the viewer, rewinding on the sharer.
+        let theirs = viewer.ink.beginLocal(StrokePoint(x: 0.3, y: 0.55, pressure: 1, tMs: 0))
+        viewer.ink.appendLocal(theirs, (1...40).map { i in
+            let t = Double(i) / 40
+            return StrokePoint(x: Float(0.3 + 0.3 * t), y: Float(0.55 + 0.08 * sin(t * .pi * 3)), pressure: 1, tMs: UInt32(i * 12))
+        })
+        viewer.ink.endLocal(theirs)
+        try await pause(0.5)
+        try await record("ink-undo", rect: bothRect, seconds: 1.8, markers: ["undo"], sheets: 1,
+                         crops: [crop("sharer-ink", of: shareWindow, in: bothRect, x: 150, y: 150, width: 300, height: 140),
+                                 crop("viewer-ink", of: viewWindow, in: bothRect, x: 150, y: 150, width: 300, height: 140)]) { mark in
+            mark.flash()
+            viewer.ink.undoLocal()
+            try await pause(0.5)
+        }
+
+        // M12: the codec loop switched on by the pointer (what the switch's binding does, `LoopbackPanel.pointerToggle`),
+        // off, then ⌘L, at once.
+        let loopPanel = crop("panel", of: shareWindow, in: shareRect, x: 0, y: 0, width: 260, height: 190)
+        try await record("codec-loop-on", rect: shareRect, seconds: 2.0, markers: ["on"], sheets: 2, crops: [loopPanel]) { mark in
+            mark.flash()
+            share.loopToggledAt = CACurrentMediaTime()
+            withAnimation(Theme.Motion.move.animation) { share.loopback = true }
+            try await pause(0.9)
+        }
+        try await record("codec-loop-off", rect: shareRect, seconds: 1.6, markers: ["off"], sheets: 1, crops: [loopPanel]) { mark in
+            mark.flash()
+            share.loopToggledAt = CACurrentMediaTime()
+            withAnimation(LoopbackPanel.Unfold.fold.animation) { share.loopback = false }
+            try await pause(0.5)
+        }
+        try await record("codec-loop-cmd-l", rect: shareRect, seconds: 1.6, markers: ["on", "off"], sheets: 1, crops: [loopPanel]) { mark in
+            mark.flash()
+            shareApp.toggleLoopback()
+            try await pause(0.5)
+            mark.flash()
+            shareApp.toggleLoopback()
+            try await pause(0.3)
+        }
+        // ⌘H, twice: the strip and the window's height at once.
+        try await record("strip-cmd-h", rect: shareRect, seconds: 1.6, markers: ["hide", "show"], sheets: 1) { mark in
+            mark.flash()
+            shareApp.toggleTelemetry()
+            try await pause(0.5)
+            mark.flash()
+            shareApp.toggleTelemetry()
+            try await pause(0.3)
+        }
+
+        // M16: the capture stopped from the menu bar: Retry over the dimmed picture; the viewer is told.
+        try await record("failure-card", rect: bothRect, seconds: 2.2, markers: ["failed"], sheets: 2) { mark in
+            mark.flash()
+            sources.current?.emit(.failed(CaptureFailure(reason: .stoppedFromMenuBar, detail: "stopped")))
+            try await pause(1.0)
+        }
+        // Retry: the card gives way to the picker's card, then a pick brings the picture back.
+        let sessions = sources.count
+        try await record("retry", rect: shareRect, seconds: 2.8, markers: ["retry", "pick"], sheets: 1) { mark in
+            mark.flash()
+            share.retry()
+            try await waitUntil("Retry opens a new session") { self.sources.count > sessions }
+            try await pause(0.8)
+            mark.flash()
+            try pick(width: 1300, height: 860)
+            try await pause(1.0)
+        }
+        try await waitUntil("the sharer listens again") { share.state == .capturing && share.listeningPort != nil }
+        let again = Peer(id: "loopback", name: share.name, keyName: share.name,
+                         endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: share.listeningPort!)!))
+        viewer.disconnect()
+        viewer.peers = [again]
+        viewer.select(again)
+        viewer.code = share.code
+        viewer.connect()
+        try await waitUntil("the viewer is connected again") { viewer.state == .connected && share.viewerName != nil }
+        try await pause(1.5)
+
+        // M10: the link drops without bye: the viewer dims its last frame and breathes a gold dot; the sharer's panel
+        // says the viewer is reconnecting.
+        try await record("reconnecting", rect: bothRect, seconds: 3.6, markers: ["drop"], sheets: 2,
+                         crops: [crop("sharer-panel", of: shareWindow, in: bothRect, x: 400, y: 0, width: 250, height: 200),
+                                 crop("viewer-pill", of: viewWindow, in: bothRect, x: 160, y: 150, width: 330, height: 130)]) { mark in
+            mark.flash()
+            share.advertiser?.stop()
+            share.link?.abort()
+            try await waitUntil("the viewer reconnects") { if case .reconnecting = viewer.state { return true }; return false }
+            try await pause(2.0)
+        }
+
+        // M18: Disconnect and Stop, clicked in the question: each window closes in around Welcome's card.
+        try await record("disconnect", rect: bothRect, seconds: 2.6, markers: ["disconnect", "stop"], sheets: 1) { mark in
+            mark.flash()
+            viewApp.confirmedStop()
+            try await pause(0.7)
+            mark.flash()
+            shareApp.confirmedStop()
+            try await pause(0.8)
+        }
+
+        // M17: Esc on the list: Welcome at once.
+        viewApp.startView()
+        try await pause(1.0)
+        try await record("esc-from-list", rect: viewRect, seconds: 1.4, markers: ["esc"], sheets: 1) { mark in
+            mark.flash()
+            viewApp.escape()
+            try await pause(0.4)
+        }
+
+        // Reduce Motion: the share's picture and the launch again, fades only, the window at once.
+        policy.reduceMotion = true
+        try await pause(0.3)
+        try await record("share-picture-reduced", rect: shareRect, seconds: 3.4, markers: ["share", "pick"], sheets: 2) { mark in
+            mark.flash()
+            shareApp.startShare()
+            try await waitUntil("a new session") { self.sources.count > sessions + 1 }
+            try await pause(0.9)
+            mark.flash()
+            try pick(width: 1600, height: 1000)
+            try await pause(1.2)
+        }
+        await shareApp.stop()
+        try await pause(0.6)
+        shareWindow.window.orderOut(nil)
+        Instantly.run { shareApp.screen = .share }
+        try await pause(0.2)
+        shareApp.launchPlayed = false
+        Instantly.run { shareApp.screen = .welcome }
+        try await pause(0.3)
+        try await record("welcome-launch-reduced", rect: shareRect, seconds: 2.4, markers: ["launch"], sheets: 2) { mark in
+            mark.flash()
+            shareWindow.window.orderFrontRegardless()
+        }
+        feed?.cancel(); feed = nil
+    }
+}
+
+/// What a moment's body calls where the moment starts.
+@MainActor
+private struct ReelMark {
+    let flash: @MainActor () -> Void
+}
