@@ -136,7 +136,7 @@ Every stage drops work instead of queueing it:
 
 One wait is left: frames that reach the viewer while its main thread is busy wait in the link's message stream. When they come in a burst, the decoder takes eight and skips the rest to the next keyframe.
 
-Every 250 ms the bitrate controller reads the RTT (the last second's median, or how long an unanswered ping has waited, if that is longer) and the send backlog. It cuts 25% when the backlog passes two frames' worth, the RTT climbs 40 ms above its 10-second minimum, or the sender started skipping, then holds for 2 s (a new skip cuts even then). It adds 10% at most every 2 s while the backlog stays under one frame and the RTT within 15 ms of its minimum. It keeps between 2 and 60 Mbps and starts at 20 Mbps for 1080p, scaled by pixel count (45.6 Mbps for the 2692×1756 px window above). The design spec and the implementation plan are in `docs/superpowers/`.
+Every 250 ms the bitrate controller reads the RTT (the last second's median, or how long an unanswered ping has waited, if that is longer) and the send backlog. It cuts 25% when the backlog passes two frames' worth, the RTT climbs 40 ms above its 10-second minimum, or the sender started skipping, then holds for 2 s (a new skip cuts even then). It adds 10% at most every 2 s while the backlog stays under one frame and the RTT within 15 ms of its minimum. It keeps between 2 and 60 Mbps and starts at 20 Mbps for 1080p, scaled by pixel count (45.6 Mbps for the 2692×1756 px window above). The design spec and the implementation plan are in `docs/design/`.
 
 ## What I found by testing on two Macs
 
