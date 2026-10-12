@@ -466,10 +466,10 @@ struct LoopbackPanel: View {
         new != old && (new == ShareModel.qualityRange.lowerBound || new == ShareModel.qualityRange.upperBound)
     }
 
-    /// The switch flipped by the pointer: inside an explicit transaction, so the panel unfolds (and the strip makes room
-    /// for its codec figure) on the move curve, and what the loop brings stages from now (`ShareModel.loopToggledAt`).
-    /// Under Reduce Motion the panel takes its size at once and its rows fade. ⌘L comes through `AppModel` instead, at
-    /// once.
+    /// The switch flipped by the pointer: inside an explicit transaction, so the panel unfolds on the move curve, and what
+    /// the loop brings stages from now (`ShareModel.loopToggledAt`). The strip restacks at once all the same, its codec
+    /// figure fading in at 80 ms (`TelemetryStrip`). Under Reduce Motion the panel takes its size at once and its rows
+    /// fade. ⌘L comes through `AppModel` instead, at once.
     private var pointerToggle: Binding<Bool> {
         Binding(get: { model.loopback }, set: { on in
             guard on != model.loopback else { return }

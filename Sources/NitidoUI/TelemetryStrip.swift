@@ -46,10 +46,11 @@ public struct TelemetryStrip: View {
             Figure(Label.display, value: fps(snapshot.displayFPS), unit: "fps", number: snapshot.displayFPS)
             Figure(latencyLabel, value: ms(snapshot.latencyMs), unit: "ms", number: snapshot.latencyMs, highlight: latencyHigh)
             if showsCodec {
-                // In with the loop, 80 ms after the switch, as the figures after it make room; out faster.
+                // In with the loop, 80 ms after the switch, into the room the strip made for it at once; out at once
+                // with the restack, so it never fades over the figure that takes its place.
                 Figure(Label.codec, value: ms(codecMs), unit: "ms", number: codecMs)
                     .transition(AsymmetricTransition(insertion: .opacity.animation(TelemetryMotion.codecIn.animation(after: TelemetryMotion.codecDelay)),
-                                                     removal: .opacity.animation(TelemetryMotion.codecOut.animation)))
+                                                     removal: .identity))
             }
             Figure(Label.rtt, value: ms(snapshot.rttMs), unit: "ms", number: snapshot.rttMs)
             Figure(Label.bitrate, value: snapshot.bitrateMbps > 0 ? String(format: "%.1f", snapshot.bitrateMbps) : "·", unit: "Mbps",
@@ -64,6 +65,11 @@ public struct TelemetryStrip: View {
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(Theme.Colors.surface)
         .overlay(alignment: .top) { Rectangle().fill(Theme.Colors.hairline).frame(height: 1) }
+        // The codec figure coming or going restacks the strip at once, on the pointer's switch too (spec 11, M12): moved
+        // on a curve, the figures after it crossed each other's text, and a row that wrapped sent the size figure
+        // diagonally across RTT, BITRATE and DROPPED (recorded 2026-10-12). The window's height changes at once too, so
+        // the strip's surface goes with it. The codec figure's fade, carried by its transition, is the only motion.
+        .transaction(value: showsCodec) { $0.animation = nil }
     }
 
     private func fps(_ v: Double) -> String { v > 0 ? "\(Int(v.rounded()))" : "·" }
@@ -81,10 +87,10 @@ enum TelemetryMotion {
     /// Over a threshold: to gold over 120 ms on the strong ease-out; back to the text colour over 400 ms when it clears.
     static let warn = Theme.Motion.enter.over(0.12)
     static let clear = Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 0.4)
-    /// The codec figure with the loop: in over 180 ms after 80 ms, out over 100 ms.
+    /// The codec figure with the loop: in over 180 ms after 80 ms, into the room the strip makes for it at once; out at
+    /// once, as the strip closes the gap.
     static let codecIn = Theme.Motion.enter.over(0.18)
     static let codecDelay: Double = 0.08
-    static let codecOut = Theme.Motion.exit.over(0.1)
 }
 
 private struct Figure: View {
@@ -128,13 +134,20 @@ private struct Figure: View {
                                value: value)
                     .animation((highlight ? TelemetryMotion.warn : TelemetryMotion.clear).animation, value: highlight)
                     .frame(minWidth: CGFloat(characters) * Self.advance, alignment: .leading)
-                Text(unit).font(Theme.Fonts.figures(10)).foregroundStyle(Theme.Colors.secondaryText)
-                    .contentTransition(.opacity)
-                    .animation(TelemetryMotion.crossfade.animation, value: unit)
+                // A new unit (raw to HEVC) crossfades in place, in opacity alone: an animation keyed to the unit would
+                // carry the Text's position too, and leave it floating behind its value as the figure moves.
+                ZStack(alignment: .leading) {
+                    Text(unit).font(Theme.Fonts.figures(10)).foregroundStyle(Theme.Colors.secondaryText)
+                        .id(unit)
+                        .transition(.opacity.animation(TelemetryMotion.crossfade.animation))
+                }
             }
         }
         // A figure wider than a whole row (a tiny picture) is truncated, never wrapped onto a second line.
         .lineLimit(1)
+        // The figure moves as one, where the strip places it, at once: the value's roll and crossfade stay inside it,
+        // so a value that changes as its figure moves to another place or row never slides there on its own curve.
+        .geometryGroup()
         .onChange(of: value, initial: true) { _, new in slot.previous = new }
     }
 }
