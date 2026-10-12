@@ -223,34 +223,49 @@ public struct ConnectRing: View {
     let reconnecting: Bool
     let delay: Double
     @ReducedMotion private var reduceMotion
-    @State private var progress: CGFloat = 0
-    @State private var settled = false
     public init(trigger: Int, shownFor: Binding<Int>, reconnecting: Bool = false, delay: Double = 0) {
         self.trigger = trigger; _shownFor = shownFor; self.reconnecting = reconnecting; self.delay = delay
     }
     public var body: some View {
-        Capsule(style: .continuous).inset(by: -4).trim(from: 0, to: progress)
-            .stroke(settled ? Theme.Colors.hairline : Theme.Colors.gold,
-                    style: StrokeStyle(lineWidth: settled ? 1 : 1.5, lineCap: .round))
+        // One stroke per connection: a new one replaces the last and draws from nothing. Reset and drawn again in one
+        // update, a stroke already drawn went 1, 0, 1 within it, which SwiftUI saw as no change, so on a reconnect the
+        // ring came back drawn and only settled (review, 2026-10-12).
+        Stroke(trigger: trigger, shownFor: $shownFor, delay: delay)
+            .id(trigger)
             .opacity(reduceMotion || reconnecting ? 0 : 1)
             .animation(Self.fadeOut.animation, value: reconnecting)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-            .onAppear { begin() }
-            .onChange(of: trigger) { _, _ in begin() }
     }
-    private func begin() {
-        switch Self.start(trigger: trigger, shownFor: shownFor, reduceMotion: reduceMotion) {
-        case .hidden: progress = 0
-        case .drawn: progress = 1; settled = true
-        case .animate:
-            var reset = Transaction(animation: nil); reset.disablesAnimations = true
-            withTransaction(reset) { progress = 0; settled = false }
-            withAnimation(Theme.Motion.connect.animation(after: delay)) { progress = 1 } completion: {
-                withAnimation(Theme.Motion.settle.animation) { settled = true }
-            }
+
+    /// The ring of one connection, from nothing: at rest when it has played for this connection, drawn by the spring
+    /// when it has not, nothing under Reduce Motion.
+    private struct Stroke: View {
+        let trigger: Int
+        @Binding var shownFor: Int
+        let delay: Double
+        @ReducedMotion private var reduceMotion
+        @State private var progress: CGFloat = 0
+        @State private var settled = false
+
+        var body: some View {
+            Capsule(style: .continuous).inset(by: -4).trim(from: 0, to: progress)
+                .stroke(settled ? Theme.Colors.hairline : Theme.Colors.gold,
+                        style: StrokeStyle(lineWidth: settled ? 1 : 1.5, lineCap: .round))
+                .onAppear { begin() }
         }
-        shownFor = trigger
+
+        private func begin() {
+            switch ConnectRing.start(trigger: trigger, shownFor: shownFor, reduceMotion: reduceMotion) {
+            case .hidden: break
+            case .drawn: progress = 1; settled = true
+            case .animate:
+                withAnimation(Theme.Motion.connect.animation(after: delay)) { progress = 1 } completion: {
+                    withAnimation(Theme.Motion.settle.animation) { settled = true }
+                }
+            }
+            shownFor = trigger
+        }
     }
 }
 
