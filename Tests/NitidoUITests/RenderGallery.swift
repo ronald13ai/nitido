@@ -1099,6 +1099,8 @@ private final class ReelDirector {
     private var feed: Task<Void, Never>?
     private var peers: [Peer] = []
     private var backdrop: NSWindow?
+    /// The sharer's dropped frames and rates per moment (`record`).
+    private var hotPath = "moment,dropped,capture_fps,display_fps\n"
     private var share: ReelWindow?
     private var view: ReelWindow?
 
@@ -1203,12 +1205,20 @@ private final class ReelDirector {
             defer { marker.close() }
             let recorder = try ReelRecorder(clip, seconds: seconds)
             try await pause(0.9)
+            // The hot path's pass mark (spec 11): frames dropped by the sharer during the moment and the second after it,
+            // and its capture and display rates once it is over.
+            let droppedBefore = shareApp.share?.droppedFramesTotal
             try await body(ReelMark { marker.flash() })
             try await pause(0.05)
             while true {
                 let done = try recorder.poll()
                 if done { break }
                 try await pause(0.05)
+            }
+            if let share = shareApp.share, let droppedBefore, share.state == .capturing {
+                let s = share.snapshot
+                hotPath += String(format: "%@,%d,%.0f,%.0f\n", name, share.droppedFramesTotal - droppedBefore, s.captureFPS, s.displayFPS)
+                try? hotPath.write(to: MotionReel.clips.appendingPathComponent("hot-path.csv"), atomically: true, encoding: .utf8)
             }
             clips.append(clip)
         case .frames:
