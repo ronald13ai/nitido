@@ -16,9 +16,11 @@ final class CodecWarmUpTests: XCTestCase {
         XCTAssertLessThan(made, 0.05, "an encoder after the warm-up took \(Int(made * 1000)) ms")
     }
 
-    /// `start` warms once per process, however often it is called.
+    /// `start` warms once per process, however often it is called. The first call may have come from a model another
+    /// test made (the suite is one process), so only the calls after it are asserted.
     func testStartIsOncePerProcess() {
         CodecWarmUp.start()
-        CodecWarmUp.start()
+        XCTAssertFalse(CodecWarmUp.start(), "called again, it starts nothing")
+        XCTAssertFalse(CodecWarmUp.start())
     }
 }

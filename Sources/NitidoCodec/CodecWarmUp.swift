@@ -14,14 +14,17 @@ private let log = Logger(subsystem: "ai.ronar.nitido", category: "codec")
 public enum CodecWarmUp {
     private static let started = OSAllocatedUnfairLock(initialState: false)
 
-    /// Starts the warm-up on a background queue, the first time it is called in the process; does nothing after.
-    public static func start() {
+    /// Starts the warm-up on a background queue, the first time it is called in the process; does nothing after. True
+    /// when this call started it.
+    @discardableResult
+    public static func start() -> Bool {
         let first = started.withLock { was -> Bool in
             defer { was = true }
             return !was
         }
-        guard first else { return }
+        guard first else { return false }
         DispatchQueue.global(qos: .utility).async { warm() }
+        return true
     }
 
     /// Holds what the encoder's handler hands over, for the thread that waits for it.
