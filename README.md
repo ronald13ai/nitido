@@ -16,9 +16,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/loop.gif" width="900" alt="Twenty seconds of Nítido: the launch, a press on Share, the picture arriving with its code, a viewer pairing and its gold ring, a stroke from each side, the codec loop switched on and its divider dragged, the strokes fading, the quality lowered, and Stop back to Welcome">
+  <img src="docs/screenshots/loop.gif" width="800" alt="Twenty seconds of Nítido, from Welcome back to Welcome: a press on Share, the picture arriving with its code, a second Mac pairing with a gold ring round its name, a stroke from each side, the codec loop switched on and its divider dragged, the strokes fading, the quality lowered, the loop off, and Stop">
 </p>
-<p align="center"><sub>One take through the render harness: the app's own screens and models, a synthetic desktop shared to a viewer over the loopback link, an arrow drawn where the harness clicks. Every timing is listed under <a href="#motion">Motion</a>.</sub></p>
+<p align="center"><sub>One take through the render harness, recorded at 2x: the app's own screens and models, a synthetic desktop shared over the loopback link to a viewer named as a second Mac, and an arrow drawn where the harness clicks. The strip is live but is not a measurement: one process plays both Macs while the screen is recorded, so its dropped frames are the take's, and its figures change without their roll, which 15 fps would catch halfway. Every timing is listed under <a href="#motion">Motion</a>.</sub></p>
 
 A native macOS app that shares a window or a screen to another Mac on the local network. Swift 6.2, ScreenCaptureKit, VideoToolbox, Network.framework and Metal; no third-party code.
 
@@ -38,10 +38,10 @@ I built it in a week in October 2026, as a prototype of the core loop of a pair-
 | <img src="docs/screenshots/01-welcome.png" width="380" alt="Welcome"> | <img src="docs/screenshots/05-pairing.png" width="380" alt="The viewer typing the sharer's 4-digit code (captured from the real window through the render harness)"> |
 |:---:|:---:|
 | **Welcome.** Share this Mac, or view another. | **Pairing.** The viewer types the 4-digit code the sharer shows. |
-| <img src="docs/screenshots/02-share-loopback.png" width="380" alt="The codec loop: the raw capture left of the divider, HEVC at the slider's bitrate right of it"> | <img src="docs/screenshots/03-viewer.png" width="380" alt="The viewer paired over loopback, with ink from both sides and the sharer's pointer (captured from the real window through the render harness over a synthetic desktop)"> |
-| **The codec loop.** Raw capture left of the divider, HEVC at the slider's bitrate right of it. | **The viewer.** Ink from both sides and the sharer's pointer (render harness, synthetic desktop). |
+| <img src="docs/screenshots/02-share-loopback.png" width="380" alt="The codec loop over a synthetic desktop: the raw capture left of the divider, HEVC at 20 Mbps right of it, the switch and the quality slider in gold (captured from the real window through the render harness)"> | <img src="docs/screenshots/03-viewer.png" width="380" alt="The viewer paired over loopback, with ink from both sides and the sharer's pointer (captured from the real window through the render harness over a synthetic desktop)"> |
+| **The codec loop.** Raw capture left of the divider, HEVC at the slider's bitrate right of it (render harness, synthetic desktop). | **The viewer.** Ink from both sides and the sharer's pointer (render harness, synthetic desktop). |
 
-<p align="center"><img src="docs/screenshots/04-strip.png" width="820" alt="The telemetry strip"></p>
+<p align="center"><img src="docs/screenshots/04-strip.png" width="673" alt="The telemetry strip during a codec loop in the app: capture and display rates, capture to display, codec time, RTT, bitrate, dropped frames, size and codec, and the latency sparkline"></p>
 <p align="center"><sub><b>The telemetry strip.</b> Every figure under the picture, four times a second; the Measured table below was read from it.</sub></p>
 
 ## Motion
@@ -63,7 +63,7 @@ Every value here is a token in `Theme.Motion` ([`Theme.swift`](Sources/NitidoUI/
 | Ink | Strokes fade | 4 s after the last point, over 600 ms; the other Mac sees an undo rewind over 180 ms |
 | Reconnecting | The status dot breathes, the last frame dims | 1.2 s each way; 20 % |
 
-Keyboard actions repeated often (⌘H, ⌘L, ⌘Z, ⌘⌫, Esc) change things at once, the window's size included. The breathing dot and the sparkline run on Core Animation, so they never tick the main thread; the ink ticks on the main thread at 30 Hz only while a stroke fades, and the code types itself in on a SwiftUI timeline. Reduce Motion takes away every scale, rise and slide, the window's animated resize, the ring, the shake, the glint and the breathing, and keeps the fades at the same timings. The GIF at the top comes from `NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=<dir> swift test --filter RenderGallery/testReadmeReel`, which writes `<dir>/clips/loop.gif`; it was recorded on 0.2, so its strip still shows the partial counts of the picture's first second.
+Keyboard actions repeated often (⌘H, ⌘L, ⌘Z, ⌘⌫, Esc) change things at once, the window's size included. The breathing dot and the sparkline run on Core Animation, so they never tick the main thread; the ink ticks on the main thread at 30 Hz only while a stroke fades, and the code types itself in on a SwiftUI timeline. Reduce Motion takes away every scale, rise and slide, the window's animated resize, the ring, the shake, the glint and the breathing, and keeps the fades at the same timings. The GIF at the top comes from `NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=<dir> swift test --filter RenderGallery/testReadmeReel`, which writes `<dir>/clips/loop.gif` and the codec loop's still under Screens, `<dir>/clips/codec-loop.png`.
 
 ## Try it in a minute
 
