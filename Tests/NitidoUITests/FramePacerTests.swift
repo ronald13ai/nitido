@@ -19,6 +19,8 @@ private final class FakeDrawing: FrameDrawing {
     /// The presented time of each entry of `presented`, for the latency it reports.
     private(set) var presentedAt: [Double] = []
     private(set) var drops: [VideoView.Drop] = []
+    /// Every drawable reported shown, a redraw included, with its presented time.
+    private(set) var shown: [(kind: FramePacer.Kind, at: Double)] = []
 
     /// Every frame handed to `render`, with the comparison it carries.
     private(set) var frames: [FramePacer.Frame] = []
@@ -32,6 +34,7 @@ private final class FakeDrawing: FrameDrawing {
         presented.append(captureHostTimeNs)
         self.presentedAt.append(presentedAt)
     }
+    func frameShown(kind: FramePacer.Kind, at presentedAt: Double) { shown.append((kind, presentedAt)) }
     func frameDropped(_ drop: VideoView.Drop) { drops.append(drop) }
     var kinds: [FramePacer.Kind] { renders.map(\.kind) }
 }
@@ -530,6 +533,38 @@ final class FramePacerTests: XCTestCase {
         XCTAssertEqual(host.renders.last?.captureHostTimeNs, 2, "the newest frame, not the one on screen")
         pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 2, presentedAt: 2.0)
         XCTAssertEqual(host.presented, [1])
+    }
+
+    /// Every drawable that reaches the screen is reported shown, a redraw included, and a discarded one is not; only a
+    /// captured frame counts as presented. A first frame that came while the window could not draw it reaches the screen
+    /// as a redraw, and that is what lifts the picture's cover (spec 11, M6 and M7, amended 2026-10-12).
+    @MainActor
+    func testAFirstFrameHeldWhileHiddenIsShownByTheRedraw() throws {
+        let host = FakeDrawing()
+        let pacer = FramePacer()
+        pacer.host = host
+        pacer.drawableSize = CGSize(width: 800, height: 600)
+        host.canShowFrames = false
+        pacer.present(try frame(1))
+        XCTAssertEqual(host.drops, [.hidden])
+        XCTAssertTrue(host.renders.isEmpty)
+
+        host.canShowFrames = true
+        pacer.redraw()
+        XCTAssertEqual(host.kinds, [.redraw], "the held frame, drawn again as the window shows")
+        pacer.drawableReturned(kind: .redraw, captureHostTimeNs: 1, presentedAt: 2.0)
+        XCTAssertEqual(host.shown.map(\.kind), [.redraw])
+        XCTAssertEqual(host.shown.map(\.at), [2.0])
+        XCTAssertTrue(host.presented.isEmpty, "a redraw is not a display")
+
+        pacer.present(try frame(2))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 2, presentedAt: 0)
+        XCTAssertEqual(host.shown.count, 1, "a discarded drawable reached nothing")
+        pacer.present(try frame(3))
+        pacer.drawableReturned(kind: .live, captureHostTimeNs: 3, presentedAt: 3.0)
+        XCTAssertEqual(host.shown.map(\.kind), [.redraw, .live])
+        XCTAssertEqual(host.presented, [3], "a captured frame shown is both")
+        XCTAssertEqual(host.drops, [.hidden, .notPresented])
     }
 
     /// One drawable in flight with the usual pool of three: the compositor may still hold the drawable shown before
@@ -1508,6 +1543,31 @@ final class VideoViewHeldFrameTests: XCTestCase {
         display.show(view)
         sink.dropped(.replaced)
         XCTAssertEqual(drops.items, [.hidden, .hidden, .replaced], "no view, a view in no window, a view on screen")
+    }
+
+    /// The review's case (spec 11, M6, amended 2026-10-12): the capture's first frame comes while the window is covered,
+    /// so the view keeps it without drawing it, and a still source sends no other. When the window shows, the frame reaches
+    /// the screen as a redraw: that lifts the share's cover, and counts as no display.
+    @MainActor
+    func testAFirstFrameHeldWhileTheWindowIsCoveredLiftsTheCoverWhenItIsRedrawn() async throws {
+        let model = ShareModel(makeSource: { NeverSource() }, screenRecordingGranted: { true })
+        model.state = .capturing
+        let view = VideoView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        model.sink.view = view
+        let display = ShowingDisplay()
+        display.show(view)
+        display.canShowFrames = false
+        model.sink.push(try makeBuffer(), captureHostTimeNs: 9)
+        XCTAssertTrue(display.drawn.isEmpty, "kept, not drawn")
+        XCTAssertNil(model.firstFrameAt)
+        display.canShowFrames = true
+        view.pacer.redraw()   // what the window's occlusion or deminiaturize notification does
+        XCTAssertEqual(display.drawn, [9])
+        let deadline = Date().addingTimeInterval(2)
+        while model.firstFrameAt == nil, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertNotNil(model.firstFrameAt, "the redraw lifts the cover")
+        XCTAssertEqual(model.telemetry.snapshot(now: CACurrentMediaTime()).displayFPS, 0, "and is not a display")
+        model.state = .idle
     }
 
     /// Stop releases the frame the view keeps for redraws.

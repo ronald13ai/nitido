@@ -394,18 +394,21 @@ final class NavigationMotionTests: XCTestCase {
         share.state = .idle
     }
 
-    /// The cover over the picture waits for the capture's first frame on screen, the first one only, and a new capture
-    /// waits for its own (spec 11, M6, amended 2026-10-12).
+    /// The cover over the picture waits for the capture's first frame on screen, the first one only, a frame drawn again
+    /// included (one that came while the window was covered reaches the screen so), and a new capture waits for its own
+    /// (spec 11, M6, amended 2026-10-12).
     @MainActor
     func testTheCoverWaitsForTheFirstFrameShown() {
         let share = ShareModel(makeSource: { NeverSource() }, screenRecordingGranted: { true })
-        share.sink.onPresented?(UInt64(4.98e9), 5)
+        share.sink.onShown?(.live, 5)
         XCTAssertNil(share.firstFrameAt, "a frame before the capture began stages nothing")
         share.state = .capturing
         XCTAssertNil(share.firstFrameAt, "capturing, nothing on screen yet: the cover stays opaque")
-        share.sink.onPresented?(UInt64(9.98e9), 10)
-        XCTAssertEqual(share.firstFrameAt, 10)
-        share.sink.onPresented?(UInt64(9.996e9), 10.016)
+        share.sink.onPresented?(UInt64(9.9e9), 9.95)
+        XCTAssertNil(share.firstFrameAt, "the display count alone lifts nothing: every drawable shown is reported as shown")
+        share.sink.onShown?(.redraw, 10)
+        XCTAssertEqual(share.firstFrameAt, 10, "a frame drawn again lifts it")
+        share.sink.onShown?(.live, 10.016)
         XCTAssertEqual(share.firstFrameAt, 10, "only the first frame counts")
         share.state = .capturing
         XCTAssertEqual(share.firstFrameAt, 10, "a new size from the same capture keeps it")

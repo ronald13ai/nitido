@@ -21,14 +21,20 @@ protocol FrameDrawing: AnyObject {
     /// Renders `frame` into a fresh drawable and commits it. Returns nil once the drawable is committed; the
     /// host then calls `FramePacer.drawableReturned` when it is presented or discarded. Returns why otherwise.
     func render(_ frame: FramePacer.Frame, kind: FramePacer.Kind) -> VideoView.Drop?
+    /// A captured frame reached the screen: a display, with its latency.
     func framePresented(captureHostTimeNs: UInt64, at presentedAt: Double)
+    /// A drawable reached the screen, whatever it held: a captured frame (also reported to `framePresented`) or the
+    /// held frame drawn again. What lifts the picture's cover (`PictureCover`): a first frame that came while the window
+    /// could not draw it reaches the screen only as a redraw. Never a display.
+    func frameShown(kind: FramePacer.Kind, at presentedAt: Double)
     func frameDropped(_ drop: VideoView.Drop)
 }
 
 /// Decides when the video view draws. It keeps exactly one frame, the newest, so the picture can be drawn
 /// again when the drawable changes size or the window shows again: ScreenCaptureKit only sends changed frames,
 /// so a still source would otherwise stay stretched or stale. Redraws respect the frames-in-flight cap and are
-/// never reported as presented, so they add nothing to display fps or latency. A captured frame that meets the
+/// never reported as presented, so they add nothing to display fps or latency; every drawable that reaches the screen,
+/// a redraw included, is reported as shown (`frameShown`), which counts towards nothing. A captured frame that meets the
 /// cap waits for the next drawable as a live frame, so it still counts as displayed, with its real latency; it
 /// is a dropped frame only when a newer one replaces it before it was drawn.
 ///
@@ -252,6 +258,7 @@ final class FramePacer {
             log.debug("Presented \(kind == .live ? "live" : "redraw", privacy: .public) at \(presentedAt, format: .fixed(precision: 4), privacy: .public), \(spacing, format: .fixed(precision: 1), privacy: .public) ms after the previous one, latency \((presentedAt - Double(captureHostTimeNs) / 1e9) * 1000, format: .fixed(precision: 1), privacy: .public) ms; \(self.inFlight, privacy: .public) of \(self.cap, privacy: .public) still in flight, waiting \(self.pending == .live, privacy: .public)")
             lastPresentedAt = presentedAt
             notePresentation(at: presentedAt, returnedAt: returnedAt)
+            host?.frameShown(kind: kind, at: presentedAt)
         }
         if kind == .live {
             // A discarded drawable reports 0: count it as dropped, never as a display at time zero.

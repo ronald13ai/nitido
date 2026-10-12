@@ -34,5 +34,7 @@ final class ShowingDisplay: FrameDrawing {
         view?.framePresented(captureHostTimeNs: captureHostTimeNs, at: presentedAt)
     }
 
+    func frameShown(kind: FramePacer.Kind, at presentedAt: Double) { view?.frameShown(kind: kind, at: presentedAt) }
+
     func frameDropped(_ drop: VideoView.Drop) { view?.frameDropped(drop) }
 }

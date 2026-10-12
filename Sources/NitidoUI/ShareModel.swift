@@ -36,9 +36,10 @@ public final class ShareModel {
     @ObservationIgnored public internal(set) var capturingSince: CFTimeInterval?
     /// When the first frame of this capture reached the screen (its presented time), nil until then and while the share
     /// is not capturing: the cover over the picture stays opaque until it and fades from it (`PictureCover`), so a late
-    /// first render fades the picture in rather than popping it. Observed: set once a capture.
+    /// first render fades the picture in rather than popping it. A frame drawn again counts (`frameShown`): one that came
+    /// while the window could not draw it reaches the screen only that way. Observed: set once a capture.
     public internal(set) var firstFrameAt: CFTimeInterval?
-    /// Capturing began and no frame has reached the screen since: the next one presented sets `firstFrameAt`. Read on
+    /// Capturing began and nothing has reached the screen since: the next drawable shown sets `firstFrameAt`. Read on
     /// every frame, so not observed.
     @ObservationIgnored var awaitingFirstFrame = false
     /// Internal, not private, so a test can see whether it is held.
@@ -236,6 +237,7 @@ public final class ShareModel {
         sink.onPresented = { [weak self] captureNs, presentedAt in
             self?.framePresented(captureNs: captureNs, at: presentedAt)
         }
+        sink.onShown = { [weak self] _, presentedAt in self?.frameShown(at: presentedAt) }
         sink.onDropped = { [weak self] drop in self?.frameDropped(drop) }
     }
 

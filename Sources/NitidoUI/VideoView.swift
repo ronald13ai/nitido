@@ -30,6 +30,9 @@ public final class VideoView: NSView {
     }
 
     public var onPresented: (@MainActor @Sendable (_ captureHostTimeNs: UInt64, _ presentedAt: Double) -> Void)?
+    /// Called on the main actor for every drawable that reached the screen, a captured frame or the held one drawn again
+    /// (`FrameDrawing.frameShown`).
+    var onShown: (@MainActor @Sendable (_ kind: FramePacer.Kind, _ presentedAt: Double) -> Void)?
     /// Called on the main actor for every frame that was not drawn.
     public var onDropped: (@MainActor @Sendable (Drop) -> Void)?
     /// The display the picture is on: the window's backing scale and its screen's visible frame, each time the view
@@ -328,6 +331,8 @@ extension VideoView: FrameDrawing {
         onPresented?(captureHostTimeNs, presentedAt)
     }
 
+    func frameShown(kind: FramePacer.Kind, at presentedAt: Double) { onShown?(kind, presentedAt) }
+
     func frameDropped(_ drop: Drop) { dropped(drop) }
 
     /// A frame that never reached the view (`FrameSink.dropped`): dropped while the pacer could draw it, a pause
@@ -342,6 +347,8 @@ extension VideoView: FrameDrawing {
 public final class FrameSink {
     @ObservationIgnored public weak var view: VideoView?
     @ObservationIgnored public var onPresented: (@MainActor @Sendable (UInt64, Double) -> Void)?
+    /// Every drawable that reached the screen, a redraw included: the first lifts the picture's cover (`PictureCover`).
+    @ObservationIgnored var onShown: (@MainActor @Sendable (FramePacer.Kind, Double) -> Void)?
     @ObservationIgnored public var onDropped: (@MainActor @Sendable (VideoView.Drop) -> Void)?
     /// The backing scale of the window the view is in; nil until it is in one.
     public private(set) var backingScale: CGFloat?
@@ -360,9 +367,14 @@ public final class FrameSink {
     public func push(_ pixelBuffer: CVPixelBuffer, captureHostTimeNs: UInt64, compareWith raw: CVPixelBuffer? = nil,
                      dividerAt divider: CGFloat = 0.5, pictureSize: CGSize? = nil) {
         guard let view else { onDropped?(.hidden); return }
-        view.onPresented = onPresented
-        view.onDropped = onDropped
+        hand(to: view)
         view.present(pixelBuffer, captureHostTimeNs: captureHostTimeNs, compareWith: raw, dividerAt: divider, pictureSize: pictureSize)
+    }
+    /// The view reports to this sink's handlers from now on.
+    private func hand(to view: VideoView) {
+        view.onPresented = onPresented
+        view.onShown = onShown
+        view.onDropped = onDropped
     }
     /// Lets go of the frame the view keeps for redraws, handing its buffer back to the capture pool.
     public func releaseHeldFrame() { view?.releaseHeldFrame() }
@@ -371,8 +383,7 @@ public final class FrameSink {
     /// out yet), it is a pause, `.hidden`, as a frame `push` hands over then is, not a dropped frame.
     public func dropped(_ drop: VideoView.Drop) {
         guard let view else { onDropped?(.hidden); return }
-        view.onPresented = onPresented
-        view.onDropped = onDropped
+        hand(to: view)
         view.frameNeverReached(drop)
     }
     /// Moves the divider of the comparison on screen. A still source sends no new frame to carry the move, so the
@@ -381,8 +392,7 @@ public final class FrameSink {
     /// Ends the comparison on screen: `raw` is shown alone at once, without waiting for the source to change.
     public func endComparison(showing raw: CVPixelBuffer, captureHostTimeNs: UInt64) {
         guard let view else { return }
-        view.onPresented = onPresented
-        view.onDropped = onDropped
+        hand(to: view)
         view.endComparison(showing: raw, captureHostTimeNs: captureHostTimeNs)
     }
 }

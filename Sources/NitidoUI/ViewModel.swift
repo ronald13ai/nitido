@@ -50,7 +50,8 @@ public final class ViewModel {
     /// (`PictureCover`), rather than fading over an empty surface. Kept and cleared with `pictureSince`. Observed: set
     /// once a picture.
     public private(set) var firstFrameAt: CFTimeInterval?
-    /// The picture's stage began and no frame has reached the screen since. Read on every frame, so not observed.
+    /// The picture's stage began and nothing has reached the screen since: the next drawable shown, a redraw included,
+    /// sets `firstFrameAt`. Read on every frame, so not observed.
     @ObservationIgnored private var awaitingFirstFrame = false
 
     private func forgetPicture() {
@@ -144,7 +145,6 @@ public final class ViewModel {
         ink.onOutgoing = { [weak self] m in self?.link?.send(m) }
         sink.onPresented = { [weak self] captureNs, presentedAt in
             guard let self else { return }
-            if awaitingFirstFrame { awaitingFirstFrame = false; firstFrameAt = presentedAt }
             telemetry.recordDisplay(at: presentedAt)
             if let offset = link?.clockOffsetNs {
                 let localCapture = (Double(captureNs) - Double(offset)) / 1e9
@@ -157,6 +157,13 @@ public final class ViewModel {
                 }
             }
             if renderFailure != nil { renderFailure = nil }
+        }
+        // Any drawable shown, a redraw included, lifts the cover once: a first frame that came while the window was
+        // covered or minimized reaches the screen only as a redraw when it shows (spec 11, M7, amended 2026-10-12). It
+        // counts towards nothing else.
+        sink.onShown = { [weak self] _, presentedAt in
+            guard let self, awaitingFirstFrame else { return }
+            awaitingFirstFrame = false; firstFrameAt = presentedAt
         }
         // As on the sharing side (Task 8): a frame that never reaches the screen counts as dropped, and a render
         // failure is said over the picture; the view has logged it. A hidden window is neither.
