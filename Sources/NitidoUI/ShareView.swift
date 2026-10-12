@@ -404,6 +404,7 @@ struct PairingPanel: View {
 struct LoopbackPanel: View {
     @Bindable var model: ShareModel
     @ReducedMotion private var reduceMotion
+    @Environment(\.motionPolicy.rollsFigures) private var rollsFigures
     /// The panel's width while the loop is on: 220 pt, so the slider and the caption do not stretch it over the picture.
     private static let width: CGFloat = 220
 
@@ -433,7 +434,8 @@ struct LoopbackPanel: View {
                         // SF Mono, so the label's width never moves as it rolls.
                         Text("\(Int(model.qualityMbps)) Mbps").font(Theme.Fonts.figures(11)).foregroundStyle(Theme.Colors.text)
                             .contentTransition(reduceMotion ? .opacity : .numericText(value: model.qualityMbps))
-                            .animation((reduceMotion ? TelemetryMotion.reducedRoll : Theme.Motion.figure).animation, value: model.qualityMbps)
+                            .animation(rollsFigures ? (reduceMotion ? TelemetryMotion.reducedRoll : Theme.Motion.figure).animation : nil,
+                                       value: model.qualityMbps)
                     }
                     .padding(.top, 4)
                     .entrance(.rise(4), delay: Unfold.rows, curve: Unfold.row, since: since, enabled: since != nil)

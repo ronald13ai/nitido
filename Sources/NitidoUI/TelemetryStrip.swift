@@ -108,6 +108,7 @@ private struct Figure: View {
     var number: Double?
     var highlight = false
     @ReducedMotion private var reduceMotion
+    @Environment(\.motionPolicy.rollsFigures) private var rollsFigures
     /// The figure's slot: as wide as the widest value it has shown since the strip appeared, so 9 → 10 ms moves the
     /// figures after it once, never back and forth. A reference, grown as the body reads it.
     @State private var slot = Slot()
@@ -139,7 +140,7 @@ private struct Figure: View {
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(value).font(Theme.Fonts.figures(12)).foregroundStyle(highlight ? Theme.Colors.gold : Theme.Colors.text)
                     .contentTransition(roll ? .numericText(value: number ?? 0) : .opacity)
-                    .animation((roll ? TelemetryMotion.roll : reduceMotion && counts ? TelemetryMotion.reducedRoll : TelemetryMotion.crossfade).animation,
+                    .animation(rollsFigures ? (roll ? TelemetryMotion.roll : reduceMotion && counts ? TelemetryMotion.reducedRoll : TelemetryMotion.crossfade).animation : nil,
                                value: value)
                     .animation((highlight ? TelemetryMotion.warn : TelemetryMotion.clear).animation, value: highlight)
                     .frame(minWidth: CGFloat(characters) * Self.advance, alignment: .leading)
@@ -148,7 +149,7 @@ private struct Figure: View {
                 ZStack(alignment: .leading) {
                     Text(unit).font(Theme.Fonts.figures(10)).foregroundStyle(Theme.Colors.secondaryText)
                         .id(unit)
-                        .transition(.opacity.animation(TelemetryMotion.crossfade.animation))
+                        .transition(rollsFigures ? AnyTransition.opacity.animation(TelemetryMotion.crossfade.animation) : .identity)
                 }
             }
         }

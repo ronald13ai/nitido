@@ -10,7 +10,11 @@ import QuartzCore
 public struct MotionPolicy: Equatable, Sendable {
     /// Nil: the system's setting.
     public var reduceMotion: Bool?
-    public init(reduceMotion: Bool? = nil) { self.reduceMotion = reduceMotion }
+    /// False: the strip's figures and the codec loop's quality change at once, without their roll or crossfade. Only
+    /// the README's reel sets it: its GIF, at 15 fps, caught a 180 ms roll halfway, two glyphs in one place. The app
+    /// never does.
+    public var rollsFigures: Bool
+    public init(reduceMotion: Bool? = nil, rollsFigures: Bool = true) { self.reduceMotion = reduceMotion; self.rollsFigures = rollsFigures }
     public func resolved(system: Bool) -> Bool { reduceMotion ?? system }
 }
 

@@ -93,6 +93,8 @@ final class MotionTokenTests: XCTestCase {
         XCTAssertTrue(MotionPolicy().resolved(system: true)); XCTAssertFalse(MotionPolicy().resolved(system: false))
         XCTAssertTrue(MotionPolicy(reduceMotion: true).resolved(system: false))
         XCTAssertFalse(MotionPolicy(reduceMotion: false).resolved(system: true))
+        // The figures roll unless a policy says otherwise, which only the README's reel does.
+        XCTAssertTrue(MotionPolicy().rollsFigures); XCTAssertTrue(MotionPolicy(reduceMotion: true).rollsFigures)
         XCTAssertEqual(EntranceMotion.compact.reduced(true), .fade)
         XCTAssertEqual(EntranceMotion.row.reduced(true), .fade)
         XCTAssertEqual(EntranceMotion.slide(6).reduced(true), .fade)
