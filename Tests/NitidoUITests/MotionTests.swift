@@ -130,6 +130,29 @@ final class MotionTokenTests: XCTestCase {
         XCTAssertEqual(RevealLayout.size(shown: CGSize(width: 731.4, height: 512.6), natural: CGSize(width: 1440, height: 948)),
                        CGSize(width: 731, height: 513), "mid-growth, in whole points")
     }
+
+    /// How the size shown follows the content: on the window's curve when the picture area changed with it, at once on a
+    /// keyboard path, under Reduce Motion or for a change of the content alone, and not at all for an empty screen: a quit
+    /// lets the models go with the window ordered out, and the window keeps its size instead of shrinking toward nothing.
+    func testTheWindowFollowsTheContentButNeverToNothing() {
+        typealias Area = AnimatedArea<EmptyView>
+        let welcome = CGSize(width: 600, height: 400), picture = CGSize(width: 1440, height: 948)
+        XCTAssertEqual(Area.step(natural: welcome, shown: nil, areaBefore: nil, area: welcome, instant: false, reduceMotion: false),
+                       .instant, "the first measure")
+        XCTAssertEqual(Area.step(natural: picture, shown: welcome, areaBefore: welcome, area: picture, instant: false, reduceMotion: false),
+                       .animate(M.windowGrow), "a picture arrives")
+        XCTAssertEqual(Area.step(natural: welcome, shown: picture, areaBefore: picture, area: welcome, instant: false, reduceMotion: false),
+                       .animate(M.windowShrink), "back to Welcome")
+        XCTAssertEqual(Area.step(natural: welcome, shown: picture, areaBefore: picture, area: welcome, instant: true, reduceMotion: false),
+                       .instant, "Esc")
+        XCTAssertEqual(Area.step(natural: welcome, shown: picture, areaBefore: picture, area: welcome, instant: false, reduceMotion: true),
+                       .instant, "Reduce Motion")
+        XCTAssertEqual(Area.step(natural: CGSize(width: 1440, height: 980), shown: picture, areaBefore: picture, area: picture,
+                                 instant: false, reduceMotion: false), .instant, "the strip wraps: the area did not change")
+        XCTAssertEqual(Area.step(natural: picture, shown: picture, areaBefore: picture, area: picture, instant: false, reduceMotion: false), .keep)
+        XCTAssertEqual(Area.step(natural: .zero, shown: picture, areaBefore: picture, area: welcome, instant: false, reduceMotion: false),
+                       .keep, "a quit's empty screen: the window keeps its size")
+    }
 }
 
 final class LaunchMotionTests: XCTestCase {

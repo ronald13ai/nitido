@@ -303,17 +303,34 @@ struct AnimatedArea<Content: View>: View {
         .transaction(value: area) { tracker.instant = $0.disablesAnimations }
     }
 
+    /// How the size shown follows a new measure of the content.
+    enum Step: Equatable {
+        /// It stays: nothing changed, or the content measured nothing.
+        case keep
+        case instant
+        case animate(Theme.Motion.Curve)
+    }
+
     /// The content took `natural`: the window follows it, on the window curve when the picture area changed with it (a
-    /// picture, a screen), at once otherwise (the strip shown or wrapped, a keyboard path, Reduce Motion).
+    /// picture, a screen), at once otherwise (the strip shown or wrapped, a keyboard path, Reduce Motion). An empty
+    /// screen (a quit's: the window ordered out, the models let go of, the screen left as it was) measures nothing, and
+    /// the window keeps its size rather than shrink toward nothing (review, 2026-10-12).
+    nonisolated static func step(natural: CGSize, shown: CGSize?, areaBefore: CGSize?, area: CGSize, instant: Bool,
+                                 reduceMotion: Bool) -> Step {
+        guard natural.width > 0, natural.height > 0 else { return .keep }
+        guard let shown else { return .instant }
+        guard natural != shown else { return .keep }
+        if let areaBefore, areaBefore != area, !instant, !reduceMotion { return .animate(curve(from: areaBefore, to: area)) }
+        return .instant
+    }
+
     private func measured(_ natural: CGSize) {
         let before = tracker.area
         tracker.area = area
-        guard let current = shown else { Instantly.run { shown = natural }; return }
-        guard natural != current else { return }
-        if let before, before != area, !tracker.instant, !reduceMotion {
-            withAnimation(Self.curve(from: before, to: area).animation) { shown = natural }
-        } else {
-            Instantly.run { shown = natural }
+        switch Self.step(natural: natural, shown: shown, areaBefore: before, area: area, instant: tracker.instant, reduceMotion: reduceMotion) {
+        case .keep: break
+        case .instant: Instantly.run { shown = natural }
+        case .animate(let curve): withAnimation(curve.animation) { shown = natural }
         }
     }
 
