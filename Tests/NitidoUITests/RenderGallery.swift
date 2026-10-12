@@ -760,8 +760,11 @@ private enum MotionReel {
     static func cut(_ clip: ReelClip) throws {
         let movie = clips.appendingPathComponent("\(clip.name).mov")
         guard FileManager.default.fileExists(atPath: movie.path) else { throw ReelError.missing(movie.path) }
-        let starts = try markerTimes(movie)
-        guard !starts.isEmpty else { throw ReelError.noMarker(clip.name) }
+        let markers = try markerTimes(movie)
+        guard !markers.isEmpty else { throw ReelError.noMarker(clip.name) }
+        // The marker is a window of its own, which the window server shows a frame or three after the content's first
+        // change: each sheet starts on the frame before the content first changes near its marker.
+        let starts = try markers.map { try contentStart(movie, near: $0) }
         // screencapture writes a frame only when the screen changes, so a recording ends at its last change: the last
         // frame is held, and every sheet has its ten frames.
         let hold = "tpad=stop_mode=clone:stop_duration=4"
@@ -770,19 +773,41 @@ private enum MotionReel {
             for row in 0..<clip.sheets {
                 let at = start + Double(row) * 0.5
                 let width = min(Int(clip.rect.width * 2), 620)
-                try run(ffmpeg, ["-y", "-loglevel", "error", "-i", movie.path, "-ss", String(format: "%.3f", at),
-                                 "-vf", "\(hold),fps=20,scale=\(width):-2,tile=10x1", "-frames:v", "1",
+                // Every frame of a 60 fps grid (a still stretch held), from `at`, then one in three: 50 ms apart.
+                let from = "\(hold),fps=60,trim=start=\(String(format: "%.4f", at)),setpts=PTS-STARTPTS,fps=20"
+                try run(ffmpeg, ["-y", "-loglevel", "error", "-i", movie.path,
+                                 "-vf", "\(from),scale=\(width):-2,tile=10x1", "-frames:v", "1",
                                  sheets.appendingPathComponent("\(clip.name)-\(label)-\(row).png").path])
                 for crop in clip.crops {
                     let c = "crop=\(Int(crop.width * 2)):\(Int(crop.height * 2)):\(Int(crop.x * 2)):\(Int(crop.y * 2))"
-                    try run(ffmpeg, ["-y", "-loglevel", "error", "-i", movie.path, "-ss", String(format: "%.3f", at),
-                                     "-vf", "\(hold),fps=20,\(c),tile=10x1", "-frames:v", "1",
+                    try run(ffmpeg, ["-y", "-loglevel", "error", "-i", movie.path,
+                                     "-vf", "\(from),\(c),tile=10x1", "-frames:v", "1",
                                      sheets.appendingPathComponent("\(clip.name)-\(label)-\(crop.name)-\(row).png").path])
                 }
             }
         }
         let times = starts.map { String(format: "%.3f", $0) }.joined(separator: " ")
         try "\(times)\n".write(to: sheets.appendingPathComponent("\(clip.name)-markers.txt"), atomically: true, encoding: .utf8)
+    }
+
+    /// The frame before the recorded content first changes near `marker` (from 250 ms before it to 350 ms after), at 60
+    /// frames a second; the marker's own corner is left out. The marker's time if nothing changes.
+    static func contentStart(_ movie: URL, near marker: Double) throws -> Double {
+        let from = max(0, marker - 0.25)
+        let width = 160, height = 100
+        let raw = try runCapturing(ffmpeg, ["-loglevel", "error", "-i", movie.path, "-ss", String(format: "%.3f", from), "-t", "0.6",
+                                            "-vf", "tpad=stop_mode=clone:stop_duration=1,fps=60,crop=iw:ih-48:0:48,scale=\(width):\(height),format=gray",
+                                            "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        let size = width * height
+        let frames = raw.count / size
+        guard frames > 1 else { return marker }
+        let bytes = [UInt8](raw)
+        for index in 1..<frames {
+            var sum = 0
+            for p in 0..<size { sum += abs(Int(bytes[index * size + p]) - Int(bytes[(index - 1) * size + p])) }
+            if Double(sum) / Double(size) > 0.05 { return from + Double(index - 1) / 60 }
+        }
+        return marker
     }
 
     /// When the sync marker shows, in seconds into the movie at 60 frames a second: each rising edge.
@@ -1029,7 +1054,8 @@ private final class ReelWindow {
     /// One step of the visual window: the frame takes the size the root reports now, top left fixed.
     func step(now: CFTimeInterval) {
         guard let host else { return }
-        host.layoutSubtreeIfNeeded()
+        // Asked again at every step, without forcing a layout pass (which would cut short the animations under way).
+        host.invalidateIntrinsicContentSize()
         let target = host.intrinsicContentSize
         guard target.width > 0, target.height > 0, target != content else { return }
         host.frame = CGRect(origin: .zero, size: target)
@@ -1203,9 +1229,20 @@ private final class ReelDirector {
         print("motion reel: \(name)"); fflush(stdout)
     }
 
+    /// Pictures drawn ahead for the next pick (drawing them takes a while), by size.
+    private var prepared: (size: CGSize, pictures: [CVPixelBuffer])?
+
+    /// Draws the pictures of a pick of `width` by `height` pixels before its moment starts.
+    private func prepare(width: Int, height: Int) throws {
+        let size = CGSize(width: width, height: height)
+        guard prepared?.size != size else { return }
+        prepared = (size, try [Picture.desktop(width: width, height: height, caret: true), Picture.desktop(width: width, height: height, caret: false)])
+    }
+
     /// A new pick of `width` by `height` pixels at 2x: the capture says so, and frames of that size follow at 60 fps.
     private func pick(width: Int, height: Int) throws {
-        pictures = try [Picture.desktop(width: width, height: height, caret: true), Picture.desktop(width: width, height: height, caret: false)]
+        try prepare(width: width, height: height)
+        pictures = prepared?.pictures ?? []
         pictureSize = CGSize(width: width, height: height)
         sources.current?.emit(.started(pixelWidth: width, pixelHeight: height, scale: 2))
         guard feed == nil else { return }
@@ -1264,6 +1301,7 @@ private final class ReelDirector {
         }
 
         // M3 and M6: Share, the picker's card; then a pick: the window grows to the picture and its entrance plays.
+        try prepare(width: 1600, height: 1000)
         try await record("share-picture", rect: shareRect, seconds: 3.6, markers: ["share", "pick"], sheets: 2,
                          crops: [crop("panel", of: shareWindow, in: shareRect, x: 540, y: 0, width: 260, height: 150),
                                  crop("strip", of: shareWindow, in: shareRect, x: 0, y: 480, width: 800, height: 80)]) { mark in
@@ -1287,6 +1325,7 @@ private final class ReelDirector {
         try await waitUntil("the sharer listens with the new code") { share.listeningPort != nil }
 
         // A later resize of the shared window: the window follows it.
+        try prepare(width: 1300, height: 860)
         try await record("share-resize", rect: shareRect, seconds: 2.0, markers: ["resize"], sheets: 2) { mark in
             mark.flash()
             try pick(width: 1300, height: 860)
@@ -1409,6 +1448,7 @@ private final class ReelDirector {
         }
         // Retry: the card gives way to the picker's card, then a pick brings the picture back.
         let sessions = sources.count
+        try prepare(width: 1300, height: 860)
         try await record("retry", rect: shareRect, seconds: 2.8, markers: ["retry", "pick"], sheets: 1) { mark in
             mark.flash()
             share.retry()
@@ -1462,6 +1502,7 @@ private final class ReelDirector {
 
         // Reduce Motion: the share's picture and the launch again, fades only, the window at once.
         policy.reduceMotion = true
+        try prepare(width: 1600, height: 1000)
         try await pause(0.3)
         try await record("share-picture-reduced", rect: shareRect, seconds: 3.4, markers: ["share", "pick"], sheets: 2) { mark in
             mark.flash()
