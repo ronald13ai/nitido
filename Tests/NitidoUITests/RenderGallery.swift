@@ -432,9 +432,13 @@ private final class Stage {
 }
 
 /// Says it is the key window, so SwiftUI focuses the code field and draws its caret: a test process cannot take
-/// activation from the app in front.
+/// activation from the app in front. It draws as one too: AppKit tints a switch and a slider, and colours the traffic
+/// lights, only in a window with key appearance, which no window of an inactive app has, so the Codec loop switch drew
+/// grey while it was on. `hasKeyAppearance` is the AppKit method that decides it; the SDK's headers leave it out, so
+/// this answers its selector (a test's window only: the app's windows are a real active app's).
 private final class KeyWindow: NSWindow {
     override var isKeyWindow: Bool { true }
+    @objc(hasKeyAppearance) func drawsAsKey() -> Bool { true }
 }
 
 /// Raises Esc's confirmation over a screen, as `RootView` does, with the app's own wording (`AppModel.stopWording`).
@@ -755,6 +759,7 @@ private enum MotionReel {
     static var sheets: URL { directory.appendingPathComponent("sheets", isDirectory: true) }
     static var frames: URL { directory.appendingPathComponent("frames", isDirectory: true) }
     static let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+    static let ffprobe = "/opt/homebrew/bin/ffprobe"
 
     /// The clip's contact sheets: for each marker, `sheets` rows of ten frames 50 ms apart from the frame the marker
     /// shows in, the whole recording and each crop.
@@ -849,6 +854,8 @@ private enum ReelError: Error {
     case missing(String)
     case noMarker(String)
     case tool(String)
+    /// Something other than Nítido came into a take (`ReelDirector.intruder`): its recording is deleted.
+    case intruded(String)
 }
 
 /// A recorded moment: its movie's name, the screen rect it recorded (top left origin, points), its markers in order,
@@ -873,17 +880,33 @@ private struct ReelCrop: Codable {
 @MainActor
 private final class ReelRecorder {
     private let process = Process()
+    private let movie: URL
+    /// A file whose presence ends the recording at once and deletes it (`abandon`).
+    private let stop: URL
     init(_ clip: ReelClip, seconds: Double) throws {
         let r = clip.rect
-        let movie = MotionReel.clips.appendingPathComponent("\(clip.name).mov").path
+        movie = MotionReel.clips.appendingPathComponent("\(clip.name).mov")
+        stop = MotionReel.clips.appendingPathComponent(".\(clip.name).stop")
         // screencapture does not write over a movie that is there.
-        try? FileManager.default.removeItem(atPath: movie)
-        let capture = "/usr/sbin/screencapture -x -V \(String(format: "%.1f", seconds)) -R \(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height)) '\(movie)'"
+        try? FileManager.default.removeItem(at: movie)
+        try? FileManager.default.removeItem(at: stop)
+        let capture = "/usr/sbin/screencapture -x -V \(String(format: "%.1f", seconds)) -R \(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height)) '\(movie.path)'"
         let owner = ProcessInfo.processInfo.processIdentifier
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "\(capture) & c=$!; while kill -0 \(owner) 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 0.05; done; "
-                             + "if kill -0 $c 2>/dev/null; then kill -9 $c; rm -f '\(movie)'; exit 9; fi; wait $c"]
+        process.arguments = ["-c", "\(capture) & c=$!; while kill -0 \(owner) 2>/dev/null && kill -0 $c 2>/dev/null && [ ! -e '\(stop.path)' ]; do sleep 0.05; done; "
+                             + "if kill -0 $c 2>/dev/null; then kill -9 $c; rm -f '\(movie.path)' '\(stop.path)'; exit 9; fi; wait $c"]
         try process.run()
+    }
+    /// Ends the recording within 50 ms and deletes it, without waiting: a take that failed, or that saw something other
+    /// than Nítido, keeps nothing it recorded.
+    func abandon() {
+        FileManager.default.createFile(atPath: stop.path, contents: nil)
+        Task { @MainActor [process, movie, stop] in
+            let deadline = CACurrentMediaTime() + 3
+            while process.isRunning, CACurrentMediaTime() < deadline { try? await Task.sleep(for: .milliseconds(50)) }
+            try? FileManager.default.removeItem(at: movie)
+            try? FileManager.default.removeItem(at: stop)
+        }
     }
     func finish() async throws {
         while process.isRunning { try await Task.sleep(for: .milliseconds(50)) }
@@ -927,10 +950,13 @@ private final class ReelMarker {
     func close() { window.orderOut(nil) }
 }
 
-/// Reduce Motion for the reel's windows, switched for the variants.
+/// Reduce Motion for the reel's windows, switched for the variants; and, for a still, no animation at all.
 @MainActor @Observable
 private final class ReelPolicy {
     var reduceMotion = false
+    /// Every change at once (the views' own `.animation` modifiers held off), so a still never catches a figure of the
+    /// strip halfway through its roll, two digits over each other: the README's codec loop still did.
+    var still = false
 }
 
 /// The app's root as the app shows it (`NitidoApp`): the window chrome, and Reduce Motion as the reel says.
@@ -938,10 +964,12 @@ private struct ReelRoot: View {
     let app: AppModel
     let policy: ReelPolicy
     var body: some View {
+        let still = policy.still
         RootView(app: app)
             .environment(\.motionPolicy, MotionPolicy(reduceMotion: policy.reduceMotion))
             .background(Theme.Colors.background)
             .environment(\.colorScheme, .dark)
+            .transaction { if still { $0.disablesAnimations = true } }
     }
 }
 
@@ -1004,7 +1032,10 @@ private final class ReelWindow {
     init(visual root: some View, corner: CGPoint) {
         // It takes the first click, as a window of the active app does, for the README's reel (`testReadmeReel`), whose
         // presses, strokes and drags are events sent to it: this process is never the active app.
-        let host: NSHostingView<AnyView> = ReelFirstMouseView(rootView: AnyView(root))
+        // The root at the top left of the hosting view, as the window's top left corner stays put: for the frame between
+        // the root's new size and the window's (`step`), a root shorter than the window is not centred in it, 14 px low.
+        let host: NSHostingView<AnyView> = ReelFirstMouseView(rootView: AnyView(root.frame(maxWidth: .infinity, maxHeight: .infinity,
+                                                                                           alignment: .topLeading)))
         // Its ideal size as an intrinsic size, nothing pinning the window to it: the reel sets the frame itself.
         host.sizingOptions = [.intrinsicContentSize]
         self.host = host
@@ -1133,6 +1164,21 @@ private final class ReelWindow {
         }
         return find(host, depth: 0)
     }
+
+    /// The content's first AppKit control of class `T` and its frame (content points, top left origin). SwiftUI draws
+    /// its switch and its slider with an NSSwitch and an NSSlider, and builds no accessibility tree in a process that no
+    /// assistive app reads, so `elementFrame` finds neither here (the Codec loop's arrow landed beside the switch, on a
+    /// guessed frame).
+    func control<T: NSControl>(_ type: T.Type) -> (control: T, frame: CGRect)? {
+        guard let host else { return nil }
+        func find(_ view: NSView) -> T? {
+            if let match = view as? T { return match }
+            for subview in view.subviews { if let match = find(subview) { return match } }
+            return nil
+        }
+        guard let found = find(host) else { return nil }
+        return (found, found.convert(found.bounds, to: host))
+    }
 }
 
 /// Keeps the content at the top left corner, at its own size, however large the window is.
@@ -1161,6 +1207,9 @@ private final class ReelDirector {
     private var hotPath = "moment,dropped,capture_fps,display_fps\n"
     private var share: ReelWindow?
     private var view: ReelWindow?
+    /// Checked as a take runs (`pause`), at most every 100 ms: it throws once the take can no longer be kept.
+    private var watch: (() throws -> Void)?
+    private var watchedAt: CFTimeInterval = 0
 
     init(mode: Mode) { self.mode = mode }
 
@@ -1217,6 +1266,7 @@ private final class ReelDirector {
             while let event = NSApp.nextEvent(matching: .any, until: nil, inMode: .default, dequeue: true) { NSApp.sendEvent(event) }
             let now = CACurrentMediaTime()
             share?.step(now: now); view?.step(now: now)
+            if let watch, now - watchedAt >= 0.1 { watchedAt = now; try watch() }
             try await Task.sleep(for: .milliseconds(4))
         } while CACurrentMediaTime() < end
     }
@@ -1652,8 +1702,9 @@ private struct ReelMark {
 ///
 ///     NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=/some/dir swift test --filter RenderGallery/testReadmeReel
 ///
-/// It writes `clips/readme.mov` and `clips/loop.gif`: 20 s from the window's first frame, cropped to the window and its
-/// margin, 900 px wide, 15 fps.
+/// It writes `clips/readme.mov`, `clips/loop.gif` (19.6 s from Welcome to Welcome, cropped to the window and its margin,
+/// 1200 px wide, or 1000 if that passes 6 MB, 15 fps) and `clips/codec-loop.png` (the codec loop on its own, captured
+/// from the window after the take: the README's `02-share-loopback.png`).
 extension RenderGallery {
     @MainActor
     func testReadmeReel() async throws {
@@ -1673,11 +1724,9 @@ extension RenderGallery {
             throw error
         }
         director.tearDown()
-        try ReadmeTake.gif(take)
-        let gif = MotionReel.clips.appendingPathComponent("loop.gif")
-        let size = (try FileManager.default.attributesOfItem(atPath: gif.path)[.size] as? Int) ?? 0
-        print("README reel: \(gif.path), \(size) bytes")
-        XCTAssertLessThan(size, 4_000_000, "the README's GIF should stay under 4 MB")
+        let gif = try ReadmeTake.gif(take)
+        print("README reel: \(MotionReel.clips.appendingPathComponent("loop.gif").path), \(gif.width) px wide, \(gif.bytes) bytes")
+        XCTAssertLessThan(gif.bytes, ReadmeTake.limit, "the README's GIF should stay under 6 MB")
     }
 }
 
@@ -1687,22 +1736,46 @@ private struct ReadmeTake {
     let movie: URL
     let recorded: CGRect
     let kept: CGRect
-    static let seconds: Double = 20
-    static let width = 900
+    /// Where the GIF opens on the launch's clock: the card, the wordmark and the buttons have arrived (the last at
+    /// 400 ms) and the glint is still to come (from 440 ms). So its first frame is Welcome, as its last is: the loop
+    /// runs Welcome into Welcome with the glint, and a GIF that does not autoplay shows Welcome, not the empty window
+    /// the launch starts from.
+    static let opening: Double = 0.45
+    static let seconds: Double = 19.6
+    /// Stop, on the launch's clock: the recording must reach it (screencapture writes frames until the screen last
+    /// changes, which is a little after it, and a recording that stops early would leave the GIF a frozen frame).
+    static let stop: Double = 17.3
+    /// Wide enough for the text to stay sharp on a Retina screen (the take is recorded at 2x, 1600 px), narrower if the
+    /// GIF would pass `limit`.
+    static let widths = [1200, 1000]
+    static let limit = 6_000_000
     static let fps = 15
 
-    /// The GIF: from the frame before the window's first change, `seconds` long, the marker's strip above the kept rect
-    /// left out, one palette for the whole take, ordered dithering (it stays put from frame to frame, so a still stretch
-    /// costs nothing) and only the changed rectangle written per frame.
-    static func gif(_ take: ReadmeTake) throws {
+    /// The GIF: `opening` after the frame before the window's first change, `seconds` long, the marker's strip above
+    /// the kept rect left out, one palette made from the whole take, ordered dithering at a low scale (it stays put from
+    /// frame to frame, so a still stretch costs nothing, and the low scale keeps gradients from banding) and only the
+    /// changed rectangle written per frame. The first width in `widths` that stays under `limit`, or the last.
+    static func gif(_ take: ReadmeTake) throws -> (width: Int, bytes: Int) {
         guard let marker = try MotionReel.markerTimes(take.movie).first else { throw ReelError.noMarker("readme") }
-        let start = try MotionReel.contentStart(take.movie, near: marker)
+        let launch = try MotionReel.contentStart(take.movie, near: marker)
+        let start = launch + opening
+        let probe = try MotionReel.runCapturing(MotionReel.ffprobe, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", take.movie.path])
+        let duration = Double(String(decoding: probe, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        guard duration >= launch + stop else {
+            throw ReelError.tool(String(format: "the recording ends %.1f s into the take, before its Stop at %.1f s", duration - launch, stop))
+        }
         let top = Int((take.kept.minY - take.recorded.minY) * 2), height = Int(take.kept.height * 2) / 2 * 2
-        let chain = "tpad=stop_mode=clone:stop_duration=8,fps=60,trim=start=\(String(format: "%.4f", start)):duration=\(seconds),"
-            + "setpts=PTS-STARTPTS,crop=\(Int(take.kept.width * 2)):\(height):0:\(top),fps=\(fps),scale=\(width):-2:flags=lanczos,"
-            + "split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle"
-        try MotionReel.run(MotionReel.ffmpeg, ["-y", "-loglevel", "error", "-i", take.movie.path, "-filter_complex", chain, "-loop", "0",
-                                               MotionReel.clips.appendingPathComponent("loop.gif").path])
+        let gif = MotionReel.clips.appendingPathComponent("loop.gif")
+        var result = (width: 0, bytes: 0)
+        for width in widths {
+            let chain = "tpad=stop_mode=clone:stop_duration=8,fps=60,trim=start=\(String(format: "%.4f", start)):duration=\(seconds),"
+                + "setpts=PTS-STARTPTS,crop=\(Int(take.kept.width * 2)):\(height):0:\(top),fps=\(fps),scale=\(width):-2:flags=lanczos,"
+                + "split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=2:diff_mode=rectangle"
+            try MotionReel.run(MotionReel.ffmpeg, ["-y", "-loglevel", "error", "-i", take.movie.path, "-filter_complex", chain, "-loop", "0", gif.path])
+            result = (width, (try FileManager.default.attributesOfItem(atPath: gif.path)[.size] as? Int) ?? 0)
+            if result.bytes < limit { break }
+        }
+        return result
     }
 }
 
@@ -1779,7 +1852,16 @@ extension ReelDirector {
         let parked = recorded.insetBy(dx: -24, dy: -24).contains(resting)
         if parked { CGWarpMouseCursorPosition(CGPoint(x: min(screen.width - 80, recorded.maxX + 200), y: min(screen.height - 80, recorded.maxY + 100))) }
         defer { if parked { CGWarpMouseCursorPosition(resting) } }
-        let recorder = try ReelRecorder(clip, seconds: ReadmeTake.seconds + 2.6)
+        let recorder = try ReelRecorder(clip, seconds: ReadmeTake.opening + ReadmeTake.seconds + 2.6)
+        // Only Nítido may be recorded. The screen is the person's while the take runs: should another app's window come
+        // over the GIF's rect, or the screen go to another Space, the recording is deleted and the take fails (a take
+        // on 2026-10-12 recorded another app after its windows left the screen with their Space). So is it when the
+        // take fails for any other reason, as the screen goes on being recorded after the reel's windows are gone.
+        var finished = false
+        defer { if !finished { recorder.abandon() } }
+        let ground = try XCTUnwrap(backdrop)
+        watch = { if let other = Self.intruder(over: kept, backdrop: ground) { throw ReelError.intruded(other) } }
+        defer { watch = nil }
         try await pause(0.9)
 
         marker.flash()
@@ -1804,11 +1886,16 @@ extension ReelDirector {
                 try await pause(0.016)
             }
         }
+        /// The longest gap between two steps of a stroke or a drag: how long the main thread was held.
+        var longestStep: CFTimeInterval = 0
         /// The arrow along `path` (0 to 1) over `seconds`, the button down: a stroke or a drag.
         func trace(over seconds: Double, _ path: (Double) -> CGPoint) async throws {
             let start = CACurrentMediaTime()
+            var last = start
             while true {
-                let u = min(1, (CACurrentMediaTime() - start) / seconds)
+                let now = CACurrentMediaTime()
+                longestStep = max(longestStep, now - last); last = now
+                let u = min(1, (now - start) / seconds)
                 tip = path(u)
                 pointer.move(to: window.screenPoint(tip))
                 window.send(.leftMouseDragged, at: tip)
@@ -1837,12 +1924,20 @@ extension ReelDirector {
         try pick(width: width, height: height)
         let model = try XCTUnwrap(shareApp.share)
         try await waitUntil("the sharer listens") { model.listeningPort != nil }
+        // The sharer's dropped frames by stretch, printed at the end: the strip shows them in gold.
+        var drops: [(String, Int)] = []
+        var dropsSoFar = model.droppedFramesTotal
+        func noteDrops(_ stretch: String) {
+            drops.append((stretch, model.droppedFramesTotal - dropsSoFar)); dropsSoFar = model.droppedFramesTotal
+        }
 
         // 6 s: a viewer pairs over the loopback link; the sharer's panel takes it in, and the ring draws.
         try await at(6.0)
         let sharer = Peer(id: "loopback", name: model.advertisedName ?? model.name, keyName: model.name,
                           endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: model.listeningPort!)!))
-        let viewer = ViewModel(startingDiscovery: false)
+        // Named apart from the sharer, which runs on this Mac too: the panel's row and the pointer's label read as a
+        // second Mac.
+        let viewer = ViewModel(startingDiscovery: false, name: "Ronald’s MacBook Air")
         defer { viewer.disconnect() }
         viewer.peers = [sharer]
         viewer.select(sharer)
@@ -1894,12 +1989,20 @@ extension ReelDirector {
                 try? await Task.sleep(for: .milliseconds(16))
             }
             viewer.ink.endLocal(id)
-            try? await Task.sleep(for: .milliseconds(700))
+            // The pointer comes to rest on the heading's line, past its end, so its name lies on blank paper: at the
+            // underline's height the label half covers the heading and the line under it, which reads as a collision.
+            let end = underline(1), rest = (x: Float(line.x1 + 40) / Float(width), y: Float(doc.y + 4 * 40 + 17) / Float(height))
+            for i in 1...12 {
+                let k = Float(Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 1).progress(at: Double(i) / 12))
+                viewer.ink.cursorMoved(Cursor(x: end.x + (rest.x - end.x) * k, y: end.y + (rest.y - end.y) * k, visible: true))
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            try? await Task.sleep(for: .milliseconds(500))
             viewer.ink.cursorMoved(Cursor(x: 0, y: 0, visible: false))
         }
 
         // 8.9 s: the arrow goes to the codec loop's switch and turns it on: the panel unfolds, a light runs up the divider.
-        let toggle = window.elementFrame(role: .checkBox, label: "Codec loop") ?? CGRect(x: 182, y: 26, width: 32, height: 18)
+        guard let toggle = window.control(NSSwitch.self)?.frame else { throw ReelError.missing("the Codec loop switch") }
         try await at(8.8)
         try await glide(to: CGPoint(x: toggle.midX + 3, y: toggle.midY + 3), over: 0.5)
         try await at(9.45)
@@ -1909,6 +2012,8 @@ extension ReelDirector {
         // 10.1 s: the divider's dot, held (it grows to 1.3), dragged left, right, and let go in the middle, before the
         // gold stroke starts to fade.
         try await at(10.1)
+        noteDrops("pick to drag")
+        longestStep = 0
         let dotY = 450 - DividerHandle.dotInset
         try await glide(to: CGPoint(x: 360, y: dotY), over: 0.4)
         window.send(.leftMouseDown, at: tip)
@@ -1918,13 +2023,16 @@ extension ReelDirector {
         try await trace(over: 0.85) { u in CGPoint(x: 200 + 330 * sweep.progress(at: u), y: dotY) }
         try await trace(over: 0.45) { u in CGPoint(x: 530 - 170 * sweep.progress(at: u), y: dotY) }
         window.send(.leftMouseUp, at: tip)
+        noteDrops("drag")
+        let dragStep = longestStep
         await theirs.value
 
         // 12.6 s: the strokes fade, 4 s after their last points. 14.6 s: the quality comes down to 4 Mbps by the slider.
-        let slider = window.elementFrame(role: .slider) ?? CGRect(x: 32, y: 74, width: 188, height: 16)
+        guard let found = window.control(NSSlider.self) else { throw ReelError.missing("the quality slider") }
+        let (track, slider) = found
         func knob(_ mbps: Double) -> CGPoint {
             let k = (mbps - ShareModel.qualityRange.lowerBound) / (ShareModel.qualityRange.upperBound - ShareModel.qualityRange.lowerBound)
-            return CGPoint(x: slider.minX + 7 + (slider.width - 14) * k, y: slider.midY + 1)
+            return CGPoint(x: slider.minX + track.knobThickness / 2 + (slider.width - track.knobThickness) * k, y: slider.midY + 1)
         }
         try await at(14.6)
         try await glide(to: knob(model.qualityMbps), over: 0.45)
@@ -1940,19 +2048,62 @@ extension ReelDirector {
             try await pause(0.016)
         }
 
-        // 16 s: the loop off by its switch; the arrow leaves. 17.3 s: Stop, back to Welcome's card.
+        // 16 s: the loop off by its switch, where the unfolded panel has it now; the arrow leaves. 17.3 s: Stop, back to
+        // Welcome's card.
         try await at(16.0)
-        try await glide(to: CGPoint(x: toggle.midX + 3, y: toggle.midY + 3), over: 0.5)
+        guard let unfolded = window.control(NSSwitch.self)?.frame else { throw ReelError.missing("the Codec loop switch") }
+        try await glide(to: CGPoint(x: unfolded.midX + 3, y: unfolded.midY + 3), over: 0.5)
         try await at(16.6)
         model.loopToggledAt = CACurrentMediaTime()
         withAnimation(LoopbackPanel.Unfold.fold.animation) { model.loopback = false }
         try await at(17.0)
         pointer.show(false)
-        try await at(17.3)
+        try await at(ReadmeTake.stop)
+        noteDrops("drag to stop")
+        print("README take: sharer's dropped frames " + drops.map { "\($0.0) \($0.1)" }.joined(separator: ", ")
+              + String(format: "; longest step of the drag %.1f ms", dragStep * 1000))
         shareApp.confirmedStop()
-        try await at(ReadmeTake.seconds + 0.4)
+        try await at(ReadmeTake.opening + ReadmeTake.seconds + 0.4)
         try await recorder.finish()
+        finished = true
+
+        // The codec loop's still, after the take so its capture costs the take nothing: a share again, the loop on at once
+        // (as ⌘L does), the strip a full second in and its figures changing without their roll, and the window alone at
+        // the screen's scale, without its shadow.
+        policy.still = true
+        defer { policy.still = false }
+        let shares = sources.count
+        shareApp.startShare()
+        try await waitUntil("Share opens a session again") { self.sources.count > shares }
+        try pick(width: width, height: height)
+        let again = try XCTUnwrap(shareApp.share)
+        try await waitUntil("the share captures again") { again.state == .capturing }
+        Instantly.run { again.loopback = true }
+        try await pause(2.2)
+        try MotionReel.run("/usr/sbin/screencapture", ["-x", "-o", "-l", "\(window.window.windowNumber)",
+                                                       MotionReel.clips.appendingPathComponent("codec-loop.png").path])
         feed?.cancel(); feed = nil
         return ReadmeTake(movie: movie, recorded: recorded, kept: kept)
+    }
+
+    /// What, other than this process's windows, shows over `rect` (top left origin, points): the backdrop off the
+    /// screen (another Space, or a full-screen app, is showing), or the first window of another app above it there.
+    /// The recording's own clear windows over the whole screen, screencapture's and screencaptureui's, do not count,
+    /// nor does Notification Center's, also over the whole screen, which draws its banners and its panel at the right
+    /// edge, away from the take on the left. Nil while only Nítido can be recorded.
+    static func intruder(over rect: CGRect, backdrop: NSWindow) -> String? {
+        guard backdrop.isOnActiveSpace, backdrop.occlusionState.contains(.visible) else { return "another Space or a full-screen app" }
+        let own = ProcessInfo.processInfo.processIdentifier
+        let above = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow, .excludeDesktopElements], CGWindowID(backdrop.windowNumber))
+        for info in (above as? [[String: Any]]) ?? [] {
+            guard let pid = info[kCGWindowOwnerPID as String] as? Int32, pid != own,
+                  info[kCGWindowOwnerName as String] as? String != "screencapture",
+                  !["com.apple.screencaptureui", "com.apple.notificationcenterui"].contains(NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""),
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), frame.intersects(rect) else { continue }
+            return "a window of \(info[kCGWindowOwnerName as String] as? String ?? "another app") at \(frame)"
+        }
+        return nil
     }
 }
