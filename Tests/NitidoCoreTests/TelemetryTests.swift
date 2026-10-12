@@ -43,6 +43,26 @@ final class TelemetryTests: XCTestCase {
         XCTAssertEqual(s.latencySeries.count, 5)
     }
 
+    /// The sparkline's latency is bucketed in time, 50 ms a bucket on a fixed grid: the median of each, a gap where no
+    /// frame came, the newest bucket the one `now` falls in, and the same bucket the same at the next snapshot.
+    func testLatencyBucketsAreInTime() {
+        var t = Telemetry(now: 0)
+        for (ms, at) in [(30.0, 10.001), (50, 10.02), (40, 10.03), (70, 10.12), (60, 10.249)] { t.recordLatency(ms: ms, at: at) }
+        let s = t.snapshot(now: 10.249)
+        XCTAssertEqual(s.latencyBuckets.count, Snapshot.bucketCount)
+        XCTAssertEqual(s.newestBucket, 204)
+        let last = Array(s.latencyBuckets.suffix(5))
+        XCTAssertEqual(last[0], 40, "10.00 to 10.05: the median of 30, 50, 40")
+        XCTAssertNil(last[1], "10.05 to 10.10: no frame, a gap")
+        XCTAssertEqual(last[2], 70)
+        XCTAssertNil(last[3])
+        XCTAssertEqual(last[4], 60, "the bucket now falls in")
+        XCTAssertTrue(s.latencyBuckets.prefix(40).allSatisfy { $0 == nil })
+        let next = t.snapshot(now: 10.5)
+        XCTAssertEqual(next.newestBucket, 210)
+        XCTAssertEqual(next.latencyBuckets[Snapshot.bucketCount - 1 - 6], 60, "bucket 204, six buckets older now")
+    }
+
     func testEmptySnapshotHasNils() {
         let s = Telemetry(now: 0).snapshot(now: 0)
         XCTAssertNil(s.latencyMs); XCTAssertNil(s.rttMs); XCTAssertEqual(s.bitrateMbps, 0); XCTAssertEqual(s.captureFPS, 0)

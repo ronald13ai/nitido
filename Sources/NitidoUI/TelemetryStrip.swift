@@ -59,7 +59,7 @@ public struct TelemetryStrip: View {
                    number: Double(snapshot.droppedLastSecond), highlight: dropping)
             // A change of size or codec is structural, not a count: it crossfades.
             Figure(Label.size, value: resolution, unit: codec)
-            Sparkline(values: snapshot.latencySeries).frame(width: 80, height: 18)
+            Sparkline(buckets: snapshot.latencyBuckets, newest: snapshot.newestBucket).frame(width: 80, height: 18)
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(Theme.Colors.surface)
@@ -192,26 +192,96 @@ struct FigureHysteresis {
     }
 }
 
-/// Latency over the last two seconds, scaled to at least 120 ms so the baseline reads as calm, over a hairline at the
-/// 100 ms threshold so the gold line has a reference. An estimate below zero (a clock offset that is off) is drawn on
-/// the baseline, inside the strip; the figure says it as it is.
-private struct Sparkline: View {
-    let values: [Double]
-    var body: some View {
-        GeometryReader { geo in
-            let top = max(120, values.max() ?? 0)
-            Rectangle().fill(Theme.Colors.hairline).frame(height: 1)
-                .offset(y: (geo.size.height * (1 - CGFloat(100 / top))).rounded() - 0.5)
-            Path { path in
-                guard values.count > 1 else { return }
-                for (i, v) in values.enumerated() {
-                    let x = geo.size.width * CGFloat(i) / CGFloat(values.count - 1)
-                    let y = geo.size.height * (1 - CGFloat(min(max(v, 0), top) / top))
-                    i == 0 ? path.move(to: CGPoint(x: x, y: y)) : path.addLine(to: CGPoint(x: x, y: y))
-                }
-            }
-            .stroke(Theme.Colors.gold, style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
+/// Latency over the last two seconds (spec 11, M11), scaled to at least 120 ms so the baseline reads as calm, over a
+/// hairline at the 100 ms threshold so the gold line has a reference. Drawn in time, not by sample: 50 ms buckets on a
+/// fixed grid (`Snapshot.latencyBuckets`), so the line does not stretch with the frame rate and a pause shows as a gap.
+/// It slides: each snapshot (four a second) sets the line's new path, which holds the buckets come since the last one
+/// past the right edge, and Core Animation moves it left by that many buckets over the time they cover, linear, on the
+/// render server, so the newest bucket reaches the right edge as the next snapshot lands and the main thread touches it
+/// once a snapshot, never per frame. An estimate below zero (a clock offset that is off) is drawn on the baseline.
+/// Under Reduce Motion it steps at each snapshot.
+struct Sparkline: NSViewRepresentable {
+    let buckets: [Double?]
+    let newest: Int
+    func makeNSView(context: Context) -> SparklineView { SparklineView() }
+    func updateNSView(_ view: SparklineView, context: Context) {
+        view.update(buckets: buckets, newest: newest, sliding: !context.environment.reducesMotion)
+    }
+}
+
+final class SparklineView: NSView {
+    private let slider = CALayer()
+    private let line = CAShapeLayer()
+    private let hairline = CALayer()
+    /// The newest bucket the line was last drawn up to.
+    private(set) var shownNewest: Int?
+    /// The buckets the sparkline shows across its width.
+    nonisolated static let visible = 40
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        hairline.backgroundColor = NSColor(hex: Theme.Hex.hairline).cgColor
+        line.fillColor = nil
+        line.strokeColor = Theme.CanvasColors.gold.cgColor
+        line.lineWidth = 1
+        line.lineCap = .round
+        line.lineJoin = .round
+        slider.addSublayer(line)
+        layer?.addSublayer(hairline)
+        layer?.addSublayer(slider)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        slider.frame = bounds
+        line.frame = bounds
+        CATransaction.commit()
+    }
+
+    /// How far the line slides for a snapshot `advance` buckets after the last, and over how long.
+    nonisolated static func slide(advance: Int, bucketWidth: CGFloat) -> (distance: CGFloat, duration: Double) {
+        (CGFloat(advance) * bucketWidth, Double(advance) * Snapshot.bucketWidth)
+    }
+
+    func update(buckets: [Double?], newest: Int, sliding: Bool) {
+        guard newest != shownNewest, !buckets.isEmpty else { return }
+        let w = max(bounds.width, 1), h = max(bounds.height, 1)
+        let bucketWidth = w / CGFloat(Self.visible - 1)
+        let advance = sliding ? shownNewest.map { min(max(newest - $0, 0), buckets.count - Self.visible) } ?? 0 : 0
+        shownNewest = newest
+        let shownValues = buckets.suffix(Self.visible + advance).compactMap { $0 }
+        let top = max(120, shownValues.max() ?? 0)
+        // At no translation the bucket the line was last drawn up to sits at the right edge, where the last slide left it;
+        // the line then slides left by the buckets come since.
+        let path = CGMutablePath()
+        var drawing = false
+        for (index, value) in buckets.enumerated() {
+            let bucket = newest - (buckets.count - 1) + index
+            let x = w - CGFloat(newest - advance - bucket) * bucketWidth
+            guard let value, x >= -bucketWidth else { drawing = false; continue }
+            let y = h * (1 - CGFloat(min(max(value, 0), top) / top))
+            if drawing { path.addLine(to: CGPoint(x: x, y: y)) } else { path.move(to: CGPoint(x: x, y: y)); drawing = true }
         }
+        let slide = Self.slide(advance: advance, bucketWidth: bucketWidth)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        line.path = path
+        hairline.frame = CGRect(x: 0, y: (h * (1 - CGFloat(100 / top))).rounded() - 0.5, width: w, height: 1)
+        slider.removeAnimation(forKey: "slide")
+        slider.transform = CATransform3DMakeTranslation(-slide.distance, 0, 0)
+        CATransaction.commit()
+        guard slide.distance > 0 else { return }
+        let animation = CABasicAnimation(keyPath: "transform.translation.x")
+        animation.fromValue = 0
+        animation.toValue = -slide.distance
+        animation.duration = slide.duration
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        slider.add(animation, forKey: "slide")
     }
 }
 
