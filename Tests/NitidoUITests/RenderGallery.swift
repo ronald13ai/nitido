@@ -950,10 +950,14 @@ private final class ReelMarker {
     func close() { window.orderOut(nil) }
 }
 
-/// Reduce Motion for the reel's windows, switched for the variants; and, for a still, no animation at all.
+/// Reduce Motion for the reel's windows, switched for the variants; the figures without their roll, for the README's
+/// GIF; and, for a still, no animation at all.
 @MainActor @Observable
 private final class ReelPolicy {
     var reduceMotion = false
+    /// False for the README's take (`MotionPolicy.rollsFigures`): at 15 fps its GIF caught the strip's figures and the
+    /// loop's quality halfway through their roll, two glyphs in one place, and "raw" and "HEVC" over each other.
+    var rollsFigures = true
     /// Every change at once (the views' own `.animation` modifiers held off), so a still never catches a figure of the
     /// strip halfway through its roll, two digits over each other: the README's codec loop still did.
     var still = false
@@ -966,7 +970,7 @@ private struct ReelRoot: View {
     var body: some View {
         let still = policy.still
         RootView(app: app)
-            .environment(\.motionPolicy, MotionPolicy(reduceMotion: policy.reduceMotion))
+            .environment(\.motionPolicy, MotionPolicy(reduceMotion: policy.reduceMotion, rollsFigures: policy.rollsFigures))
             .background(Theme.Colors.background)
             .environment(\.colorScheme, .dark)
             .transaction { if still { $0.disablesAnimations = true } }
@@ -1697,7 +1701,8 @@ private struct ReelMark {
 /// divider dragged; both strokes fading; the quality lowered; the loop off; Stop, back to Welcome. The press, the stroke
 /// and the drag are mouse events sent to the window, and a stand-in arrow is drawn where they land (screencapture leaves
 /// the real pointer out); the switch and the slider take the values their bindings would. The system picker never
-/// opens, nothing waits on a person, and the recording covers only Nítido's window on a plain backdrop. Skipped unless
+/// opens, nothing waits on a person, and the recording covers only Nítido's window on a plain backdrop. The strip's
+/// figures and the loop's quality change at once, without their roll (`ReelPolicy.rollsFigures`). Skipped unless
 /// NITIDO_RENDER=1 and NITIDO_README=1:
 ///
 ///     NITIDO_RENDER=1 NITIDO_README=1 NITIDO_MOTION_DIR=/some/dir swift test --filter RenderGallery/testReadmeReel
@@ -1823,6 +1828,8 @@ extension ReelDirector {
     func playReadme() async throws -> ReadmeTake {
         // The picture: 1440×900 px at 2x, so 720×450 pt and the window 720×527 with its title bar and strip.
         let width = 1440, height = 900
+        policy.rollsFigures = false
+        defer { policy.rollsFigures = true }
         let corner = CGPoint(x: 40, y: 82)
         let kept = CGRect(x: corner.x - 40, y: corner.y - 26, width: 720 + 80, height: 527 + 26 + 44)
         let recorded = CGRect(x: kept.minX, y: kept.minY - 26, width: kept.width, height: kept.height + 26)
@@ -1967,37 +1974,46 @@ extension ReelDirector {
         try await trace(over: 0.8, loop)
         window.send(.leftMouseUp, at: tip)
 
-        // 8.3 s: the viewer underlines "Open questions" in cream; its pointer, a gold dot with its name, leads.
+        // 8.3 s: the viewer ticks "Open questions" in cream, just past the heading; its pointer, a gold dot with its
+        // name 12 pt to its right, leads. The pointer comes along the heading's line from the right and the tick keeps to
+        // it (the heading's line is 362 to 396 px, the line above ends 311 px down, the item below starts 416), so the
+        // name always lies on blank paper: an underline put it between the heading and the line under it, over both,
+        // which read as a collision.
         let heading = NSAttributedString(string: "Open questions", attributes: [.font: NSFont.systemFont(ofSize: 28, weight: .semibold)]).size().width
-        let line = (x0: doc.x - 6, x1: doc.x + heading + 10, y: doc.y + 4 * 40 + 40)
-        func underline(_ u: Double) -> StrokePoint {
-            let x = line.x0 + (line.x1 - line.x0) * u, y = line.y + 3 * sin(u * .pi * 1.5) - 4 * u
-            return StrokePoint(x: Float(x / Double(width)), y: Float(y / Double(height)), pressure: 1, tMs: UInt32(u * 700))
+        let row = doc.y + 4 * 40
+        let a = CGPoint(x: doc.x + heading + 18, y: row), b = CGPoint(x: a.x + 20, y: row + 30), c = CGPoint(x: b.x + 58, y: row - 24)
+        func normalized(_ p: CGPoint) -> (x: Float, y: Float) { (Float(p.x / CGFloat(width)), Float(p.y / CGFloat(height))) }
+        func tick(_ u: Double) -> StrokePoint {
+            // Down to the foot over the first third, then up and out with a slight bow, as a hand ticks.
+            let split = 0.31
+            let p: CGPoint
+            if u < split {
+                let k = u / split
+                p = CGPoint(x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k)
+            } else {
+                let k = (u - split) / (1 - split)
+                p = CGPoint(x: b.x + (c.x - b.x) * k, y: b.y + (c.y - b.y) * k - 6 * sin(k * .pi))
+            }
+            let n = normalized(p)
+            return StrokePoint(x: n.x, y: n.y, pressure: 1, tMs: UInt32(u * 480))
         }
         let theirs = Task { @MainActor in
+            let from = normalized(CGPoint(x: a.x + 240, y: row + 14)), to = normalized(a)
+            let arrive = Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 1)
             for i in 0...20 {
-                let u = Double(i) / 20
-                let p = underline(0)
-                viewer.ink.cursorMoved(Cursor(x: p.x - Float(0.08 * (1 - u)), y: p.y + Float(0.10 * (1 - u)), visible: true))
+                let k = Float(arrive.progress(at: Double(i) / 20))
+                viewer.ink.cursorMoved(Cursor(x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k, visible: true))
                 try? await Task.sleep(for: .milliseconds(16))
             }
-            let id = viewer.ink.beginLocal(underline(0))
-            for i in 1...42 {
-                let p = underline(Double(i) / 42)
+            let id = viewer.ink.beginLocal(tick(0))
+            for i in 1...30 {
+                let p = tick(Double(i) / 30)
                 viewer.ink.appendLocal(id, [p])
                 viewer.ink.cursorMoved(Cursor(x: p.x, y: p.y, visible: true))
                 try? await Task.sleep(for: .milliseconds(16))
             }
             viewer.ink.endLocal(id)
-            // The pointer comes to rest on the heading's line, past its end, so its name lies on blank paper: at the
-            // underline's height the label half covers the heading and the line under it, which reads as a collision.
-            let end = underline(1), rest = (x: Float(line.x1 + 40) / Float(width), y: Float(doc.y + 4 * 40 + 17) / Float(height))
-            for i in 1...12 {
-                let k = Float(Theme.Motion.Curve(Theme.Motion.systemEaseInOut, 1).progress(at: Double(i) / 12))
-                viewer.ink.cursorMoved(Cursor(x: end.x + (rest.x - end.x) * k, y: end.y + (rest.y - end.y) * k, visible: true))
-                try? await Task.sleep(for: .milliseconds(16))
-            }
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(for: .milliseconds(700))
             viewer.ink.cursorMoved(Cursor(x: 0, y: 0, visible: false))
         }
 
