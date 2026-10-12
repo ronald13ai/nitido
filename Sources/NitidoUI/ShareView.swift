@@ -75,7 +75,7 @@ public struct ShareView: View {
                 // The picture fades in by a cover of the background colour, never by its own opacity or a scale, from
                 // its first frame on screen.
                 if model.pixelSize != .zero {
-                    PictureCover(shownAt: model.firstFrameAt, waiting: since != nil && model.firstFrameAt == nil)
+                    PictureCover(shownAt: model.firstFrameAt, waiting: since != nil && model.firstFrameAt == nil, since: since)
                         .frame(width: pointSize.width, height: pointSize.height)
                         .padding(.leading, pictureOrigin.x).padding(.top, pictureOrigin.y)
                         .id(since)

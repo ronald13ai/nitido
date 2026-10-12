@@ -303,7 +303,7 @@ public struct ViewView: View {
                         .accessibilityAddTraits(.isImage)
                     InkOverlay(controller: model.ink).frame(width: size.width, height: size.height).accessibilityHidden(true)
                         .transaction { $0.animation = nil }
-                    PictureCover(shownAt: model.firstFrameAt, waiting: since != nil && model.firstFrameAt == nil)
+                    PictureCover(shownAt: model.firstFrameAt, waiting: since != nil && model.firstFrameAt == nil, since: since)
                         .frame(width: size.width, height: size.height).id(since)
                 }
                 .frame(width: size.width, height: size.height, alignment: .topLeading)

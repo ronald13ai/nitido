@@ -207,6 +207,9 @@ public enum Theme {
         /// The picture's entrance (M6, M7): a cover of the background colour over it fades away; the picture itself
         /// never scales or fades.
         public static let coverDelay: Double = 0.04
+        /// The longest the cover waits for the first frame: a second after the capture began or the link was ready, it
+        /// fades on its own, so no path that misses the frame shown leaves the picture covered.
+        public static let coverBackstop: Double = 1.0
         /// How dark the last frame goes: 20 % while a link reconnects (it reads as paused, the document stays
         /// legible), 55 % under a failure card (the card must dominate).
         public static let reconnectDim: Double = 0.20

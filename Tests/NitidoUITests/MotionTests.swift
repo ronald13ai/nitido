@@ -427,6 +427,19 @@ final class NavigationMotionTests: XCTestCase {
         XCTAssertFalse(PictureCover.isLate(shownAt: 10, now: 10.25))
         XCTAssertTrue(PictureCover.isLate(shownAt: 10, now: 10.27), "after 40 + 220 ms: not there")
     }
+
+    /// The backstop (spec 11, M6 and M7, added 2026-10-12 after review): a cover still waiting for the first frame fades on
+    /// its own a second after the stage began, whatever happened to that frame; one built later waits only what is left,
+    /// and one built after the backstop's fade would have ended is not there at all.
+    func testTheCoverNeverWaitsMoreThanASecond() {
+        XCTAssertEqual(Theme.Motion.coverBackstop, 1)
+        XCTAssertEqual(PictureCover.backstopDelay(since: 10, now: 10), 1, accuracy: 1e-9, "built as the stage begins")
+        XCTAssertEqual(PictureCover.backstopDelay(since: 10, now: 10.4), 0.6, accuracy: 1e-9, "built 400 ms in")
+        XCTAssertEqual(PictureCover.backstopDelay(since: 10, now: 11.5), 0, "past the backstop: at once")
+        XCTAssertFalse(PictureCover.isLate(waitingSince: 10, now: 11.1), "still waiting 1.1 s in: it fades")
+        XCTAssertTrue(PictureCover.isLate(waitingSince: 10, now: 11.23), "after 1 s + 220 ms: not there")
+        XCTAssertFalse(PictureCover.isLate(waitingSince: nil, now: 11.23))
+    }
 }
 
 final class ListAndNoticeMotionTests: XCTestCase {

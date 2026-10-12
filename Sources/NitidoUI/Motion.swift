@@ -383,19 +383,24 @@ struct RevealLayout: Layout {
 /// compositing never changes, and the picture is never scaled. Timed from the first frame shown, not from the model's
 /// event (amended 2026-10-12): the share window's first render comes some 86 ms after the capture starts on an M5, more on
 /// a slower Mac, and the viewer's first keyframe a round trip after its link is ready, so a cover timed from the event
-/// faded over an empty surface, or was skipped, and the picture popped in. Gone once faded; built after its fade would
-/// have ended (a picture shown again), it is not there at all.
+/// faded over an empty surface, or was skipped, and the picture popped in. Should no frame be reported shown, it fades on
+/// its own `coverBackstop` (1 s) after the stage began (added 2026-10-12 after review: a first frame that reached the
+/// screen only as a redraw once left a still picture covered). Gone once faded; built after its fade would have ended (a
+/// picture shown again), it is not there at all.
 struct PictureCover: View {
     /// When the picture's first frame reached the screen; nil while it has not, or when there is no stage under way.
     let shownAt: CFTimeInterval?
-    /// The picture's stage is under way and its first frame has not reached the screen yet: opaque.
+    /// The picture's stage is under way and its first frame has not reached the screen yet: opaque, for a second at most.
     let waiting: Bool
+    /// When the picture's stage began (the capture, the link ready), which the backstop counts from.
+    let since: CFTimeInterval?
     @State private var faded: Bool
     @State private var removed: Bool
 
-    init(shownAt: CFTimeInterval?, waiting: Bool) {
-        self.shownAt = shownAt; self.waiting = waiting
-        let late = !waiting && Self.isLate(shownAt: shownAt, now: CACurrentMediaTime())
+    init(shownAt: CFTimeInterval?, waiting: Bool, since: CFTimeInterval?) {
+        self.shownAt = shownAt; self.waiting = waiting; self.since = since
+        let now = CACurrentMediaTime()
+        let late = waiting ? Self.isLate(waitingSince: since, now: now) : Self.isLate(shownAt: shownAt, now: now)
         _faded = State(initialValue: late)
         _removed = State(initialValue: late)
     }
@@ -407,20 +412,43 @@ struct PictureCover: View {
         return now - shownAt > Theme.Motion.coverDelay + Theme.Motion.enter.duration
     }
 
+    /// A cover built `now`, still waiting for the first frame of a stage that began at `since`, has nothing left to do
+    /// once its backstop's fade would have ended.
+    nonisolated static func isLate(waitingSince since: CFTimeInterval?, now: CFTimeInterval) -> Bool {
+        guard let since else { return false }
+        return now - since > Theme.Motion.coverBackstop + Theme.Motion.enter.duration
+    }
+
+    /// How long a cover still waiting `now` waits before it fades on its own: what is left of the backstop since the
+    /// stage began.
+    nonisolated static func backstopDelay(since: CFTimeInterval?, now: CFTimeInterval) -> Double {
+        Entrance.remainingDelay(Theme.Motion.coverBackstop, since: since, now: now)
+    }
+
     var body: some View {
         if !removed {
             Theme.Colors.background
                 .opacity(faded ? 0 : 1)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
-                .onAppear { if !waiting { fade() } }
-                .onChange(of: waiting) { _, now in if !now { fade() } }
+                .onAppear { if !waiting { fadeFromTheFirstFrame() } }
+                .onChange(of: waiting) { _, now in if !now { fadeFromTheFirstFrame() } }
+                // The backstop: cancelled when the first frame comes (`waiting` changes) or the cover goes.
+                .task(id: waiting) {
+                    guard waiting else { return }
+                    try? await Task.sleep(for: .seconds(Self.backstopDelay(since: since, now: CACurrentMediaTime())))
+                    guard !Task.isCancelled else { return }
+                    fade(after: 0)
+                }
         }
     }
 
-    private func fade() {
+    private func fadeFromTheFirstFrame() {
+        fade(after: Entrance.remainingDelay(Theme.Motion.coverDelay, since: shownAt, now: CACurrentMediaTime()))
+    }
+
+    private func fade(after wait: Double) {
         guard !faded else { return }
-        let wait = Entrance.remainingDelay(Theme.Motion.coverDelay, since: shownAt, now: CACurrentMediaTime())
         withAnimation(Theme.Motion.enter.animation(after: wait)) { faded = true } completion: { removed = true }
     }
 }
